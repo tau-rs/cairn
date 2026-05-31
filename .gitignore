@@ -1,10 +1,6 @@
 # Rust
 /target
 **/*.rs.bk
-Cargo.lock.bak
-
-# Generated TypeScript bindings build artifacts (kept as committed output where relevant)
-# (decide per-package later)
 
 # OS / editor
 .DS_Store

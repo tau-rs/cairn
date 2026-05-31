@@ -13,7 +13,8 @@ jobs:
           components: rustfmt, clippy
       - name: fmt
         run: cargo fmt --all -- --check
+      # --locked guards the MSRV-sensitive Cargo.lock (git2 -> url -> idna/icu pins)
       - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: test
-        run: cargo test --workspace --all-targets
+        run: cargo test --locked --workspace --all-targets
