@@ -3,3 +3,6 @@
 
 pub mod note;
 pub use note::{Note, NotePath, NotePathError};
+
+pub mod link;
+pub use link::{extract_links, LinkTarget};
