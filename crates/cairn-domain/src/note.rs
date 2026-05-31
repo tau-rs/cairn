@@ -62,10 +62,18 @@ impl Note {
             if let Some(end) = rest.find("\n---\n") {
                 let fm = rest[..end].to_string();
                 let body = rest[end + "\n---\n".len()..].to_string();
-                return Self { path, frontmatter: Some(fm), body };
+                return Self {
+                    path,
+                    frontmatter: Some(fm),
+                    body,
+                };
             }
         }
-        Self { path, frontmatter: None, body: raw.to_string() }
+        Self {
+            path,
+            frontmatter: None,
+            body: raw.to_string(),
+        }
     }
 }
 
@@ -82,7 +90,10 @@ mod tests {
 
     #[test]
     fn normalizes_backslashes() {
-        assert_eq!(NotePath::new(r"sub\note.md").unwrap().as_str(), "sub/note.md");
+        assert_eq!(
+            NotePath::new(r"sub\note.md").unwrap().as_str(),
+            "sub/note.md"
+        );
     }
 
     #[test]

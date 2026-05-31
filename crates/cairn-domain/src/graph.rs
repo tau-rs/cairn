@@ -41,7 +41,10 @@ impl Graph {
             targets.sort();
             targets.dedup();
             for t in &targets {
-                backward.entry(t.clone()).or_default().push(note.path.clone());
+                backward
+                    .entry(t.clone())
+                    .or_default()
+                    .push(note.path.clone());
             }
             forward.insert(note.path.clone(), targets);
         }
@@ -68,15 +71,16 @@ mod tests {
     use super::*;
 
     fn note(path: &str, body: &str) -> Note {
-        Note { path: NotePath::new(path).unwrap(), frontmatter: None, body: body.into() }
+        Note {
+            path: NotePath::new(path).unwrap(),
+            frontmatter: None,
+            body: body.into(),
+        }
     }
 
     #[test]
     fn resolves_forward_and_backlinks_by_stem() {
-        let notes = vec![
-            note("a.md", "links to [[b]]"),
-            note("dir/b.md", "no links"),
-        ];
+        let notes = vec![note("a.md", "links to [[b]]"), note("dir/b.md", "no links")];
         let g = Graph::build(&notes);
         let a = NotePath::new("a.md").unwrap();
         let b = NotePath::new("dir/b.md").unwrap();
