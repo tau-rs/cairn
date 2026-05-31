@@ -43,8 +43,11 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
     }
 
     fn load_all_notes(&self) -> Result<Vec<Note>, PortError> {
-        let mut notes = Vec::new();
-        for path in self.store.list()? {
+        // NOTE: loads and parses every note on each call; acceptable while the
+        // index is in-memory and reindex is full.
+        let paths = self.store.list()?;
+        let mut notes = Vec::with_capacity(paths.len());
+        for path in paths {
             let raw = self.store.read(&path)?;
             notes.push(Note::parse(path, &raw));
         }
@@ -52,6 +55,10 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
     }
 
     /// Rebuild the search index from the current store contents.
+    ///
+    /// Intentionally public: callers such as the CLI on startup (or a future
+    /// full-rescan command) invoke it to sync the index with notes changed
+    /// outside the engine. Emits [`Event::Reindexed`].
     ///
     /// # Errors
     /// Returns [`PortError`] if a port operation fails.
@@ -63,6 +70,10 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
     }
 
     /// Create or overwrite a note and refresh the index.
+    ///
+    /// `NoteChanged` is emitted after a successful write, before the index is
+    /// rebuilt; if the subsequent reindex fails, that event has already been
+    /// emitted. This is acceptable for the walking skeleton.
     ///
     /// # Errors
     /// Returns [`PortError`] if a port operation fails.
@@ -86,6 +97,9 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
     }
 
     /// Delete a note and refresh the index.
+    ///
+    /// `NoteDeleted` is emitted after a successful delete, before the index is
+    /// rebuilt (same tradeoff as [`Engine::write_note`]).
     ///
     /// # Errors
     /// Returns [`PortError`] if a port operation fails.
@@ -153,11 +167,39 @@ mod tests {
         eng.write_note(&b, "target note", &mut events).unwrap();
 
         assert_eq!(
+            events,
+            vec![
+                Event::NoteChanged(a.clone()),
+                Event::Reindexed(1),
+                Event::NoteChanged(b.clone()),
+                Event::Reindexed(2),
+            ]
+        );
+
+        assert_eq!(
             eng.search("target").unwrap(),
             vec![SearchHit { path: b.clone() }]
         );
         assert_eq!(eng.backlinks(&b).unwrap(), vec![a]);
-        assert!(events.contains(&Event::NoteChanged(b)));
+    }
+
+    #[test]
+    fn delete_removes_from_search_and_backlinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut events = Vec::new();
+
+        let a = NotePath::new("a.md").unwrap();
+        let b = NotePath::new("b.md").unwrap();
+        eng.write_note(&a, "I link to [[b]]", &mut events).unwrap();
+        eng.write_note(&b, "target note", &mut events).unwrap();
+
+        eng.delete_note(&b, &mut events).unwrap();
+
+        assert!(events.contains(&Event::NoteDeleted(b.clone())));
+        assert!(eng.search("target").unwrap().is_empty());
+        // a still links to [[b]], but b no longer exists so it resolves to nothing.
+        assert!(eng.backlinks(&b).unwrap().is_empty());
     }
 
     #[test]
