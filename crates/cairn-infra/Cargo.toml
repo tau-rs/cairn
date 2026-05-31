@@ -1,0 +1,17 @@
+[package]
+name = "cairn-infra"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+cairn-domain = { path = "../cairn-domain" }
+cairn-ports = { path = "../cairn-ports" }
+git2 = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

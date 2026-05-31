@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/cairn-domain",
     "crates/cairn-ports",
+    "crates/cairn-infra",
 ]
 
 [workspace.package]
