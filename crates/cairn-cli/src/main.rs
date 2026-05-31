@@ -59,14 +59,25 @@ fn build_engine(root: &Path) -> Result<Engine<LocalFsStore, InMemoryIndex, GitVc
 
 fn run() -> Result<(), String> {
     let cli = Cli::parse();
+    let root = cli.cairn;
     let mut events: Vec<Event> = Vec::new();
-    let mut engine = build_engine(&cli.cairn)?;
+
+    // Only `init` may create a new cairn. Every other command requires an
+    // existing one, so we never silently `git init` in the user's directory.
+    if !matches!(cli.command, Command::Init) && !root.join(".git").is_dir() {
+        return Err(format!(
+            "not a cairn at {0} (run `cairn --cairn {0} init` first)",
+            root.display()
+        ));
+    }
+
+    let mut engine = build_engine(&root)?;
     // Always reindex on startup so queries see current content.
     engine.reindex(&mut events).map_err(|e| e.to_string())?;
 
     match cli.command {
         Command::Init => {
-            println!("initialized cairn at {}", cli.cairn.display());
+            println!("initialized cairn at {}", root.display());
         }
         Command::Write { path, contents } => {
             let p = NotePath::new(&path).map_err(|e| e.to_string())?;
