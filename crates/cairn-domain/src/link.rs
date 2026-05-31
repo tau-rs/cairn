@@ -7,6 +7,7 @@ pub struct LinkTarget(pub String);
 
 /// Extract all `[[...]]` link targets from `body`, in order of appearance,
 /// including duplicates. An alias form `[[target|alias]]` yields `target`.
+#[must_use]
 pub fn extract_links(body: &str) -> Vec<LinkTarget> {
     let mut out = Vec::new();
     let bytes = body.as_bytes();

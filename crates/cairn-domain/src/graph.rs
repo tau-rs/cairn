@@ -26,7 +26,10 @@ fn stem(path: &NotePath) -> &str {
 impl Graph {
     /// Build a graph from all notes. Targets are resolved to a note whose
     /// stem equals the target text; unresolved targets are dropped.
+    #[must_use]
     pub fn build(notes: &[Note]) -> Self {
+        // Last note wins when two notes share a stem; callers should keep
+        // note stems unique within a cairn.
         let by_stem: BTreeMap<&str, &NotePath> =
             notes.iter().map(|n| (stem(&n.path), &n.path)).collect();
 
@@ -36,7 +39,7 @@ impl Graph {
         for note in notes {
             let mut targets: Vec<NotePath> = extract_links(&note.body)
                 .into_iter()
-                .filter_map(|t| by_stem.get(t.0.as_str()).map(|p| (*p).clone()))
+                .filter_map(|t| by_stem.get(t.0.as_str()).copied().cloned())
                 .collect();
             targets.sort();
             targets.dedup();
@@ -56,13 +59,15 @@ impl Graph {
     }
 
     /// Notes that `path` links to.
+    #[must_use]
     pub fn forward_links(&self, path: &NotePath) -> &[NotePath] {
-        self.forward.get(path).map(Vec::as_slice).unwrap_or(&[])
+        self.forward.get(path).map_or(&[], Vec::as_slice)
     }
 
     /// Notes that link to `path`.
+    #[must_use]
     pub fn backlinks(&self, path: &NotePath) -> &[NotePath] {
-        self.backward.get(path).map(Vec::as_slice).unwrap_or(&[])
+        self.backward.get(path).map_or(&[], Vec::as_slice)
     }
 }
 

@@ -8,6 +8,10 @@ pub struct NotePath(String);
 impl NotePath {
     /// Build a `NotePath`, normalizing backslashes and rejecting absolute
     /// or parent-escaping paths.
+    ///
+    /// # Errors
+    /// Returns [`NotePathError`] if the path is absolute, contains a `..`
+    /// segment, or is empty.
     pub fn new(raw: &str) -> Result<Self, NotePathError> {
         let norm = raw.replace('\\', "/");
         if norm.starts_with('/') {
@@ -23,6 +27,7 @@ impl NotePath {
     }
 
     /// The path as a string slice.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -57,8 +62,18 @@ pub struct Note {
 impl Note {
     /// Parse raw file contents into a [`Note`]. A leading `---\n ... \n---\n`
     /// block is captured as `frontmatter`; everything else is `body`.
+    #[must_use]
     pub fn parse(path: NotePath, raw: &str) -> Self {
         if let Some(rest) = raw.strip_prefix("---\n") {
+            // The closing fence is a line containing only `---`. It can
+            // appear immediately (empty frontmatter) or after YAML lines.
+            if let Some(body) = rest.strip_prefix("---\n") {
+                return Self {
+                    path,
+                    frontmatter: Some(String::new()),
+                    body: body.to_string(),
+                };
+            }
             if let Some(end) = rest.find("\n---\n") {
                 let fm = rest[..end].to_string();
                 let body = rest[end + "\n---\n".len()..].to_string();
@@ -110,5 +125,13 @@ mod tests {
         let n = Note::parse(p, "Just text");
         assert_eq!(n.frontmatter, None);
         assert_eq!(n.body, "Just text");
+    }
+
+    #[test]
+    fn parses_empty_frontmatter_block() {
+        let p = NotePath::new("a.md").unwrap();
+        let n = Note::parse(p, "---\n---\nbody");
+        assert_eq!(n.frontmatter.as_deref(), Some(""));
+        assert_eq!(n.body, "body");
     }
 }
