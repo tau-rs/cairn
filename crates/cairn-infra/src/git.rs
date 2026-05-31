@@ -18,8 +18,12 @@ impl GitVcs {
     /// Returns [`PortError`] if the repository cannot be opened or created.
     pub fn open_or_init(root: impl AsRef<Path>) -> Result<Self, PortError> {
         let root = root.as_ref().to_path_buf();
-        if Repository::open(&root).is_err() {
-            Repository::init(&root).map_err(|e| PortError::Adapter(e.to_string()))?;
+        match Repository::open(&root) {
+            Ok(_) => {}
+            Err(e) if e.code() == git2::ErrorCode::NotFound => {
+                Repository::init(&root).map_err(|e| PortError::Adapter(e.to_string()))?;
+            }
+            Err(e) => return Err(PortError::Adapter(e.to_string())),
         }
         Ok(Self { root })
     }
@@ -65,12 +69,29 @@ mod tests {
     use std::fs;
 
     #[test]
+    fn delete_then_commit_empties_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("a.md"), "hi").unwrap();
+        let mut vcs = GitVcs::open_or_init(tmp.path()).unwrap();
+        vcs.commit_all("add a.md").unwrap();
+
+        // Removing the file on disk and committing must stage the removal.
+        fs::remove_file(tmp.path().join("a.md")).unwrap();
+        vcs.commit_all("remove a.md").unwrap();
+
+        let repo = Repository::open(tmp.path()).unwrap();
+        let tree = repo.head().unwrap().peel_to_tree().unwrap();
+        assert_eq!(tree.len(), 0);
+    }
+
+    #[test]
     fn init_and_commit_a_file() {
         let tmp = tempfile::tempdir().unwrap();
         fs::write(tmp.path().join("a.md"), "hi").unwrap();
         let mut vcs = GitVcs::open_or_init(tmp.path()).unwrap();
         let id = vcs.commit_all("first").unwrap();
         assert_eq!(id.len(), 7);
+        // A second commit with no changes still succeeds (empty commit).
         let id2 = vcs.commit_all("second").unwrap();
         assert_eq!(id2.len(), 7);
     }

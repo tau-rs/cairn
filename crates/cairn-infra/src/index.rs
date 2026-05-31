@@ -48,6 +48,26 @@ mod tests {
     }
 
     #[test]
+    fn matches_by_path_and_sorts_results() {
+        let mut idx = InMemoryIndex::default();
+        idx.reindex(&[note("zeta.md", "alpha note"), note("alpha.md", "zeta body")])
+            .unwrap();
+        // "alpha" matches zeta.md by body and alpha.md by path; sorted by path.
+        let hits = idx.search("alpha").unwrap();
+        assert_eq!(
+            hits,
+            vec![
+                SearchHit {
+                    path: NotePath::new("alpha.md").unwrap()
+                },
+                SearchHit {
+                    path: NotePath::new("zeta.md").unwrap()
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn finds_by_body_substring_case_insensitive() {
         let mut idx = InMemoryIndex::default();
         idx.reindex(&[note("a.md", "Hello World"), note("b.md", "other")])

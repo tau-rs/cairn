@@ -31,7 +31,11 @@ impl LocalFsStore {
         for entry in fs::read_dir(dir).map_err(|e| PortError::Adapter(e.to_string()))? {
             let entry = entry.map_err(|e| PortError::Adapter(e.to_string()))?;
             let path = entry.path();
-            if path.is_dir() {
+            if entry
+                .file_type()
+                .map_err(|e| PortError::Adapter(e.to_string()))?
+                .is_dir()
+            {
                 if path.file_name().is_some_and(|n| n == ".git") {
                     continue;
                 }
@@ -40,8 +44,10 @@ impl LocalFsStore {
                 let rel = path
                     .strip_prefix(&self.root)
                     .map_err(|e| PortError::Adapter(e.to_string()))?;
-                let rel = rel.to_string_lossy().replace('\\', "/");
-                out.push(NotePath::new(&rel).map_err(|e| PortError::Adapter(e.to_string()))?);
+                let rel = rel.to_str().ok_or_else(|| {
+                    PortError::Adapter(format!("non-UTF-8 path: {}", rel.display()))
+                })?;
+                out.push(NotePath::new(rel).map_err(|e| PortError::Adapter(e.to_string()))?);
             }
         }
         Ok(())
@@ -63,7 +69,13 @@ impl VaultStore for LocalFsStore {
     }
 
     fn delete(&mut self, path: &NotePath) -> Result<(), PortError> {
-        fs::remove_file(self.full(path)).map_err(|e| PortError::Adapter(e.to_string()))
+        fs::remove_file(self.full(path)).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                PortError::NotFound(path.as_str().to_string())
+            } else {
+                PortError::Adapter(e.to_string())
+            }
+        })
     }
 
     fn list(&self) -> Result<Vec<NotePath>, PortError> {
