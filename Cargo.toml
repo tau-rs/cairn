@@ -5,6 +5,7 @@ members = [
     "crates/cairn-ports",
     "crates/cairn-infra",
     "crates/cairn-app",
+    "crates/cairn-contract",
 ]
 
 [workspace.package]
