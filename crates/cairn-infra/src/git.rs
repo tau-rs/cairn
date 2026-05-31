@@ -28,13 +28,21 @@ impl GitVcs {
 impl Vcs for GitVcs {
     fn commit_all(&mut self, message: &str) -> Result<String, PortError> {
         let repo = Repository::open(&self.root).map_err(|e| PortError::Adapter(e.to_string()))?;
-        let mut index = repo.index().map_err(|e| PortError::Adapter(e.to_string()))?;
+        let mut index = repo
+            .index()
+            .map_err(|e| PortError::Adapter(e.to_string()))?;
         index
             .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
             .map_err(|e| PortError::Adapter(e.to_string()))?;
-        index.write().map_err(|e| PortError::Adapter(e.to_string()))?;
-        let tree_id = index.write_tree().map_err(|e| PortError::Adapter(e.to_string()))?;
-        let tree = repo.find_tree(tree_id).map_err(|e| PortError::Adapter(e.to_string()))?;
+        index
+            .write()
+            .map_err(|e| PortError::Adapter(e.to_string()))?;
+        let tree_id = index
+            .write_tree()
+            .map_err(|e| PortError::Adapter(e.to_string()))?;
+        let tree = repo
+            .find_tree(tree_id)
+            .map_err(|e| PortError::Adapter(e.to_string()))?;
         let sig = Signature::now("Cairn", "cairn@localhost")
             .map_err(|e| PortError::Adapter(e.to_string()))?;
 

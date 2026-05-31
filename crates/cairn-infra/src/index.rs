@@ -23,10 +23,11 @@ impl SearchIndex for InMemoryIndex {
             .docs
             .iter()
             .filter(|n| {
-                n.body.to_lowercase().contains(&q)
-                    || n.path.as_str().to_lowercase().contains(&q)
+                n.body.to_lowercase().contains(&q) || n.path.as_str().to_lowercase().contains(&q)
             })
-            .map(|n| SearchHit { path: n.path.clone() })
+            .map(|n| SearchHit {
+                path: n.path.clone(),
+            })
             .collect();
         hits.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(hits)
@@ -39,14 +40,24 @@ mod tests {
     use cairn_domain::NotePath;
 
     fn note(path: &str, body: &str) -> Note {
-        Note { path: NotePath::new(path).unwrap(), frontmatter: None, body: body.into() }
+        Note {
+            path: NotePath::new(path).unwrap(),
+            frontmatter: None,
+            body: body.into(),
+        }
     }
 
     #[test]
     fn finds_by_body_substring_case_insensitive() {
         let mut idx = InMemoryIndex::default();
-        idx.reindex(&[note("a.md", "Hello World"), note("b.md", "other")]).unwrap();
+        idx.reindex(&[note("a.md", "Hello World"), note("b.md", "other")])
+            .unwrap();
         let hits = idx.search("hello").unwrap();
-        assert_eq!(hits, vec![SearchHit { path: NotePath::new("a.md").unwrap() }]);
+        assert_eq!(
+            hits,
+            vec![SearchHit {
+                path: NotePath::new("a.md").unwrap()
+            }]
+        );
     }
 }
