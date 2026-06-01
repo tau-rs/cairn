@@ -63,7 +63,7 @@ jobs:
             echo "Coverage is a signal, not a gate."
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Upload lcov artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: lcov-${{ github.sha }}
           path: lcov.info
