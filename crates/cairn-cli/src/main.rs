@@ -35,6 +35,13 @@ enum Command {
         /// Relative note path.
         path: String,
     },
+    /// Rename or move a note (link-aware).
+    Rename {
+        /// Current relative path.
+        from: String,
+        /// New relative path (may be in a different directory).
+        to: String,
+    },
     /// Search notes.
     Search {
         /// Query string.
@@ -112,6 +119,19 @@ fn run() -> Result<(), String> {
                 QueryResponse::Note { contents } => print!("{contents}"),
                 _ => unreachable!("GetNote returns Note"),
             }
+        }
+        Command::Rename { from, to } => {
+            let resp = dispatch_command(
+                &mut engine,
+                &WireCommand::RenameNote {
+                    from: from.clone(),
+                    to: to.clone(),
+                },
+                &mut events,
+            )
+            .map_err(|e| e.to_string())?;
+            debug_assert!(matches!(resp, CommandResponse::Done));
+            println!("renamed {from} -> {to}");
         }
         Command::Search { query } => {
             if let QueryResponse::Paths { paths } =
