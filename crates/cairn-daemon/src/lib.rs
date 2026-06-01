@@ -54,6 +54,11 @@ impl AppState {
 
     /// Run a command synchronously, publishing produced events.
     ///
+    /// Blocks the current thread while it holds the engine lock and runs
+    /// (blocking) engine work. Call it from a blocking context such as
+    /// [`tokio::task::spawn_blocking`], never directly on an async executor
+    /// thread.
+    ///
     /// # Errors
     /// Returns [`ServiceError`] on invalid input or engine failure.
     pub fn run_command_blocking(&self, command: &Command) -> Result<CommandResponse, ServiceError> {
@@ -63,6 +68,10 @@ impl AppState {
     }
 
     /// Run a query synchronously.
+    ///
+    /// Blocks the current thread while it holds the engine lock. Call it from a
+    /// blocking context such as [`tokio::task::spawn_blocking`], never directly
+    /// on an async executor thread.
     ///
     /// # Errors
     /// Returns [`ServiceError`] on invalid input or engine failure.
@@ -80,34 +89,33 @@ fn status_for(err: &ServiceError) -> StatusCode {
     }
 }
 
-async fn command_handler(State(state): State<AppState>, Json(command): Json<Command>) -> Response {
-    let result = tokio::task::spawn_blocking(move || state.run_command_blocking(&command)).await;
+/// Convert a dispatch result (possibly a `spawn_blocking` join error) into an
+/// HTTP response. Join failures return a generic message — internal panic text
+/// is never leaked to clients.
+fn service_response<T: serde::Serialize>(
+    result: Result<Result<T, ServiceError>, tokio::task::JoinError>,
+) -> Response {
     match result {
         Ok(Ok(resp)) => (StatusCode::OK, Json(resp)).into_response(),
         Ok(Err(svc)) => (status_for(&svc), Json(ContractError::from(svc))).into_response(),
-        Err(join) => (
+        Err(_join) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ContractError::Internal {
-                message: join.to_string(),
+                message: "internal error".to_string(),
             }),
         )
             .into_response(),
     }
 }
 
+async fn command_handler(State(state): State<AppState>, Json(command): Json<Command>) -> Response {
+    let result = tokio::task::spawn_blocking(move || state.run_command_blocking(&command)).await;
+    service_response(result)
+}
+
 async fn query_handler(State(state): State<AppState>, Json(query): Json<Query>) -> Response {
     let result = tokio::task::spawn_blocking(move || state.run_query_blocking(&query)).await;
-    match result {
-        Ok(Ok(resp)) => (StatusCode::OK, Json(resp)).into_response(),
-        Ok(Err(svc)) => (status_for(&svc), Json(ContractError::from(svc))).into_response(),
-        Err(join) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ContractError::Internal {
-                message: join.to_string(),
-            }),
-        )
-            .into_response(),
-    }
+    service_response(result)
 }
 
 async fn events_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
@@ -117,17 +125,28 @@ async fn events_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> 
 
 async fn forward_events(mut socket: WebSocket, mut rx: broadcast::Receiver<WireEvent>) {
     loop {
-        match rx.recv().await {
-            Ok(ev) => {
-                let Ok(text) = serde_json::to_string(&ev) else {
-                    continue;
-                };
-                if socket.send(Message::Text(text)).await.is_err() {
-                    break;
+        tokio::select! {
+            // Drain inbound frames so tungstenite can auto-reply to pings;
+            // a close frame, end-of-stream, or error ends the loop.
+            incoming = socket.recv() => {
+                match incoming {
+                    Some(Ok(_)) => {} // ignore data/ping/pong (pings auto-replied)
+                    Some(Err(_)) | None => break,
                 }
             }
-            Err(broadcast::error::RecvError::Lagged(_)) => continue,
-            Err(broadcast::error::RecvError::Closed) => break,
+            // Forward broadcast events as JSON text frames.
+            event = rx.recv() => {
+                match event {
+                    Ok(ev) => {
+                        let Ok(text) = serde_json::to_string(&ev) else { continue };
+                        if socket.send(Message::Text(text)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
         }
     }
 }

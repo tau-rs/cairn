@@ -33,7 +33,8 @@ async fn post_json(
         .unwrap();
     let status = resp.status();
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    let json: serde_json::Value =
+        serde_json::from_slice(&bytes).expect("response body was not valid JSON");
     (status, json)
 }
 
@@ -74,4 +75,53 @@ async fn missing_note_query_is_404() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["type"], "not_found");
+}
+
+#[tokio::test]
+async fn health_is_ok() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = build_router(state(tmp.path()));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn invalid_path_command_is_400() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = build_router(state(tmp.path()));
+    let (status, body) = post_json(
+        app,
+        "/command",
+        serde_json::json!({"type":"write_note","path":"../escape.md","contents":"x"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["type"], "invalid_request");
+}
+
+#[tokio::test]
+async fn malformed_json_is_client_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = build_router(state(tmp.path()));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/command")
+                .header("content-type", "application/json")
+                .body(Body::from("{not json"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(resp.status().is_client_error());
 }

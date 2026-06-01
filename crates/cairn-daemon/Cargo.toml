@@ -20,6 +20,7 @@ cairn-contract = { path = "../cairn-contract" }
 cairn-service = { path = "../cairn-service" }
 axum = { workspace = true }
 tokio = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 clap = { workspace = true }
 
