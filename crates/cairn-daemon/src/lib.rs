@@ -2,6 +2,9 @@
 //! only; no authentication (LoopbackTrust). The engine runs synchronously
 //! under a mutex via `spawn_blocking`.
 
+pub mod config;
+pub use config::Config;
+
 use std::sync::{Arc, Mutex};
 
 use axum::{
@@ -166,6 +169,39 @@ async fn forward_events(mut socket: WebSocket, mut rx: broadcast::Receiver<WireE
 
 async fn health_handler() -> StatusCode {
     StatusCode::OK
+}
+
+/// Merge config-file origins with CLI `--cors-origin` values into the effective
+/// CORS allowlist: appends the CLI origins, drops any `*` (not part of the
+/// deny-by-default model — it would also panic the layer), then sorts and
+/// deduplicates. This is what should be both displayed at startup and passed to
+/// [`cors_layer`], so the printed allowlist reflects what is actually allowed.
+#[must_use]
+pub fn merge_cors_origins(file: Vec<String>, cli: &[String]) -> Vec<String> {
+    let mut origins = file;
+    origins.extend(cli.iter().cloned());
+    origins.retain(|o| o != "*");
+    origins.sort();
+    origins.dedup();
+    origins
+}
+
+/// Build a CORS layer allowing exactly `origins`. Deny-by-default: an empty
+/// list allows no cross-origin request. Methods GET/POST/OPTIONS, header
+/// `content-type`, no credentials.
+pub fn cors_layer(origins: &[String]) -> tower_http::cors::CorsLayer {
+    use axum::http::{header, HeaderValue, Method};
+    // Skip `*`: a wildcard in `AllowOrigin::list` panics in tower-http, and our
+    // deny-by-default allowlist has no wildcard. Malformed entries are ignored.
+    let allowed: Vec<HeaderValue> = origins
+        .iter()
+        .filter(|o| o.as_str() != "*")
+        .filter_map(|o| o.parse().ok())
+        .collect();
+    tower_http::cors::CorsLayer::new()
+        .allow_origin(tower_http::cors::AllowOrigin::list(allowed))
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers([header::CONTENT_TYPE])
 }
 
 /// Build the axum router for the given state.
