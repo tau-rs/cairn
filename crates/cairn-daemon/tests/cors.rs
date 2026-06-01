@@ -76,3 +76,40 @@ async fn preflight_options_returns_allow_headers() {
     );
     assert!(resp.headers().get("access-control-allow-methods").is_some());
 }
+
+#[tokio::test]
+async fn empty_allowlist_denies_any_origin() {
+    // The deny-by-default guarantee: no origin is allowed when the list is empty.
+    let tmp = tempfile::tempdir().unwrap();
+    let resp = app(tmp.path(), &[])
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/health")
+                .header("origin", "http://anything.example")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(resp.headers().get("access-control-allow-origin").is_none());
+}
+
+#[tokio::test]
+async fn wildcard_origin_does_not_panic_and_denies() {
+    // A `*` in the allowlist would panic tower-http's AllowOrigin::list; we filter
+    // it out, so the daemon treats it as no allowed origin (deny), not allow-all.
+    let tmp = tempfile::tempdir().unwrap();
+    let resp = app(tmp.path(), &["*".to_string()])
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/health")
+                .header("origin", "http://anything.example")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(resp.headers().get("access-control-allow-origin").is_none());
+}

@@ -176,7 +176,13 @@ async fn health_handler() -> StatusCode {
 /// `content-type`, no credentials.
 pub fn cors_layer(origins: &[String]) -> tower_http::cors::CorsLayer {
     use axum::http::{header, HeaderValue, Method};
-    let allowed: Vec<HeaderValue> = origins.iter().filter_map(|o| o.parse().ok()).collect();
+    // Skip `*`: a wildcard in `AllowOrigin::list` panics in tower-http, and our
+    // deny-by-default allowlist has no wildcard. Malformed entries are ignored.
+    let allowed: Vec<HeaderValue> = origins
+        .iter()
+        .filter(|o| o.as_str() != "*")
+        .filter_map(|o| o.parse().ok())
+        .collect();
     tower_http::cors::CorsLayer::new()
         .allow_origin(tower_http::cors::AllowOrigin::list(allowed))
         .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
