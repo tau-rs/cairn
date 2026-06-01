@@ -6,7 +6,7 @@ description: |
 
 inputs:
   toolchain:
-    description: Rust toolchain version (stable, 1.85, etc.)
+    description: Rust toolchain version (stable, 1.88, etc.)
     required: false
     default: stable
   components:
@@ -40,7 +40,7 @@ runs:
   steps:
     - name: Install Rust toolchain
       # Note: a repo-root rust-toolchain.toml pins the in-repo toolchain
-      # (cairn pins 1.85). This action installs `toolchain` as a fallback
+      # (cairn pins 1.88). This action installs `toolchain` as a fallback
       # default; the toolchain file drives the actual version cargo uses.
       uses: dtolnay/rust-toolchain@stable
       with:

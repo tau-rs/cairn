@@ -33,5 +33,5 @@ pre-push:
       run: env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=target/lefthook/doc cargo test --workspace --doc
     locked-check:
       # Mirrors CI's locked-check: fails if Cargo.lock drifts off the
-      # Rust 1.85 MSRV pin.
+      # Rust 1.88 MSRV pin.
       run: env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=target/lefthook/locked cargo check --workspace --all-targets --locked

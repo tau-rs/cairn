@@ -22,7 +22,7 @@ Dual-licensed under **MIT OR Apache-2.0** — see
 
 ## Build & test
 
-Requires **Rust 1.85** (pinned in `rust-toolchain.toml`). On first compile,
+Requires **Rust 1.88** (pinned in `rust-toolchain.toml`). On first compile,
 `git2` builds a vendored copy of libgit2; subsequent builds are fast.
 
 ```sh
