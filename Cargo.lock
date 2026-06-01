@@ -164,6 +164,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "cairn-service"
+version = "0.0.0"
+dependencies = [
+ "cairn-app",
+ "cairn-contract",
+ "cairn-domain",
+ "cairn-infra",
+ "cairn-ports",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "cc"
 version = "1.2.63"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -6,6 +6,7 @@ members = [
     "crates/cairn-infra",
     "crates/cairn-app",
     "crates/cairn-contract",
+    "crates/cairn-service",
     "crates/cairn-cli",
 ]
 
