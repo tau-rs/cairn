@@ -9,6 +9,8 @@ repository.workspace = true
 cairn-domain = { path = "../cairn-domain" }
 cairn-ports = { path = "../cairn-ports" }
 git2 = { workspace = true }
+notify = { workspace = true }
+notify-debouncer-full = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

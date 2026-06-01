@@ -3,9 +3,11 @@
 pub mod git;
 pub mod index;
 pub mod localfs;
+pub mod notify_watcher;
 pub mod seams;
 
 pub use git::GitVcs;
 pub use index::InMemoryIndex;
 pub use localfs::LocalFsStore;
+pub use notify_watcher::NotifyWatcher;
 pub use seams::{BlockingExecutor, NoCollab, NoopWatcher, NullRuntime};
