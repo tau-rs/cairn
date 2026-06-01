@@ -1,0 +1,73 @@
+name: Claude review
+
+# AI code review via anthropics/claude-code-action.
+#
+# Modes:
+#   1. PR auto-review — every non-draft PR opened/pushed gets a fresh
+#      Claude review comment.
+#   2. Manual re-review — add the `claude:review` label to re-run.
+#
+# Distinct from claude.yml (the @claude mention bot): this one is
+# event-driven, non-interactive.
+#
+# ENABLE (two steps — kept OFF by default so PRs stay green until set up)
+# ----------------------------------------------------------------------
+#   1. Add the `CLAUDE_CODE_OAUTH_TOKEN` secret (see claude.yml header;
+#      `claude setup-token`), and install the Claude GitHub App on the repo.
+#   2. Turn the gate on:
+#        gh variable set CLAUDE_REVIEW_ENABLED --body true
+#   Until the variable is `true`, the review job is skipped entirely
+#   (no failing check on PRs).
+#
+# Security: uses `pull_request` (not `pull_request_target`), so fork PRs
+# cannot access the secret. Untrusted PR fields are only consumed by the
+# action as data, never injected into a shell `run:` step.
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, labeled]
+
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review-pr:
+    name: review PR
+    if: |
+      vars.CLAUDE_REVIEW_ENABLED == 'true' && (
+        (github.event.action == 'labeled' &&
+          github.event.label.name == 'claude:review') ||
+        (github.event.action != 'labeled' &&
+          github.event.pull_request.draft == false)
+      )
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: anthropics/claude-code-action@beta
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Dependabot PRs run as a Bot actor; allow it so dependency
+          # bumps still get an AI review.
+          allowed_bots: "dependabot"
+          direct_prompt: |
+            Review this pull request as a senior engineer would.
+            Focus on:
+              - Correctness bugs and edge cases the tests miss
+              - Security issues (input validation, auth, injection)
+              - Performance regressions
+              - API/contract changes that affect callers
+              - Readability only when it is actively harmed
+            Skip formatting nits (rustfmt enforces those) and
+            clippy-caught issues (the clippy job covers those).
+            Be concise. If the PR is in great shape, say so plainly
+            instead of inventing nits.

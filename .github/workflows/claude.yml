@@ -1,0 +1,72 @@
+name: Claude
+
+# Anthropic Claude Code action — `@claude` mention bot.
+#
+# Triggers when "@claude" appears in an issue, a comment, a PR review
+# comment, or a PR review submission. Claude reads the surrounding
+# context, answers, and (with the permissions below) can push commits
+# to an open PR branch.
+#
+# Security
+# --------
+# - Actor allowlist enforced in the `if:` gate — only the configured
+#   GitHub users can trigger a run. Prevents arbitrary commenters on
+#   public issues/PRs from driving the bot.
+# - The gate also requires the literal `@claude` mention in the
+#   triggering content, so it does not run on every comment.
+# - `pull_request_target` / `workflow_run` are intentionally NOT used
+#   (they would expose secrets to fork PRs).
+#
+# Secret (required before this works)
+# -----------------------------------
+# Add `CLAUDE_CODE_OAUTH_TOKEN` under repo Settings → Secrets and
+# variables → Actions. Generate it locally with `claude setup-token`
+# (Claude Code CLI); it bills against your Claude.ai subscription and
+# starts with `sk-ant-oat01-`. The Claude GitHub App must also be
+# installed on this repository.
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
+  issues:
+    types: [opened, assigned]
+
+jobs:
+  claude:
+    # Allowlist actors. Add additional logins as more contributors
+    # need the bot.
+    if: |
+      contains(fromJSON('["LEBOCQTitouan"]'), github.actor) && (
+        (github.event_name == 'issue_comment' &&
+          contains(github.event.comment.body, '@claude')) ||
+        (github.event_name == 'pull_request_review_comment' &&
+          contains(github.event.comment.body, '@claude')) ||
+        (github.event_name == 'pull_request_review' &&
+          contains(github.event.review.body, '@claude')) ||
+        (github.event_name == 'issues' &&
+          (contains(github.event.issue.body, '@claude') ||
+           contains(github.event.issue.title, '@claude')))
+      )
+
+    runs-on: ubuntu-latest
+
+    # Least-privilege for claude-code-action:
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: anthropics/claude-code-action@beta
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
