@@ -113,3 +113,24 @@ async fn wildcard_origin_does_not_panic_and_denies() {
         .unwrap();
     assert!(resp.headers().get("access-control-allow-origin").is_none());
 }
+
+#[test]
+fn merge_origins_dedups_and_drops_wildcard() {
+    let m = cairn_daemon::merge_cors_origins(
+        vec![
+            "http://a".to_string(),
+            "*".to_string(),
+            "http://b".to_string(),
+        ],
+        &["http://a".to_string(), "http://c".to_string()],
+    );
+    // `*` dropped, `http://a` deduped, sorted.
+    assert_eq!(
+        m,
+        vec![
+            "http://a".to_string(),
+            "http://b".to_string(),
+            "http://c".to_string()
+        ]
+    );
+}

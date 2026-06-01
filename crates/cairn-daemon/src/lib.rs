@@ -171,6 +171,21 @@ async fn health_handler() -> StatusCode {
     StatusCode::OK
 }
 
+/// Merge config-file origins with CLI `--cors-origin` values into the effective
+/// CORS allowlist: appends the CLI origins, drops any `*` (not part of the
+/// deny-by-default model — it would also panic the layer), then sorts and
+/// deduplicates. This is what should be both displayed at startup and passed to
+/// [`cors_layer`], so the printed allowlist reflects what is actually allowed.
+#[must_use]
+pub fn merge_cors_origins(file: Vec<String>, cli: &[String]) -> Vec<String> {
+    let mut origins = file;
+    origins.extend(cli.iter().cloned());
+    origins.retain(|o| o != "*");
+    origins.sort();
+    origins.dedup();
+    origins
+}
+
 /// Build a CORS layer allowing exactly `origins`. Deny-by-default: an empty
 /// list allows no cross-origin request. Methods GET/POST/OPTIONS, header
 /// `content-type`, no credentials.

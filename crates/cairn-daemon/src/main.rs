@@ -60,10 +60,7 @@ async fn run() -> Result<(), String> {
         Some(path) => Config::load(path)?,
         None => Config::load_default(&cli.cairn)?,
     };
-    let mut cors_origins = config.cors.origins;
-    cors_origins.extend(cli.cors_origin.iter().cloned());
-    cors_origins.sort();
-    cors_origins.dedup();
+    let cors_origins = cairn_daemon::merge_cors_origins(config.cors.origins, &cli.cors_origin);
     if cors_origins.is_empty() {
         println!(
             "CORS: no cross-origin origins allowed (add [cors].origins to {}/cairn.toml or pass --cors-origin)",
