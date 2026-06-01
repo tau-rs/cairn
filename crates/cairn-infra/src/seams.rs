@@ -53,11 +53,15 @@ mod tests {
     #[test]
     fn seams_have_expected_neutral_behavior() {
         assert!(!NoCollab.is_active());
+        // Times out (not Disconnected): the parked sender keeps the channel
+        // open, so the no-op watcher never yields and never disconnects.
         let handle = NoopWatcher.watch(std::path::Path::new(".")).unwrap();
-        assert!(handle
-            .changes
-            .recv_timeout(std::time::Duration::from_millis(50))
-            .is_err());
+        assert_eq!(
+            handle
+                .changes
+                .recv_timeout(std::time::Duration::from_millis(50)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        );
         assert!(NullRuntime.run_action("summarize", None).is_err());
     }
 }
