@@ -131,6 +131,22 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
         Ok(graph.backlinks(path).to_vec())
     }
 
+    /// All parsed notes in the cairn.
+    ///
+    /// # Errors
+    /// Returns [`PortError`] if a port operation fails.
+    pub fn list_notes(&self) -> Result<Vec<Note>, PortError> {
+        self.load_all_notes()
+    }
+
+    /// The link graph derived from the current notes.
+    ///
+    /// # Errors
+    /// Returns [`PortError`] if a port operation fails.
+    pub fn graph(&self) -> Result<Graph, PortError> {
+        Ok(Graph::build(&self.load_all_notes()?))
+    }
+
     /// Commit all changes.
     ///
     /// # Errors
@@ -211,5 +227,18 @@ mod tests {
             .unwrap();
         let id = eng.commit("first", &mut events).unwrap();
         assert!(events.contains(&Event::Committed(id)));
+    }
+
+    #[test]
+    fn list_notes_and_graph_expose_engine_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut events = Vec::new();
+        eng.write_note(&NotePath::new("a.md").unwrap(), "see [[b]]", &mut events)
+            .unwrap();
+        eng.write_note(&NotePath::new("b.md").unwrap(), "hi", &mut events)
+            .unwrap();
+        assert_eq!(eng.list_notes().unwrap().len(), 2);
+        assert_eq!(eng.graph().unwrap().edges().len(), 1);
     }
 }
