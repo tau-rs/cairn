@@ -17,12 +17,6 @@ pub struct Graph {
     backward: BTreeMap<NotePath, Vec<NotePath>>,
 }
 
-fn stem(path: &NotePath) -> &str {
-    let s = path.as_str();
-    let after_slash = s.rsplit('/').next().unwrap_or(s);
-    after_slash.strip_suffix(".md").unwrap_or(after_slash)
-}
-
 impl Graph {
     /// Build a graph from all notes. Targets are resolved to a note whose
     /// stem equals the target text; unresolved targets are dropped.
@@ -31,7 +25,7 @@ impl Graph {
         // Last note wins when two notes share a stem; callers should keep
         // note stems unique within a cairn.
         let by_stem: BTreeMap<&str, &NotePath> =
-            notes.iter().map(|n| (stem(&n.path), &n.path)).collect();
+            notes.iter().map(|n| (n.path.stem(), &n.path)).collect();
 
         let mut forward: BTreeMap<NotePath, Vec<NotePath>> = BTreeMap::new();
         let mut backward: BTreeMap<NotePath, Vec<NotePath>> = BTreeMap::new();
@@ -69,6 +63,21 @@ impl Graph {
     pub fn backlinks(&self, path: &NotePath) -> &[NotePath] {
         self.backward.get(path).map_or(&[], Vec::as_slice)
     }
+
+    /// All note paths in the graph, sorted.
+    #[must_use]
+    pub fn nodes(&self) -> Vec<&NotePath> {
+        self.forward.keys().collect()
+    }
+
+    /// All directed `(from, to)` link edges.
+    #[must_use]
+    pub fn edges(&self) -> Vec<(&NotePath, &NotePath)> {
+        self.forward
+            .iter()
+            .flat_map(|(from, tos)| tos.iter().map(move |to| (from, to)))
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -98,5 +107,15 @@ mod tests {
         let notes = vec![note("a.md", "links to [[missing]]")];
         let g = Graph::build(&notes);
         assert!(g.forward_links(&NotePath::new("a.md").unwrap()).is_empty());
+    }
+
+    #[test]
+    fn nodes_and_edges_expose_the_graph() {
+        let notes = vec![note("a.md", "see [[b]]"), note("b.md", "no links")];
+        let g = Graph::build(&notes);
+        let a = NotePath::new("a.md").unwrap();
+        let b = NotePath::new("b.md").unwrap();
+        assert_eq!(g.nodes(), vec![&a, &b]);
+        assert_eq!(g.edges(), vec![(&a, &b)]);
     }
 }

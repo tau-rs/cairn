@@ -31,6 +31,14 @@ impl NotePath {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// The note's stem: the filename without its directory or `.md`
+    /// extension (e.g. `dir/a.md` -> `a`).
+    #[must_use]
+    pub fn stem(&self) -> &str {
+        let after_slash = self.0.rsplit('/').next().unwrap_or(&self.0);
+        after_slash.strip_suffix(".md").unwrap_or(after_slash)
+    }
 }
 
 /// Errors building a [`NotePath`].
@@ -90,6 +98,31 @@ impl Note {
             body: raw.to_string(),
         }
     }
+
+    /// A human display title: the frontmatter `title:` value if present,
+    /// else the first Markdown `# ` heading in the body, else the path stem.
+    #[must_use]
+    pub fn display_title(&self) -> String {
+        if let Some(fm) = &self.frontmatter {
+            for line in fm.lines() {
+                if let Some(rest) = line.trim_start().strip_prefix("title:") {
+                    let t = rest.trim().trim_matches('"').trim_matches('\'').trim();
+                    if !t.is_empty() {
+                        return t.to_string();
+                    }
+                }
+            }
+        }
+        for line in self.body.lines() {
+            if let Some(rest) = line.trim_start().strip_prefix("# ") {
+                let t = rest.trim();
+                if !t.is_empty() {
+                    return t.to_string();
+                }
+            }
+        }
+        self.path.stem().to_string()
+    }
 }
 
 #[cfg(test)]
@@ -133,5 +166,24 @@ mod tests {
         let n = Note::parse(p, "---\n---\nbody");
         assert_eq!(n.frontmatter.as_deref(), Some(""));
         assert_eq!(n.body, "body");
+    }
+
+    #[test]
+    fn stem_strips_dir_and_extension() {
+        assert_eq!(NotePath::new("dir/sub/a.md").unwrap().stem(), "a");
+        assert_eq!(NotePath::new("b").unwrap().stem(), "b");
+    }
+
+    #[test]
+    fn display_title_prefers_frontmatter_then_heading_then_stem() {
+        let p = NotePath::new("a.md").unwrap();
+        let fm = Note::parse(p.clone(), "---\ntitle: \"My Title\"\n---\n# Heading\nbody");
+        assert_eq!(fm.display_title(), "My Title");
+
+        let heading = Note::parse(p.clone(), "# The Heading\nbody");
+        assert_eq!(heading.display_title(), "The Heading");
+
+        let plain = Note::parse(p, "just text");
+        assert_eq!(plain.display_title(), "a");
     }
 }
