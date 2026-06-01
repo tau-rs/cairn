@@ -222,6 +222,12 @@ code above the interface doesn't change.
   subscribers and **lag-drops** for slow clients (no replay/log). Treat the stream
   as a hint to refresh, **not** a guaranteed event log. After connect/reconnect,
   re-query (`list_notes`, `get_graph`, open note) to resync.
+- **Real file-watcher is live (daemon default).** The daemon now pushes
+  `note_changed` / `note_deleted` when `.md` files change outside cairn — an
+  editor save, a `git pull`, any external writer. This is on by default; start
+  the daemon with `--no-watch` to disable. Cairn's own writes and no-op rewrites
+  are silently deduped by a content-hash memo, so the command path emits no
+  duplicate events. Events are still best-effort (resync on reconnect).
 - **`list_notes` is O(n).** It walks and parses every note on each call (no caching
   yet). Don't poll it on every keystroke; call it on open, on relevant events, or on
   explicit refresh.
@@ -253,8 +259,10 @@ Deferred engine sub-projects, each a clean seam — build the UI assuming the cu
 behavior; these are additive and won't change the contract shapes you already use:
 
 - **Tantivy** full-text search (today: in-memory substring; same `search`/`paths` API).
-- **Real file-watcher** (today: no push on *external* edits — only cairn's own writes
-  emit events; if the UI lets the user edit files outside cairn, add a manual refresh).
+- **File-watcher deferred items** — the daemon watcher is done (see ADR-0003).
+  Still deferred: the in-process/Tauri watcher (the daemon is the only watcher
+  host today), incremental reads (changed files are still read in full), and
+  rename stitching (renames surface as a `note_deleted` + `note_changed` pair).
 - **Auth/TLS + network exposure** for the daemon.
 - **CRDT live collaboration** (multi-cursor).
 - **tau agent integration** (`AgentRuntime` port is `NullRuntime` today).
