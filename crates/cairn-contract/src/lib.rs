@@ -55,6 +55,13 @@ pub enum Query {
     ListNotes,
     /// Fetch the full link graph.
     GetGraph,
+    /// List all tags with note counts.
+    ListTags,
+    /// List the notes carrying a tag.
+    NotesByTag {
+        /// The tag to filter by.
+        tag: String,
+    },
 }
 
 /// A push event emitted by the engine.
@@ -106,6 +113,18 @@ pub struct NoteSummary {
     pub path: String,
     /// Display title (frontmatter title, first heading, or filename).
     pub title: String,
+    /// Frontmatter tags of the note.
+    pub tags: Vec<String>,
+}
+
+/// A tag and how many notes carry it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TagCount {
+    /// The tag.
+    pub tag: String,
+    /// Number of notes carrying it.
+    pub count: u32,
 }
 
 /// A directed link edge between two notes, by path.
@@ -144,6 +163,11 @@ pub enum QueryResponse {
         nodes: Vec<String>,
         /// Directed link edges.
         edges: Vec<GraphEdge>,
+    },
+    /// All tags with counts (response to `ListTags`).
+    Tags {
+        /// One per distinct tag, sorted by tag.
+        tags: Vec<TagCount>,
     },
 }
 
@@ -208,6 +232,7 @@ mod tests {
             notes: vec![NoteSummary {
                 path: "a.md".into(),
                 title: "Alpha".into(),
+                tags: vec!["rust".into()],
             }],
         };
         let j = serde_json::to_string(&n).unwrap();
@@ -233,5 +258,27 @@ mod tests {
             serde_json::from_str::<Query>("{\"type\":\"get_graph\"}").unwrap(),
             Query::GetGraph
         );
+    }
+
+    #[test]
+    fn tag_query_and_response_roundtrip() {
+        let r = QueryResponse::Tags {
+            tags: vec![TagCount {
+                tag: "rust".into(),
+                count: 2,
+            }],
+        };
+        let j = serde_json::to_string(&r).unwrap();
+        assert!(j.contains("\"type\":\"tags\""));
+        assert_eq!(serde_json::from_str::<QueryResponse>(&j).unwrap(), r);
+
+        assert_eq!(
+            serde_json::to_string(&Query::ListTags).unwrap(),
+            "{\"type\":\"list_tags\"}"
+        );
+        let q = Query::NotesByTag { tag: "rust".into() };
+        let j = serde_json::to_string(&q).unwrap();
+        assert!(j.contains("\"type\":\"notes_by_tag\""));
+        assert_eq!(serde_json::from_str::<Query>(&j).unwrap(), q);
     }
 }

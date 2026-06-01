@@ -15,4 +15,8 @@ query: string, } | { "type": "get_backlinks",
 /**
  * Relative note path.
  */
-path: string, } | { "type": "list_notes" } | { "type": "get_graph" };
+path: string, } | { "type": "list_notes" } | { "type": "get_graph" } | { "type": "list_tags" } | { "type": "notes_by_tag", 
+/**
+ * The tag to filter by.
+ */
+tag: string, };
