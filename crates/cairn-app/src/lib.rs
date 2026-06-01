@@ -196,6 +196,36 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
         Ok(Graph::build(&self.load_all_notes()?))
     }
 
+    /// All tags across the cairn with note counts, sorted by tag.
+    ///
+    /// # Errors
+    /// Returns [`PortError`] if a port operation fails.
+    pub fn list_tags(&self) -> Result<Vec<(String, usize)>, PortError> {
+        let mut counts: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+        for note in self.load_all_notes()? {
+            for tag in note.tags() {
+                *counts.entry(tag).or_insert(0) += 1;
+            }
+        }
+        Ok(counts.into_iter().collect())
+    }
+
+    /// Notes carrying `tag`, sorted by path.
+    ///
+    /// # Errors
+    /// Returns [`PortError`] if a port operation fails.
+    pub fn notes_by_tag(&self, tag: &str) -> Result<Vec<NotePath>, PortError> {
+        let mut out: Vec<NotePath> = self
+            .load_all_notes()?
+            .into_iter()
+            .filter(|n| n.tags().iter().any(|t| t == tag))
+            .map(|n| n.path)
+            .collect();
+        out.sort();
+        Ok(out)
+    }
+
     /// Commit all changes.
     ///
     /// # Errors
@@ -311,6 +341,38 @@ mod tests {
         eng.apply_change(&FsChange::Removed(a.clone()), &mut e5)
             .unwrap();
         assert!(e5.is_empty());
+    }
+
+    #[test]
+    fn list_tags_and_notes_by_tag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut ev = Vec::new();
+        eng.write_note(
+            &NotePath::new("a.md").unwrap(),
+            "---\ntags: [rust, ideas]\n---\nx",
+            &mut ev,
+        )
+        .unwrap();
+        eng.write_note(
+            &NotePath::new("b.md").unwrap(),
+            "---\ntags: rust\n---\ny",
+            &mut ev,
+        )
+        .unwrap();
+
+        assert_eq!(
+            eng.list_tags().unwrap(),
+            vec![("ideas".to_string(), 1), ("rust".to_string(), 2)]
+        );
+        assert_eq!(
+            eng.notes_by_tag("rust").unwrap(),
+            vec![
+                NotePath::new("a.md").unwrap(),
+                NotePath::new("b.md").unwrap()
+            ]
+        );
+        assert!(eng.notes_by_tag("missing").unwrap().is_empty());
     }
 
     #[test]
