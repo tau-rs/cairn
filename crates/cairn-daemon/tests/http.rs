@@ -59,8 +59,8 @@ async fn write_then_search_over_http() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["type"], "paths");
-    assert_eq!(body["paths"][0], "a.md");
+    assert_eq!(body["type"], "search_results");
+    assert_eq!(body["results"][0]["path"], "a.md");
 }
 
 #[tokio::test]

@@ -152,6 +152,23 @@ fn rename_moves_note_and_rewrites_links() {
 }
 
 #[test]
+fn search_prints_path_and_snippet() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    cairn(dir).arg("init").assert().success();
+    cairn(dir)
+        .args(["write", "a.md", "the borrow checker enforces ownership"])
+        .assert()
+        .success();
+    cairn(dir)
+        .args(["search", "ownership"])
+        .assert()
+        .success()
+        .stdout(contains("a.md"))
+        .stdout(contains("ownership"));
+}
+
+#[test]
 fn tags_and_tagged_subcommands() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();

@@ -135,11 +135,14 @@ fn run() -> Result<(), String> {
             println!("renamed {from} -> {to}");
         }
         Command::Search { query } => {
-            if let QueryResponse::Paths { paths } =
+            if let QueryResponse::SearchResults { results } =
                 dispatch_query(&engine, &WireQuery::Search { query }).map_err(|e| e.to_string())?
             {
-                for p in paths {
-                    println!("{p}");
+                for r in results {
+                    println!("{}", r.path);
+                    if !r.snippet.is_empty() {
+                        println!("    {}", r.snippet);
+                    }
                 }
             }
         }

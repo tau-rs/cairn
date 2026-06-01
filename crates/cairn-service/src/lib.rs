@@ -4,7 +4,7 @@
 use cairn_app::{Engine, Event as AppEvent, EventSink};
 use cairn_contract::{
     Command, CommandResponse, ContractError, Event as WireEvent, GraphEdge, NoteSummary, Query,
-    QueryResponse, TagCount,
+    QueryResponse, SearchResult, TagCount,
 };
 use cairn_domain::NotePath;
 use cairn_ports::{PortError, SearchIndex, VaultStore, Vcs};
@@ -119,12 +119,17 @@ pub fn dispatch_query<S: VaultStore, I: SearchIndex, V: Vcs>(
             Ok(QueryResponse::Note { contents })
         }
         Query::Search { query } => {
-            let paths = engine
+            let results = engine
                 .search(query)?
                 .into_iter()
-                .map(|hit| hit.path.as_str().to_string())
+                .map(|h| SearchResult {
+                    path: h.path.as_str().to_string(),
+                    score: h.score,
+                    snippet: h.snippet,
+                    highlights: h.highlights,
+                })
                 .collect();
-            Ok(QueryResponse::Paths { paths })
+            Ok(QueryResponse::SearchResults { results })
         }
         Query::GetBacklinks { path } => {
             let p = parse_path(path)?;
@@ -247,12 +252,12 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(
-            search,
-            QueryResponse::Paths {
-                paths: vec!["a.md".into()]
+        match search {
+            QueryResponse::SearchResults { results } => {
+                assert!(results.iter().any(|r| r.path == "a.md"));
             }
-        );
+            other => panic!("expected SearchResults, got {other:?}"),
+        }
 
         let backlinks = dispatch_query(
             &eng,
