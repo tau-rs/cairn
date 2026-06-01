@@ -30,7 +30,7 @@ clap = { version = "4", features = ["derive"] }
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
-axum = { version = "0.7", features = ["ws"] }
+axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
