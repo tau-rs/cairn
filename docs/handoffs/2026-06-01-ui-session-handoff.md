@@ -1,143 +1,288 @@
 # Cairn — Handoff to the UI Session
 
 **Date:** 2026-06-01
-**From:** the engine session (walking skeleton complete)
+**From:** the engine session
 **To:** the session that will build the web-tech UI
-**Read first:** [`docs/superpowers/specs/2026-06-01-cairn-engine-design.md`](../superpowers/specs/2026-06-01-cairn-engine-design.md) (full design) and [`docs/decisions/0001-walking-skeleton.md`](../decisions/0001-walking-skeleton.md) (what was built).
+**Status of the engine:** complete and on `main` (`github.com/tau-rs/cairn`) — a single-user note engine with a typed contract served over two transports. 61 tests, clippy/fmt clean.
+**Read first:** the design specs and ADRs linked in §9. This document is self-contained enough to start without them.
 
 ---
 
-## 1. What Cairn is (one paragraph)
+## 1. What Cairn is
 
-Cairn is an open-source, git-backed, Obsidian-class note app. The Rust **engine** (`cairn-core`, this repo) is a transport-blind hexagon: one async contract (commands / queries / events) is consumed by a CLI today and by your **web UI** next. It targets desktop (Tauri), mobile (Tauri v2), pure browser, and remote — all served from the *same* core via in-process (first) or daemon (later) transports. Storage is plain markdown files under git; a CRDT live-collab layer is a designed seam. It is built for tau (Titouan's agent runtime) integration. Lives in the `tau-rs` org. A single note collection is called **"a cairn"** (the only renamed term; everything else is standard: note, link, backlink, tag, plugin, index, graph).
+Cairn is an open-source, git-backed, Obsidian-class note app. The Rust **engine**
+(this repo) is a transport-blind hexagon: one contract (commands / queries / events)
+is consumed by a CLI today and by **your web UI** next, over the *same* core.
+Storage is plain markdown files under git. It is built for tau (Titouan's agent
+runtime) integration, and a CRDT live-collab layer is a designed-but-unbuilt seam.
+Lives in the `tau-rs` org. A single note collection is called **"a cairn"** — the
+only renamed term; everything else is standard (note, link, backlink, tag, index,
+graph, plugin).
 
-## 2. Current engine state (what actually works)
+**Your job (the UI session):** build the web-tech front end — an Obsidian-like app —
+against the contract below. You do *not* modify the engine; you consume it.
 
-A **walking skeleton**, fully tested (28 tests, clippy/fmt clean, CI in place):
+---
 
-- `cairn-domain` — pure model: `NotePath`, `Note` (frontmatter + body), `[[wikilink]]` extraction, backlink `Graph`.
-- `cairn-ports` — trait ports: `VaultStore`, `SearchIndex`, `Vcs`, plus seam traits `Watcher`, `Executor`, `CollabSession`, `AgentRuntime`.
-- `cairn-infra` — real adapters: `LocalFsStore` (filesystem), `GitVcs` (git2), `InMemoryIndex` (substring search); seam adapters `NoopWatcher`, `BlockingExecutor`, `NoCollab`, `NullRuntime`.
-- `cairn-app` — `Engine<S,I,V>` use-cases: write/read/delete note, search, backlinks, commit, reindex — emitting `Event`s via an `EventSink`.
-- `cairn-contract` — the wire contract DTOs + **generated TypeScript bindings** (your import surface).
-- `cairn-cli` — the `cairn` binary, an in-process consumer (`init / write / read / search / backlinks / commit`).
+## 2. What the engine can do today
 
-Build & run:
+Crates (all on `main`): `cairn-domain` (pure model), `cairn-ports` (traits),
+`cairn-infra` (LocalFs + git2 + in-memory index adapters), `cairn-app` (`Engine`
+use-cases), `cairn-contract` (DTOs + generated TS), `cairn-service` (the
+dispatcher), `cairn-daemon` (HTTP+WS), `cairn-cli`.
+
+Capabilities exposed through the contract:
+
+- **Notes:** create/overwrite, read, delete (markdown files in a git-backed cairn).
+- **Search:** case-insensitive substring over body + path (in-memory index for now).
+- **Links:** `[[wikilink]]` extraction, backlinks, and the full link graph.
+- **List:** every note with a display title (for a file tree).
+- **Graph:** nodes + directed edges (for a graph view).
+- **Commit:** stage + commit all changes to git.
+- **Events:** push notifications when notes change / are deleted / the cairn is
+  committed / the index rebuilds.
+
+Try it via the CLI (a worked in-process consumer):
 ```
-cargo test --workspace            # 28 passing; requires Rust 1.85
 cargo run -p cairn-cli -- --cairn ./demo init
-cargo run -p cairn-cli -- --cairn ./demo write a.md "links to [[b]]"
+cargo run -p cairn-cli -- --cairn ./demo write a.md "see [[b]]"
 cargo run -p cairn-cli -- --cairn ./demo write b.md "the target"
-cargo run -p cairn-cli -- --cairn ./demo search target      # -> b.md
-cargo run -p cairn-cli -- --cairn ./demo backlinks b.md     # -> a.md
+cargo run -p cairn-cli -- --cairn ./demo list        # a.md <tab> <title>  ...
+cargo run -p cairn-cli -- --cairn ./demo search target   # -> b.md
+cargo run -p cairn-cli -- --cairn ./demo backlinks b.md  # -> a.md
+cargo run -p cairn-cli -- --cairn ./demo graph       # a.md -> b.md
 cargo run -p cairn-cli -- --cairn ./demo commit "first"
 ```
 
-## 3. The contract you build against
+---
 
-Generated TypeScript lives at **`crates/cairn-contract/bindings/`** (`Command.ts`, `Query.ts`, `Event.ts`, `CommandResponse.ts`, `QueryResponse.ts`, `ContractError.ts`) — committed, regenerated by `cargo test -p cairn-contract`. Import these directly; they are the source of truth and match the Rust serde wire format exactly (tagged unions, discriminant field `"type"`, snake_case tags).
+## 3. The contract (your import surface)
+
+Generated TypeScript lives at **`crates/cairn-contract/bindings/`** — committed,
+regenerated by `cargo test -p cairn-contract`. These are the source of truth and
+match the wire format exactly: every union is **internally tagged** with a `"type"`
+discriminant in **snake_case**.
 
 ```ts
-// Command.ts
+// ---- requests ----
 type Command =
   | { type: "write_note";  path: string; contents: string }
   | { type: "delete_note"; path: string }
   | { type: "commit";      message: string };
 
-// Query.ts
 type Query =
   | { type: "get_note";      path: string }
   | { type: "search";        query: string }
-  | { type: "get_backlinks"; path: string };
+  | { type: "get_backlinks"; path: string }
+  | { type: "list_notes" }                      // no fields
+  | { type: "get_graph" };                      // no fields
 
-// Event.ts  (push, server -> client)
+// ---- responses ----
+type CommandResponse =
+  | { type: "done" }                            // write_note / delete_note ack
+  | { type: "committed"; commit: string };      // short git commit id
+
+type QueryResponse =
+  | { type: "note";  contents: string }         // <- get_note
+  | { type: "paths"; paths: string[] }          // <- search, get_backlinks
+  | { type: "notes"; notes: NoteSummary[] }     // <- list_notes
+  | { type: "graph"; nodes: string[]; edges: GraphEdge[] }; // <- get_graph
+
+interface NoteSummary { path: string; title: string }
+interface GraphEdge   { from: string; to: string }  // directed: from links to to
+
+// ---- push events (server -> client) ----
 type Event =
   | { type: "note_changed"; path: string }
   | { type: "note_deleted"; path: string }
   | { type: "committed";    commit: string }
   | { type: "reindexed";    count: number };
 
-// CommandResponse.ts  (response to a successful command)
-type CommandResponse =
-  | { type: "done" }                    // write_note / delete_note ack
-  | { type: "committed"; commit: string };
-
-// QueryResponse.ts  (response to a successful query)
-type QueryResponse =
-  | { type: "note";  contents: string }
-  | { type: "paths"; paths: string[] };
-
-// ContractError.ts  (typed error, returned with 4xx/5xx HTTP status)
+// ---- typed error (returned with a 4xx/5xx status) ----
 type ContractError =
   | { type: "not_found";       what: string }
   | { type: "invalid_request"; message: string }
   | { type: "internal";        message: string };
 ```
 
-**Design contract for the client:** treat the engine as **async request→response + an event stream**, and NEVER assume it's in the same process. Write the UI against a small transport-abstracted client interface (e.g. `sendCommand(c): Promise<CommandResponse>`, `runQuery(q): Promise<QueryResponse>`, `subscribe(cb: (e: Event) => void)`) with a swappable implementation. That single discipline lets the same UI run over Tauri IPC (in-process) and the daemon (network) unchanged.
+**Request → response mapping** (so you know what variant to expect back):
 
-## 4. The transport is now in place (gap closed)
+| Command | success response |
+|---|---|
+| `write_note` | `done` |
+| `delete_note` | `done` |
+| `commit` | `committed { commit }` |
 
-The gap described in the original skeleton handoff — "nothing serves the contract" — **is now closed.** The transport sub-project delivered two serving paths and all missing response/error types.
+| Query | success response |
+|---|---|
+| `get_note` | `note { contents }` |
+| `search` | `paths { paths }` |
+| `get_backlinks` | `paths { paths }` |
+| `list_notes` | `notes { notes }` |
+| `get_graph` | `graph { nodes, edges }` |
 
-**What was added:**
+**Which commands emit which events** (events arrive on the push stream, not the
+command response):
 
-- **`cairn-service`** — the transport-blind dispatcher (`dispatch_command` /
-  `dispatch_query`). No I/O, no async. The CLI now calls this instead of the
-  engine directly, proving the in-process path.
-- **`cairn-daemon`** — an axum HTTP + WebSocket server binding
-  `127.0.0.1:7777` (port configurable via `--port`). Endpoints:
-  - `POST /command` → `CommandResponse` or `ContractError`
-  - `POST /query` → `QueryResponse` or `ContractError`
-  - `GET /events` → WebSocket stream of `Event` JSON text frames (push)
-  - `GET /health` → `200 OK`
-- **New contract DTOs** — `CommandResponse`, `QueryResponse`, `ContractError`
-  (described in §3 above, TS files generated and committed).
+| Command | events emitted |
+|---|---|
+| `write_note` | `note_changed`, then `reindexed` |
+| `delete_note` | `note_deleted`, then `reindexed` |
+| `commit` | `committed` |
 
-**How the UI session wires up:**
+---
 
-- **Desktop (Tauri shell):** call `cairn-service` in-process from the Tauri
-  Rust backend. This is the efficient, offline-first path — no network hop.
-- **Browser / remote:** connect to a running `cairn-daemon` over HTTP for
-  commands/queries and WebSocket for push events.
+## 4. How to talk to the engine
 
-There is **no `cairn-tauri` crate in this repo by design.** Tauri bundles a
-webview and belongs in the UI session. The engine repo ships only
-transport-blind artifacts (`cairn-service` and `cairn-daemon`).
+Two transports, **one identical contract**. Design your client against an
+abstraction so you can swap them:
 
-The daemon is loopback-only (`127.0.0.1`) with no authentication — suitable
-for local desktop use. Auth/TLS and network exposure are deferred (see
-ADR-0002). Start it with:
+```ts
+interface CairnClient {
+  command(c: Command): Promise<CommandResponse>;   // throws/returns ContractError
+  query(q: Query): Promise<QueryResponse>;
+  subscribe(onEvent: (e: Event) => void): () => void; // returns an unsubscribe fn
+}
+```
 
+### 4a. Daemon transport (HTTP + WebSocket) — works in a browser *and* Tauri
+
+Start it (loopback only, no auth — local use):
 ```
 cargo run -p cairn-daemon -- --cairn ./demo --port 7777
 ```
+Endpoints:
+- `POST /command` — body = a `Command` JSON → `CommandResponse` (200) or `ContractError` (4xx/5xx)
+- `POST /query` — body = a `Query` JSON → `QueryResponse` (200) or `ContractError`
+- `GET /events` — WebSocket; each text frame is one `Event` JSON
+- `GET /health` — `200 OK`
 
-## 5. Architecture you're plugging into (so your choices fit)
+Concrete (note the `content-type: application/json` header is required):
+```bash
+curl -sH 'content-type: application/json' localhost:7777/command \
+  -d '{"type":"write_note","path":"a.md","contents":"see [[b]]"}'
+# {"type":"done"}
 
-- **Primary shell:** Tauri (desktop + mobile), core in-process — most efficient, Obsidian-like, offline-first.
-- **Secondary:** a daemon (HTTP/WS) for pure-browser + remote/multi-device — same contract, network transport.
-- **Engine threading is never in the browser:** the browser is served by the daemon where the engine runs native; you render results + consume events.
-- **Plugins (future):** one manifest, an optional engine part (tau-style, out-of-process) and an optional **UI part (JS/TS in the webview)** — your session will eventually host the UI-plugin API; the engine-side extension points (commands, vault events, content processors, import/export) are specified in the design doc §7.
-- **Tau (future):** agent actions on notes, cairn-as-agent-tool, agent threads stored in git — exposed via the `AgentRuntime` port (currently `NullRuntime`). Tau is still in active build; keep this loosely coupled.
+curl -sH 'content-type: application/json' localhost:7777/query \
+  -d '{"type":"list_notes"}'
+# {"type":"notes","notes":[{"path":"a.md","title":"a"}]}
 
-## 6. Conventions to keep
+curl -sH 'content-type: application/json' localhost:7777/query \
+  -d '{"type":"get_graph"}'
+# {"type":"graph","nodes":["a.md","b.md"],"edges":[{"from":"a.md","to":"b.md"}]}
 
-- `forbid(unsafe_code)`, dual MIT/Apache, ADRs in `docs/decisions/`, Diátaxis docs, `tau-rs` org.
-- MSRV is Rust 1.85; a `git2 → url → idna/icu` transitive subtree is pinned in `Cargo.lock` to hold that line — CI runs `--locked`. A future `gix` migration removes that subtree.
-- Vocabulary: a collection is **"a cairn"**; otherwise standard terms.
+curl -s -w ' [%{http_code}]' -H 'content-type: application/json' localhost:7777/query \
+  -d '{"type":"get_note","path":"missing.md"}'
+# {"type":"not_found","what":"missing.md"} [404]
+```
+Error status mapping: `not_found` → 404, `invalid_request` → 400, `internal` → 500.
+Malformed JSON is rejected by the HTTP layer (4xx) as a non-`ContractError` body —
+handle that defensively.
 
-## 7. Pointers
+### 4b. In-process transport (Tauri desktop) — most efficient, offline-first
+
+For the desktop app, do **not** run a localhost daemon. Instead, the Tauri Rust
+backend depends on `cairn-service` and calls `dispatch_command` / `dispatch_query`
+directly, exposing them as `#[tauri::command]`s, and forwards engine events to the
+webview via Tauri's event channel. This is in-process — no network hop, no
+serialization round-trip on the hot path. (The daemon's `cairn-daemon/src/lib.rs`
+is a worked reference for how to wrap `cairn-service` + an event sink.)
+
+**There is no `cairn-tauri` crate in this repo by design** — Tauri bundles a webview
++ frontend and is a UI concern, so it lives in *your* session. The engine ships only
+the transport-blind `cairn-service` (in-process) and `cairn-daemon` (network).
+
+**Recommendation:** build the **daemon client first** (it runs in a plain browser, so
+you can iterate fast with any web stack), behind the `CairnClient` interface. Add a
+Tauri in-process client implementation later for the shipping desktop app — the UI
+code above the interface doesn't change.
+
+---
+
+## 5. Suggested first steps for the UI (build order)
+
+1. **Types + client.** Copy/import the `bindings/*.ts` types. Implement
+   `CairnClient` with a `DaemonClient` (fetch + WebSocket).
+2. **File tree** ← `list_notes` (`NoteSummary[]` → build folders from `/`-separated
+   paths; show `title`).
+3. **Note view / editor** ← `get_note` to open; `write_note` on save (debounce
+   keystrokes — see §6). A "commit" button calls `commit`.
+4. **Search** ← `search` (substring today; ranking arrives later, same shape).
+5. **Backlinks panel** ← `get_backlinks` for the open note.
+6. **Graph view** ← `get_graph` (`nodes` + directed `edges`).
+7. **Live updates.** `subscribe` to events; on `note_changed` / `note_deleted`
+   refresh the affected views; on `reindexed` you may refresh search. On (re)connect,
+   re-run `list_notes` + `get_graph` to resync (see §6).
+
+---
+
+## 6. Gotchas & behavioral notes (read before building)
+
+- **Events are best-effort.** The daemon broadcasts to current WebSocket
+  subscribers and **lag-drops** for slow clients (no replay/log). Treat the stream
+  as a hint to refresh, **not** a guaranteed event log. After connect/reconnect,
+  re-query (`list_notes`, `get_graph`, open note) to resync.
+- **`list_notes` is O(n).** It walks and parses every note on each call (no caching
+  yet). Don't poll it on every keystroke; call it on open, on relevant events, or on
+  explicit refresh.
+- **Titles** come from `display_title`: frontmatter `title:` → else first `# heading`
+  in the body → else the filename stem. A bare note shows its filename.
+- **Graph semantics:** `nodes` includes *every* note (including ones with no links);
+  ordering is deterministic (sorted by path), so no client-side sort is needed;
+  edges only connect *existing* notes — a `[[missing]]` link is dropped, so there are
+  **no dangling edges**.
+- **Paths** are relative, `/`-separated, always inside the cairn (`..`/absolute are
+  rejected → `invalid_request`). Notes are `.md` files.
+- **Write-then-read consistency:** a `write_note` triggers a full reindex before its
+  response returns, so a subsequent `search` reflects it immediately.
+- **No auth / loopback only.** The daemon binds `127.0.0.1` with no authentication —
+  fine for a local desktop app; do not expose it to a network. Auth/TLS is a deferred
+  engine sub-project (ADR-0002).
+- **Single writer.** The daemon serializes engine access behind a mutex; concurrent
+  multi-client editing/merge is out of scope for now (the CRDT collab layer is a
+  future seam).
+- **CLI quirk (only relevant if you script the CLI):** `cairn write` content that
+  starts with `---` (YAML frontmatter) needs a `--` separator so clap doesn't read it
+  as a flag. Irrelevant to the daemon/HTTP path.
+
+---
+
+## 7. What's deliberately NOT here yet (so you don't wait on it)
+
+Deferred engine sub-projects, each a clean seam — build the UI assuming the current
+behavior; these are additive and won't change the contract shapes you already use:
+
+- **Tantivy** full-text search (today: in-memory substring; same `search`/`paths` API).
+- **Real file-watcher** (today: no push on *external* edits — only cairn's own writes
+  emit events; if the UI lets the user edit files outside cairn, add a manual refresh).
+- **Auth/TLS + network exposure** for the daemon.
+- **CRDT live collaboration** (multi-cursor).
+- **tau agent integration** (`AgentRuntime` port is `NullRuntime` today).
+- **Plugin host** (engine-side + a UI-plugin API your session will eventually own).
+
+---
+
+## 8. Conventions to keep (if you touch the engine repo at all)
+
+- `forbid(unsafe_code)`, dual MIT/Apache, ADRs in `docs/decisions/`, Diátaxis docs,
+  `tau-rs` org, commits small and tested.
+- Engine MSRV is Rust 1.85; CI runs `--locked` (a `git2 → idna/icu` subtree is pinned
+  in `Cargo.lock` to hold the line). Not your concern unless you add Rust deps.
+- Vocabulary: a collection is **"a cairn"**; everything else is standard.
+
+---
+
+## 9. Pointers
 
 | Thing | Path |
 |---|---|
-| Full design spec | `docs/superpowers/specs/2026-06-01-cairn-engine-design.md` |
-| Transport design spec | `docs/superpowers/specs/2026-06-01-cairn-transport-design.md` |
-| Walking-skeleton ADR | `docs/decisions/0001-walking-skeleton.md` |
-| Transport ADR | `docs/decisions/0002-transport.md` |
-| Implementation plan | `docs/superpowers/plans/2026-06-01-cairn-walking-skeleton.md` |
-| Generated TS contract | `crates/cairn-contract/bindings/` |
+| Generated TS contract (import these) | `crates/cairn-contract/bindings/` |
+| Daemon (HTTP/WS reference impl) | `crates/cairn-daemon/src/lib.rs`, `src/main.rs` |
+| Dispatcher (in-process entry point) | `crates/cairn-service/src/lib.rs` |
 | Engine use-cases (what's callable) | `crates/cairn-app/src/lib.rs` |
-| Transport-blind dispatcher | `crates/cairn-service/src/lib.rs` |
-| HTTP + WS daemon | `crates/cairn-daemon/src/lib.rs` |
-| CLI (a worked in-process consumer) | `crates/cairn-cli/src/main.rs` |
+| CLI (worked in-process consumer) | `crates/cairn-cli/src/main.rs` |
+| Engine design spec | `docs/superpowers/specs/2026-06-01-cairn-engine-design.md` |
+| Transport design spec | `docs/superpowers/specs/2026-06-01-cairn-transport-design.md` |
+| List/graph design spec | `docs/superpowers/specs/2026-06-01-list-graph-queries-design.md` |
+| ADR-0001 walking skeleton | `docs/decisions/0001-walking-skeleton.md` |
+| ADR-0002 transport (why no Tauri here) | `docs/decisions/0002-transport.md` |
