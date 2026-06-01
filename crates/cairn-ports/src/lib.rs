@@ -58,6 +58,16 @@ pub trait SearchIndex {
     /// # Errors
     /// Returns [`PortError`] if the adapter fails.
     fn search(&self, query: &str) -> Result<Vec<SearchHit>, PortError>;
+    /// Insert or replace a single note in the index.
+    ///
+    /// # Errors
+    /// Returns [`PortError`] if the adapter fails.
+    fn upsert(&mut self, note: &Note) -> Result<(), PortError>;
+    /// Remove a single note from the index.
+    ///
+    /// # Errors
+    /// Returns [`PortError`] if the adapter fails.
+    fn remove(&mut self, path: &NotePath) -> Result<(), PortError>;
 }
 
 /// Version control over the cairn directory.
@@ -70,13 +80,43 @@ pub trait Vcs {
     fn commit_all(&mut self, message: &str) -> Result<String, PortError>;
 }
 
-/// Detects external changes to the cairn. Seam: `NoopWatcher` for now.
+/// A change to a note detected on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FsChange {
+    /// A note was created or modified.
+    Changed(NotePath),
+    /// A note was removed.
+    Removed(NotePath),
+}
+
+/// Owns the OS watcher and delivers debounced changes; dropping it stops
+/// watching.
+pub struct WatchHandle {
+    /// Debounced note changes.
+    pub changes: std::sync::mpsc::Receiver<FsChange>,
+    // Keeps the underlying OS watcher alive for the handle's lifetime.
+    _keepalive: Box<dyn Send>,
+}
+
+impl WatchHandle {
+    /// Build a handle from a change receiver and an opaque keepalive (the
+    /// adapter's live watcher).
+    #[must_use]
+    pub fn new(changes: std::sync::mpsc::Receiver<FsChange>, keepalive: Box<dyn Send>) -> Self {
+        Self {
+            changes,
+            _keepalive: keepalive,
+        }
+    }
+}
+
+/// Detects external changes to the cairn.
 pub trait Watcher {
-    /// Begin watching. The skeleton's `NoopWatcher` does nothing.
+    /// Begin watching `root`; returns a handle delivering debounced changes.
     ///
     /// # Errors
-    /// Returns [`PortError`] if the adapter fails.
-    fn start(&mut self) -> Result<(), PortError>;
+    /// Returns [`PortError`] if the OS watcher cannot be created.
+    fn watch(&self, root: &std::path::Path) -> Result<WatchHandle, PortError>;
 }
 
 /// Runs background/parallel work. Seam: `BlockingExecutor` runs inline.

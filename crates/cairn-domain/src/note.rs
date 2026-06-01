@@ -123,6 +123,19 @@ impl Note {
         }
         self.path.stem().to_string()
     }
+
+    /// A non-cryptographic hash of the note's content (frontmatter + body),
+    /// for in-memory change detection / memoization. Not for security, and
+    /// not stable across Rust versions or process restarts — do not persist
+    /// it or compare hashes across processes.
+    #[must_use]
+    pub fn content_hash(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.frontmatter.hash(&mut h);
+        self.body.hash(&mut h);
+        h.finish()
+    }
 }
 
 #[cfg(test)]
@@ -185,5 +198,15 @@ mod tests {
 
         let plain = Note::parse(p, "just text");
         assert_eq!(plain.display_title(), "a");
+    }
+
+    #[test]
+    fn content_hash_is_stable_and_sensitive() {
+        let p = NotePath::new("a.md").unwrap();
+        let a1 = Note::parse(p.clone(), "---\ntitle: X\n---\nbody");
+        let a2 = Note::parse(p.clone(), "---\ntitle: X\n---\nbody");
+        let b = Note::parse(p, "---\ntitle: X\n---\nDIFFERENT");
+        assert_eq!(a1.content_hash(), a2.content_hash());
+        assert_ne!(a1.content_hash(), b.content_hash());
     }
 }

@@ -32,6 +32,20 @@ impl SearchIndex for InMemoryIndex {
         hits.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(hits)
     }
+
+    fn upsert(&mut self, note: &Note) -> Result<(), PortError> {
+        if let Some(slot) = self.docs.iter_mut().find(|d| d.path == note.path) {
+            *slot = note.clone();
+        } else {
+            self.docs.push(note.clone());
+        }
+        Ok(())
+    }
+
+    fn remove(&mut self, path: &cairn_domain::NotePath) -> Result<(), PortError> {
+        self.docs.retain(|d| &d.path != path);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -79,5 +93,22 @@ mod tests {
                 path: NotePath::new("a.md").unwrap()
             }]
         );
+    }
+
+    #[test]
+    fn upsert_then_remove() {
+        let mut idx = InMemoryIndex::default();
+        idx.upsert(&note("a.md", "hello target")).unwrap();
+        assert_eq!(
+            idx.search("target").unwrap(),
+            vec![SearchHit {
+                path: NotePath::new("a.md").unwrap()
+            }]
+        );
+        idx.upsert(&note("a.md", "changed")).unwrap(); // replace, not duplicate
+        assert!(idx.search("target").unwrap().is_empty());
+        assert_eq!(idx.search("changed").unwrap().len(), 1);
+        idx.remove(&NotePath::new("a.md").unwrap()).unwrap();
+        assert!(idx.search("changed").unwrap().is_empty());
     }
 }

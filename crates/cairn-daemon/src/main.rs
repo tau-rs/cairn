@@ -5,7 +5,8 @@ use std::process::ExitCode;
 
 use cairn_app::{Engine, Event};
 use cairn_daemon::{build_router, AppState, CairnEngine};
-use cairn_infra::{GitVcs, InMemoryIndex, LocalFsStore};
+use cairn_infra::{GitVcs, InMemoryIndex, LocalFsStore, NotifyWatcher};
+use cairn_ports::Watcher;
 use clap::Parser;
 
 #[derive(Parser)]
@@ -20,6 +21,9 @@ struct Cli {
     /// Port to bind on 127.0.0.1.
     #[arg(long, default_value_t = 7777)]
     port: u16,
+    /// Disable the filesystem watcher (no live events on external edits).
+    #[arg(long)]
+    no_watch: bool,
 }
 
 fn build_engine(root: &Path) -> Result<CairnEngine, String> {
@@ -42,7 +46,24 @@ async fn run() -> Result<(), String> {
     let mut startup: Vec<Event> = Vec::new();
     engine.reindex(&mut startup).map_err(|e| e.to_string())?;
 
-    let app = build_router(AppState::new(engine));
+    let state = AppState::new(engine);
+    let app = build_router(state.clone());
+
+    if !cli.no_watch {
+        match NotifyWatcher.watch(&cli.cairn) {
+            Ok(handle) => {
+                let watch_state = state.clone();
+                tokio::task::spawn_blocking(move || {
+                    while let Ok(change) = handle.changes.recv() {
+                        watch_state.apply_change_blocking(&change);
+                    }
+                });
+                println!("watching {} for changes", cli.cairn.display());
+            }
+            Err(e) => eprintln!("warning: file watcher disabled: {e}"),
+        }
+    }
+
     let addr = format!("127.0.0.1:{}", cli.port);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await

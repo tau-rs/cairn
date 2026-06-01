@@ -1,14 +1,19 @@
 //! Neutral seam adapters for ports whose real implementations are deferred
 //! to later sub-projects. They let the engine compose and run today.
 
-use cairn_ports::{AgentRuntime, CollabSession, Executor, PortError, Watcher};
+use cairn_ports::{
+    AgentRuntime, CollabSession, Executor, FsChange, PortError, WatchHandle, Watcher,
+};
 
 /// No-op watcher seam.
 #[derive(Debug, Default)]
 pub struct NoopWatcher;
 impl Watcher for NoopWatcher {
-    fn start(&mut self) -> Result<(), PortError> {
-        Ok(())
+    fn watch(&self, _root: &std::path::Path) -> Result<WatchHandle, PortError> {
+        // Park the sender in the keepalive so the receiver never yields and
+        // never disconnects: a no-op watcher reports no changes, ever.
+        let (tx, rx) = std::sync::mpsc::channel::<FsChange>();
+        Ok(WatchHandle::new(rx, Box::new(tx)))
     }
 }
 
@@ -48,7 +53,15 @@ mod tests {
     #[test]
     fn seams_have_expected_neutral_behavior() {
         assert!(!NoCollab.is_active());
-        assert!(NoopWatcher.start().is_ok());
+        // Times out (not Disconnected): the parked sender keeps the channel
+        // open, so the no-op watcher never yields and never disconnects.
+        let handle = NoopWatcher.watch(std::path::Path::new(".")).unwrap();
+        assert_eq!(
+            handle
+                .changes
+                .recv_timeout(std::time::Duration::from_millis(50)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        );
         assert!(NullRuntime.run_action("summarize", None).is_err());
     }
 }
