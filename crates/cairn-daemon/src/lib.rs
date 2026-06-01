@@ -45,6 +45,8 @@ impl AppState {
     /// Build state from an engine.
     #[must_use]
     pub fn new(engine: CairnEngine) -> Self {
+        // 256 comfortably exceeds any realistic per-command event burst;
+        // slow subscribers lag-drop rather than back-pressure the engine.
         let (events, _rx) = broadcast::channel(256);
         Self {
             engine: Arc::new(Mutex::new(engine)),

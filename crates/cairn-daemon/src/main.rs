@@ -30,7 +30,9 @@ fn build_engine(root: &Path) -> Result<CairnEngine, String> {
 
 async fn run() -> Result<(), String> {
     let cli = Cli::parse();
-    if !cli.cairn.join(".git").is_dir() {
+    // `.git` is a dir in a normal repo but a file in worktrees/submodules.
+    // (Duplicated in cairn-cli; de-dup if a shared startup crate appears.)
+    if !cli.cairn.join(".git").exists() {
         return Err(format!(
             "not a cairn at {0} (run `cairn --cairn {0} init` first)",
             cli.cairn.display()

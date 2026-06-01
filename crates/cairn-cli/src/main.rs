@@ -65,7 +65,8 @@ fn run() -> Result<(), String> {
 
     // Only `init` may create a new cairn. Every other command requires an
     // existing one, so we never silently `git init` in the user's directory.
-    if !matches!(cli.command, Command::Init) && !root.join(".git").is_dir() {
+    // `.git` is a dir in a normal repo but a file in worktrees/submodules.
+    if !matches!(cli.command, Command::Init) && !root.join(".git").exists() {
         return Err(format!(
             "not a cairn at {0} (run `cairn --cairn {0} init` first)",
             root.display()
