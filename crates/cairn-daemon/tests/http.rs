@@ -2,14 +2,14 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use cairn_app::Engine;
 use cairn_daemon::{build_router, AppState};
-use cairn_infra::{GitVcs, InMemoryIndex, LocalFsStore};
+use cairn_infra::{GitVcs, LocalFsStore, TantivyIndex};
 use http_body_util::BodyExt;
 use tower::ServiceExt; // for `oneshot`
 
 fn state(dir: &std::path::Path) -> AppState {
     let engine = Engine::new(
         LocalFsStore::open(dir).unwrap(),
-        InMemoryIndex::default(),
+        TantivyIndex::in_memory().unwrap(),
         GitVcs::open_or_init(dir).unwrap(),
     );
     AppState::new(engine)

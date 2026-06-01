@@ -1,7 +1,7 @@
 use cairn_app::Engine;
 use cairn_daemon::{build_router, AppState};
 use cairn_domain::NotePath;
-use cairn_infra::{GitVcs, InMemoryIndex, LocalFsStore};
+use cairn_infra::{GitVcs, LocalFsStore, TantivyIndex};
 use cairn_ports::FsChange;
 use futures_util::StreamExt;
 use std::time::Duration;
@@ -11,7 +11,7 @@ async fn external_change_pushes_event_then_dedups() {
     let tmp = tempfile::tempdir().unwrap();
     let engine = Engine::new(
         LocalFsStore::open(tmp.path()).unwrap(),
-        InMemoryIndex::default(),
+        TantivyIndex::in_memory().unwrap(),
         GitVcs::open_or_init(tmp.path()).unwrap(),
     );
     let state = AppState::new(engine);

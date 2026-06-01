@@ -21,12 +21,12 @@ use cairn_app::{Engine, Event as AppEvent, EventSink};
 use cairn_contract::{
     Command, CommandResponse, ContractError, Event as WireEvent, Query, QueryResponse,
 };
-use cairn_infra::{GitVcs, InMemoryIndex, LocalFsStore};
+use cairn_infra::{GitVcs, LocalFsStore, TantivyIndex};
 use cairn_service::{app_event_to_wire, dispatch_command, dispatch_query, ServiceError};
 use tokio::sync::broadcast;
 
 /// The concrete engine the daemon serves.
-pub type CairnEngine = Engine<LocalFsStore, InMemoryIndex, GitVcs>;
+pub type CairnEngine = Engine<LocalFsStore, TantivyIndex, GitVcs>;
 
 /// Shared daemon state: the engine behind a mutex + an event broadcast.
 #[derive(Clone)]

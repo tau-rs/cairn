@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use cairn_app::{Engine, Event};
 use cairn_contract::{Command as WireCommand, CommandResponse, Query as WireQuery, QueryResponse};
-use cairn_infra::{GitVcs, InMemoryIndex, LocalFsStore};
+use cairn_infra::{GitVcs, LocalFsStore, TantivyIndex};
 use cairn_service::{dispatch_command, dispatch_query};
 use clap::{Parser, Subcommand};
 
@@ -70,10 +70,11 @@ enum Command {
     },
 }
 
-fn build_engine(root: &Path) -> Result<Engine<LocalFsStore, InMemoryIndex, GitVcs>, String> {
+fn build_engine(root: &Path) -> Result<Engine<LocalFsStore, TantivyIndex, GitVcs>, String> {
     let store = LocalFsStore::open(root).map_err(|e| e.to_string())?;
     let vcs = GitVcs::open_or_init(root).map_err(|e| e.to_string())?;
-    Ok(Engine::new(store, InMemoryIndex::default(), vcs))
+    let index = TantivyIndex::in_memory().map_err(|e| e.to_string())?;
+    Ok(Engine::new(store, index, vcs))
 }
 
 fn run() -> Result<(), String> {
