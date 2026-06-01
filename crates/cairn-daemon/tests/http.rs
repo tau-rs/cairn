@@ -144,3 +144,23 @@ async fn list_notes_over_http() {
     assert_eq!(body["type"], "notes");
     assert_eq!(body["notes"][0]["path"], "a.md");
 }
+
+#[tokio::test]
+async fn list_tags_over_http() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = build_router(state(tmp.path()));
+
+    let (status, _) = post_json(
+        app.clone(),
+        "/command",
+        serde_json::json!({"type":"write_note","path":"a.md","contents":"---\ntags: [rust]\n---\nx"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = post_json(app, "/query", serde_json::json!({"type":"list_tags"})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["type"], "tags");
+    assert_eq!(body["tags"][0]["tag"], "rust");
+    assert_eq!(body["tags"][0]["count"], 1);
+}

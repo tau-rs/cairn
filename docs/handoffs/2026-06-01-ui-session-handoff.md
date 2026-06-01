@@ -75,7 +75,9 @@ type Query =
   | { type: "search";        query: string }
   | { type: "get_backlinks"; path: string }
   | { type: "list_notes" }                      // no fields
-  | { type: "get_graph" };                      // no fields
+  | { type: "get_graph" }                       // no fields
+  | { type: "list_tags" }                       // no fields
+  | { type: "notes_by_tag";  tag: string };
 
 // ---- responses ----
 type CommandResponse =
@@ -84,12 +86,14 @@ type CommandResponse =
 
 type QueryResponse =
   | { type: "note";  contents: string }         // <- get_note
-  | { type: "paths"; paths: string[] }          // <- search, get_backlinks
+  | { type: "paths"; paths: string[] }          // <- search, get_backlinks, notes_by_tag
   | { type: "notes"; notes: NoteSummary[] }     // <- list_notes
-  | { type: "graph"; nodes: string[]; edges: GraphEdge[] }; // <- get_graph
+  | { type: "graph"; nodes: string[]; edges: GraphEdge[] } // <- get_graph
+  | { type: "tags";  tags: TagCount[] };        // <- list_tags
 
-interface NoteSummary { path: string; title: string }
+interface NoteSummary { path: string; title: string; tags: string[] }
 interface GraphEdge   { from: string; to: string }  // directed: from links to to
+interface TagCount    { tag: string; count: number }
 
 // ---- push events (server -> client) ----
 type Event =
@@ -120,6 +124,8 @@ type ContractError =
 | `get_backlinks` | `paths { paths }` |
 | `list_notes` | `notes { notes }` |
 | `get_graph` | `graph { nodes, edges }` |
+| `list_tags` | `tags { tags }` |
+| `notes_by_tag` | `paths { paths }` |
 
 **Which commands emit which events** (events arrive on the push stream, not the
 command response):
