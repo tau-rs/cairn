@@ -87,3 +87,27 @@ fn commands_require_an_initialized_cairn() {
     // And it must NOT have created a .git directory.
     assert!(!dir.join(".git").exists());
 }
+
+#[test]
+fn list_and_graph_subcommands() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    cairn(dir).arg("init").assert().success();
+    cairn(dir)
+        .args(["write", "a.md", "see [[b]]"])
+        .assert()
+        .success();
+    cairn(dir).args(["write", "b.md", "hi"]).assert().success();
+
+    cairn(dir)
+        .arg("list")
+        .assert()
+        .success()
+        .stdout(contains("a.md"))
+        .stdout(contains("b.md"));
+    cairn(dir)
+        .arg("graph")
+        .assert()
+        .success()
+        .stdout(contains("a.md -> b.md"));
+}

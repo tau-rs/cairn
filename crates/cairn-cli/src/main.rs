@@ -50,6 +50,10 @@ enum Command {
         /// Commit message.
         message: String,
     },
+    /// List all notes with their titles.
+    List,
+    /// Print the link graph as `from -> to` edges.
+    Graph,
 }
 
 fn build_engine(root: &Path) -> Result<Engine<LocalFsStore, InMemoryIndex, GitVcs>, String> {
@@ -99,7 +103,7 @@ fn run() -> Result<(), String> {
                 .map_err(|e| e.to_string())?
             {
                 QueryResponse::Note { contents } => print!("{contents}"),
-                QueryResponse::Paths { .. } => unreachable!("GetNote returns Note"),
+                _ => unreachable!("GetNote returns Note"),
             }
         }
         Command::Search { query } => {
@@ -126,6 +130,24 @@ fn run() -> Result<(), String> {
                 .map_err(|e| e.to_string())?;
             if let CommandResponse::Committed { commit } = resp {
                 println!("committed {commit}");
+            }
+        }
+        Command::List => {
+            if let QueryResponse::Notes { notes } =
+                dispatch_query(&engine, &WireQuery::ListNotes).map_err(|e| e.to_string())?
+            {
+                for n in notes {
+                    println!("{}\t{}", n.path, n.title);
+                }
+            }
+        }
+        Command::Graph => {
+            if let QueryResponse::Graph { edges, .. } =
+                dispatch_query(&engine, &WireQuery::GetGraph).map_err(|e| e.to_string())?
+            {
+                for edge in edges {
+                    println!("{} -> {}", edge.from, edge.to);
+                }
             }
         }
     }
