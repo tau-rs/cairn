@@ -1,0 +1,70 @@
+name: coverage
+
+# Measurement, not gating. Coverage is a signal to inform refactors and
+# spot zero-coverage modules; never a hard threshold (a hard gate
+# incentivizes test-for-coverage-not-correctness).
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: coverage-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+
+permissions:
+  contents: read
+
+jobs:
+  coverage:
+    name: cargo llvm-cov nextest
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: llvm-tools-preview
+          shared-key: linux
+          with-nextest: true
+          with-sccache: true
+          with-mold: true
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - name: Generate lcov coverage
+        run: |
+          cargo llvm-cov nextest \
+            --workspace --no-fail-fast \
+            --lcov --output-path lcov.info \
+            --ignore-filename-regex '(tests/|/target/|/build\.rs$)'
+      - name: Summarise coverage
+        run: |
+          covered=$(grep -h '^DA:' lcov.info | awk -F, '$2!="0"{c++} END{print c+0}')
+          total=$(grep -h '^DA:' lcov.info | wc -l)
+          if [ "$total" -gt 0 ]; then
+            pct=$(awk "BEGIN{printf \"%.1f\", ($covered/$total)*100}")
+          else
+            pct="0.0"
+          fi
+          {
+            echo "## Coverage baseline"
+            echo
+            echo "- **Line coverage:** ${pct}% (${covered} / ${total})"
+            echo "- LCOV artifact attached to this run."
+            echo
+            echo "Coverage is a signal, not a gate."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload lcov artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lcov-${{ github.sha }}
+          path: lcov.info
+          retention-days: 14

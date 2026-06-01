@@ -1,8 +1,56 @@
-[licenses]
-allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-3-Clause", "ISC", "Unicode-3.0"]
+# cargo-deny configuration. See https://embarkstudios.github.io/cargo-deny/
+# Adapted from tau's config for cairn's dependency tree.
 
-[bans]
-multiple-versions = "warn"
+[graph]
+all-features = false
+no-default-features = false
 
 [advisories]
+version = 2
+# Block on known RustSec advisories (subsumes cargo-audit).
 yanked = "deny"
+# Scope `unmaintained` to workspace-direct dependencies; transitive
+# crates marked unmaintained upstream are beyond our control.
+unmaintained = "workspace"
+# Add specific RUSTSEC-IDs or `{ crate = "...", reason = "..." }` entries
+# here only with an explicit accept rationale.
+ignore = []
+
+[licenses]
+version = 2
+# Confidence threshold for license detection (default 0.8; raised to
+# reduce false positives from ambiguous SPDX expressions).
+confidence-threshold = 0.93
+# Allow-list reviewed for cairn's dependency tree (axum/tokio/git2/ts-rs
+# and friends). Add a license here only after reading its text and
+# confirming compatibility with cairn's MIT-OR-Apache-2.0 distribution.
+allow = [
+    "MIT",
+    "MIT-0",                    # MIT without attribution
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",                  # Boost Software License
+    "CC0-1.0",                  # public-domain dedication (tiny_keccak etc.)
+    "ISC",                      # libloading and friends
+    "MPL-2.0",                  # file-scoped copyleft (webpki-roots etc.)
+    "Unicode-3.0",              # icu / unicode-ident (post-2024)
+    "Unicode-DFS-2016",         # icu / unicode-ident (pre-2024)
+    "Zlib",                     # tinyvec etc.
+]
+# Our own `publish = false` / workspace crates inherit the workspace
+# license but don't carry a per-crate `license` field; skip them.
+private = { ignore = true }
+
+[bans]
+# Detect duplicate versions — warn, don't block. Some dupes are
+# unavoidable (transitive crates with stricter version requirements).
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "all"
+
+[sources]
+# Only crates.io. Git/registry sources must be explicitly allow-listed.
+unknown-registry = "deny"
+unknown-git = "deny"

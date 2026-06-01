@@ -1,0 +1,99 @@
+name: Setup Rust
+description: |
+  Install a Rust toolchain (with optional components) and configure
+  caching, optional cargo-nextest, sccache, and mold linker. Saves cache
+  only on main-branch pushes; PRs read-only.
+
+inputs:
+  toolchain:
+    description: Rust toolchain version (stable, 1.85, etc.)
+    required: false
+    default: stable
+  components:
+    description: Comma-separated list of components (rustfmt, clippy)
+    required: false
+    default: ""
+  shared-key:
+    description: |
+      rust-cache shared-key. Pinned per (os, toolchain). All jobs with
+      the same shared-key share one cache entry. Recommended pattern:
+      "<os>", e.g. "linux", "macos-latest".
+    required: false
+    default: ""
+  with-nextest:
+    description: Install cargo-nextest (true / false)
+    required: false
+    default: "false"
+  with-sccache:
+    description: Install sccache and set RUSTC_WRAPPER (true / false)
+    required: false
+    default: "false"
+  with-mold:
+    description: |
+      Install the mold linker (Linux only) and set RUSTFLAGS to use it.
+      Ignored on non-Linux runners.
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Install Rust toolchain
+      # Note: a repo-root rust-toolchain.toml pins the in-repo toolchain
+      # (cairn pins 1.85). This action installs `toolchain` as a fallback
+      # default; the toolchain file drives the actual version cargo uses.
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: ${{ inputs.toolchain }}
+        components: ${{ inputs.components }}
+
+    - name: Install mold linker (Linux only)
+      if: inputs.with-mold == 'true' && runner.os == 'Linux'
+      uses: rui314/setup-mold@v1
+
+    # sccache disabled on Windows: the action's post-step has a
+    # state-handling bug that intermittently fails on windows-latest.
+    - name: Install sccache
+      if: inputs.with-sccache == 'true' && runner.os != 'Windows'
+      uses: mozilla-actions/sccache-action@v0.0.10
+
+    - name: Configure sccache env
+      if: inputs.with-sccache == 'true' && runner.os != 'Windows'
+      shell: bash
+      # Preflight the sccache server before exporting RUSTC_WRAPPER. If the
+      # GitHub Actions cache backend is unreachable, fall back to a plain
+      # build rather than breaking the whole job.
+      run: |
+        export SCCACHE_GHA_ENABLED=true
+        ok=""
+        for attempt in 1 2 3; do
+          if sccache --start-server 2>/tmp/sccache-startup.log; then
+            ok=1
+            break
+          fi
+          echo "sccache --start-server attempt $attempt failed:" >&2
+          cat /tmp/sccache-startup.log >&2 || true
+          sccache --stop-server >/dev/null 2>&1 || true
+          sleep $((attempt * 3))
+        done
+        if [ -n "$ok" ]; then
+          echo "SCCACHE_GHA_ENABLED=true" >> $GITHUB_ENV
+          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+        else
+          echo "::warning::sccache server failed to start; continuing without sccache for this job"
+        fi
+
+    - name: Install cargo-nextest
+      if: inputs.with-nextest == 'true'
+      uses: taiki-e/install-action@v2
+      with:
+        tool: nextest
+
+    - name: Cache cargo registry, target, and sccache
+      uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: ${{ inputs.shared-key }}
+        # Save the cache only when running on main (push events to main).
+        # PRs restore but don't write — keeps cache stable and avoids
+        # write contention between parallel jobs sharing a key.
+        save-if: ${{ github.ref == 'refs/heads/main' }}

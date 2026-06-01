@@ -1,20 +1,127 @@
 name: CI
+
 on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
+    types: [checks_requested]
+
+# Cancel superseded runs on the same ref EXCEPT on main, where the
+# rust-cache save-step runs (see .github/actions/setup-rust). Cancelling
+# a main run mid-cache-write means the cache write never completes and
+# subsequent PRs restore from a stale cache.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Fresh CI runs; rust-cache provides between-run caching, so disable
+  # cargo's within-run incremental compilation for determinism.
+  CARGO_INCREMENTAL: 0
+
+permissions:
+  contents: read
+
 jobs:
-  test:
+  fmt:
+    name: rustfmt
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85
+      - uses: ./.github/actions/setup-rust
         with:
-          components: rustfmt, clippy
-      - name: fmt
-        run: cargo fmt --all -- --check
-      # --locked guards the MSRV-sensitive Cargo.lock (git2 -> url -> idna/icu pins)
-      - name: clippy
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      - name: test
-        run: cargo test --locked --workspace --all-targets
+          components: rustfmt
+          shared-key: linux
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: clippy
+          shared-key: linux
+          with-sccache: true
+          with-mold: true
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  cargo-deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          # advisories + licenses + bans + sources per deny.toml at repo root.
+          arguments: --all-features
+
+  test:
+    name: test / ${{ matrix.os == 'ubuntu-latest' && 'linux' || matrix.os == 'macos-latest' && 'macos' || 'windows' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-rust
+        with:
+          shared-key: ${{ matrix.os }}
+          with-nextest: true
+          with-sccache: true
+          with-mold: true
+      - run: cargo nextest run --profile ci --workspace --all-targets
+
+  doc-tests:
+    name: doc-tests / linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-rust
+        with:
+          shared-key: linux
+          with-sccache: true
+          with-mold: true
+      # nextest does not run doctests; cover them here (Linux is enough —
+      # no OS-specific doc examples in this workspace).
+      - run: cargo test --workspace --doc
+
+  locked-check:
+    # Guards the Cargo.lock MSRV pin: a `cargo update` / Dependabot bump
+    # that pulls a crate raising MSRV above the pinned Rust 1.85 fails
+    # here loudly instead of silently. rust-toolchain.toml pins 1.85, so
+    # this is also the MSRV build check.
+    name: locked-check (MSRV 1.85)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-rust
+        with:
+          with-mold: true
+          shared-key: linux
+      - run: cargo check --workspace --all-targets --locked
+
+  ci-summary:
+    # Single aggregated status for branch protection: require this one
+    # check. It is green only when every real job succeeded (or skipped).
+    name: ci-summary
+    if: always()
+    needs: [fmt, clippy, cargo-deny, test, doc-tests, locked-check]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all jobs to have succeeded
+        run: |
+          results='${{ join(needs.*.result, ' ') }}'
+          echo "job results: $results"
+          for r in $results; do
+            case "$r" in
+              success|skipped) ;;
+              *) echo "::error::a required CI job did not succeed ($r)"; exit 1 ;;
+            esac
+          done
