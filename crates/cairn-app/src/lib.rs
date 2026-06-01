@@ -2,7 +2,8 @@
 //! emitting domain events. No transport or serialization lives here.
 
 use cairn_domain::{Graph, Note, NotePath};
-use cairn_ports::{PortError, SearchHit, SearchIndex, VaultStore, Vcs};
+use cairn_ports::{FsChange, PortError, SearchHit, SearchIndex, VaultStore, Vcs};
+use std::collections::HashMap;
 
 /// A domain event emitted as a side effect of a command.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,12 +35,18 @@ pub struct Engine<S, I, V> {
     store: S,
     index: I,
     vcs: V,
+    memo: HashMap<NotePath, u64>,
 }
 
 impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
     /// Construct an engine from its ports.
     pub fn new(store: S, index: I, vcs: V) -> Self {
-        Self { store, index, vcs }
+        Self {
+            store,
+            index,
+            vcs,
+            memo: HashMap::new(),
+        }
     }
 
     fn load_all_notes(&self) -> Result<Vec<Note>, PortError> {
@@ -54,26 +61,70 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
         Ok(notes)
     }
 
-    /// Rebuild the search index from the current store contents.
-    ///
-    /// Intentionally public: callers such as the CLI on startup (or a future
-    /// full-rescan command) invoke it to sync the index with notes changed
-    /// outside the engine. Emits [`Event::Reindexed`].
+    /// Rebuild the index and the content-hash memo from the store (startup /
+    /// full rescan). Emits [`Event::Reindexed`].
     ///
     /// # Errors
     /// Returns [`PortError`] if a port operation fails.
     pub fn reindex(&mut self, sink: &mut dyn EventSink) -> Result<(), PortError> {
         let notes = self.load_all_notes()?;
         self.index.reindex(&notes)?;
+        self.memo = notes
+            .iter()
+            .map(|n| (n.path.clone(), n.content_hash()))
+            .collect();
         sink.emit(Event::Reindexed(notes.len()));
         Ok(())
     }
 
-    /// Create or overwrite a note and refresh the index.
+    /// Apply a single filesystem change, deduped via the content-hash memo.
+    /// The single source of change-events: emits only when content actually
+    /// differs from what is indexed.
     ///
-    /// `NoteChanged` is emitted after a successful write, before the index is
-    /// rebuilt; if the subsequent reindex fails, that event has already been
-    /// emitted. This is acceptable for the walking skeleton.
+    /// # Errors
+    /// Returns [`PortError`] if a port operation fails.
+    pub fn apply_change(
+        &mut self,
+        change: &FsChange,
+        sink: &mut dyn EventSink,
+    ) -> Result<(), PortError> {
+        match change {
+            FsChange::Changed(path) => {
+                let raw = match self.store.read(path) {
+                    Ok(raw) => raw,
+                    Err(PortError::NotFound(_)) => return self.apply_removal(path, sink),
+                    Err(e) => return Err(e),
+                };
+                let note = Note::parse(path.clone(), &raw);
+                let hash = note.content_hash();
+                if self.memo.get(path) == Some(&hash) {
+                    return Ok(());
+                }
+                self.index.upsert(&note)?;
+                self.memo.insert(path.clone(), hash);
+                sink.emit(Event::NoteChanged(path.clone()));
+                sink.emit(Event::Reindexed(self.memo.len()));
+                Ok(())
+            }
+            FsChange::Removed(path) => self.apply_removal(path, sink),
+        }
+    }
+
+    fn apply_removal(
+        &mut self,
+        path: &NotePath,
+        sink: &mut dyn EventSink,
+    ) -> Result<(), PortError> {
+        if self.memo.remove(path).is_some() {
+            self.index.remove(path)?;
+            sink.emit(Event::NoteDeleted(path.clone()));
+            sink.emit(Event::Reindexed(self.memo.len()));
+        }
+        Ok(())
+    }
+
+    /// Create or overwrite a note; emits via the memo diff (see
+    /// [`Engine::apply_change`]).
     ///
     /// # Errors
     /// Returns [`PortError`] if a port operation fails.
@@ -84,8 +135,7 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
         sink: &mut dyn EventSink,
     ) -> Result<(), PortError> {
         self.store.write(path, contents)?;
-        sink.emit(Event::NoteChanged(path.clone()));
-        self.reindex(sink)
+        self.apply_change(&FsChange::Changed(path.clone()), sink)
     }
 
     /// Read a note's raw contents.
@@ -96,10 +146,7 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
         self.store.read(path)
     }
 
-    /// Delete a note and refresh the index.
-    ///
-    /// `NoteDeleted` is emitted after a successful delete, before the index is
-    /// rebuilt (same tradeoff as [`Engine::write_note`]).
+    /// Delete a note; emits via the memo diff (see [`Engine::apply_change`]).
     ///
     /// # Errors
     /// Returns [`PortError`] if a port operation fails.
@@ -109,8 +156,7 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
         sink: &mut dyn EventSink,
     ) -> Result<(), PortError> {
         self.store.delete(path)?;
-        sink.emit(Event::NoteDeleted(path.clone()));
-        self.reindex(sink)
+        self.apply_change(&FsChange::Removed(path.clone()), sink)
     }
 
     /// Search note content.
@@ -227,6 +273,41 @@ mod tests {
             .unwrap();
         let id = eng.commit("first", &mut events).unwrap();
         assert!(events.contains(&Event::Committed(id)));
+    }
+
+    #[test]
+    fn apply_change_dedups_self_writes_and_emits_on_real_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let a = NotePath::new("a.md").unwrap();
+
+        let mut e1 = Vec::new();
+        eng.write_note(&a, "hello", &mut e1).unwrap();
+        assert_eq!(e1, vec![Event::NoteChanged(a.clone()), Event::Reindexed(1)]);
+
+        // Echo: same content already on disk -> nothing emitted.
+        let mut e2 = Vec::new();
+        eng.apply_change(&FsChange::Changed(a.clone()), &mut e2)
+            .unwrap();
+        assert!(e2.is_empty());
+
+        // Real external change -> emits again.
+        std::fs::write(tmp.path().join("a.md"), "changed").unwrap();
+        let mut e3 = Vec::new();
+        eng.apply_change(&FsChange::Changed(a.clone()), &mut e3)
+            .unwrap();
+        assert_eq!(e3, vec![Event::NoteChanged(a.clone()), Event::Reindexed(1)]);
+
+        // Removal -> NoteDeleted; removing again -> nothing.
+        std::fs::remove_file(tmp.path().join("a.md")).unwrap();
+        let mut e4 = Vec::new();
+        eng.apply_change(&FsChange::Removed(a.clone()), &mut e4)
+            .unwrap();
+        assert_eq!(e4, vec![Event::NoteDeleted(a.clone()), Event::Reindexed(0)]);
+        let mut e5 = Vec::new();
+        eng.apply_change(&FsChange::Removed(a.clone()), &mut e5)
+            .unwrap();
+        assert!(e5.is_empty());
     }
 
     #[test]
