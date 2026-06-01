@@ -1,0 +1,53 @@
+# Dependabot configuration.
+#
+# Manages dependency updates for GitHub Actions and the Cargo workspace.
+# Each ecosystem opens PRs against `main` on the schedule below; PRs run
+# through the standard CI gate (incl. cargo-deny + the locked MSRV check)
+# before merge.
+
+version: 2
+updates:
+  # GitHub Actions versions used in .github/workflows/ and .github/actions/.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Paris
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+      include: scope
+    labels:
+      - dependencies
+      - github-actions
+
+  # Cargo workspace dependencies. Daily because a Rust security advisory
+  # needs faster turnaround than a workflow bump. Grouped by crate family
+  # so a tokio/serde minor bump is one PR, not several.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: daily
+      time: "06:00"
+      timezone: Europe/Paris
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "chore(deps)"
+      include: scope
+    labels:
+      - dependencies
+      - rust
+    groups:
+      tokio:
+        patterns:
+          - "tokio*"
+      serde:
+        patterns:
+          - "serde*"
+      axum:
+        patterns:
+          - "axum*"
+          - "tower*"
+          - "hyper*"

@@ -1,0 +1,16 @@
+# Nextest configuration. See https://nexte.st/docs/configuration/
+
+[profile.default]
+# Local dev: retry flaky tests up to twice. nextest's parallel execution
+# exposes timing-sensitive flakes that `cargo test` (serial per binary)
+# masks. Two retries keep the inner dev loop snappy.
+retries = 2
+failure-output = "immediate-final"
+success-output = "never"
+
+[profile.ci]
+# CI: NO retries. A flake is real signal — surface it, don't hide it.
+# Invoked via `cargo nextest run --profile ci ...` in ci.yml.
+retries = 0
+failure-output = "immediate-final"
+success-output = "never"
