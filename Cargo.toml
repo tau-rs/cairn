@@ -8,6 +8,7 @@ members = [
     "crates/cairn-contract",
     "crates/cairn-service",
     "crates/cairn-cli",
+    "crates/cairn-daemon",
 ]
 
 [workspace.package]
@@ -29,3 +30,9 @@ clap = { version = "4", features = ["derive"] }
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
+axum = { version = "0.7", features = ["ws"] }
+tokio = { version = "1", features = ["full"] }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
