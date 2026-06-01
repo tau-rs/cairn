@@ -144,8 +144,22 @@ pub struct GraphEdge {
     pub to: String,
 }
 
+/// One ranked search result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SearchResult {
+    /// Relative note path.
+    pub path: String,
+    /// Relevance score (relative ordering only).
+    pub score: f32,
+    /// Plain-text excerpt around the match.
+    pub snippet: String,
+    /// `(start, end)` byte ranges within `snippet` that matched.
+    pub highlights: Vec<(u32, u32)>,
+}
+
 /// Result of a successful query.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum QueryResponse {
@@ -158,6 +172,11 @@ pub enum QueryResponse {
     Paths {
         /// Relative note paths.
         paths: Vec<String>,
+    },
+    /// Ranked search results (response to `Search`).
+    SearchResults {
+        /// Best match first.
+        results: Vec<SearchResult>,
     },
     /// Note summaries (response to `ListNotes`).
     Notes {
@@ -278,6 +297,21 @@ mod tests {
             serde_json::from_str::<Query>("{\"type\":\"get_graph\"}").unwrap(),
             Query::GetGraph
         );
+    }
+
+    #[test]
+    fn search_results_roundtrip() {
+        let r = QueryResponse::SearchResults {
+            results: vec![SearchResult {
+                path: "a.md".into(),
+                score: 1.5,
+                snippet: "hello target".into(),
+                highlights: vec![(6, 12)],
+            }],
+        };
+        let j = serde_json::to_string(&r).unwrap();
+        assert!(j.contains("\"type\":\"search_results\""));
+        assert_eq!(serde_json::from_str::<QueryResponse>(&j).unwrap(), r);
     }
 
     #[test]
