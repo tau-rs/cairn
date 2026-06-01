@@ -1,0 +1,13 @@
+[package]
+name = "cairn-ports"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+cairn-domain = { path = "../cairn-domain" }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

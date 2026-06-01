@@ -1,0 +1,89 @@
+use assert_cmd::Command;
+use predicates::str::contains;
+
+/// A `cairn` invocation pre-pointed at `dir` via `--cairn`.
+fn cairn(dir: &std::path::Path) -> Command {
+    let mut cmd = Command::cargo_bin("cairn").unwrap();
+    cmd.args(["--cairn", dir.to_str().unwrap()]);
+    cmd
+}
+
+#[test]
+fn write_search_backlinks_commit_flow() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+
+    cairn(dir)
+        .arg("init")
+        .assert()
+        .success()
+        .stdout(contains("initialized cairn"));
+
+    cairn(dir)
+        .args(["write", "a.md", "links to [[b]]"])
+        .assert()
+        .success()
+        .stdout(contains("wrote a.md"));
+    cairn(dir)
+        .args(["write", "b.md", "the target"])
+        .assert()
+        .success()
+        .stdout(contains("wrote b.md"));
+    cairn(dir)
+        .args(["search", "target"])
+        .assert()
+        .success()
+        .stdout(contains("b.md"));
+    cairn(dir)
+        .args(["backlinks", "b.md"])
+        .assert()
+        .success()
+        .stdout(contains("a.md"));
+    cairn(dir)
+        .args(["commit", "first"])
+        .assert()
+        .success()
+        .stdout(contains("committed"));
+}
+
+#[test]
+fn read_existing_note_prints_contents() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    cairn(dir).arg("init").assert().success();
+    cairn(dir)
+        .args(["write", "a.md", "hello body"])
+        .assert()
+        .success();
+    cairn(dir)
+        .args(["read", "a.md"])
+        .assert()
+        .success()
+        .stdout(contains("hello body"));
+}
+
+#[test]
+fn read_missing_note_fails() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    cairn(dir).arg("init").assert().success();
+    cairn(dir)
+        .args(["read", "missing.md"])
+        .assert()
+        .failure()
+        .stderr(contains("error:"));
+}
+
+#[test]
+fn commands_require_an_initialized_cairn() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    // Without `init`, a non-init command must fail rather than silently init.
+    cairn(dir)
+        .args(["search", "x"])
+        .assert()
+        .failure()
+        .stderr(contains("not a cairn"));
+    // And it must NOT have created a .git directory.
+    assert!(!dir.join(".git").exists());
+}
