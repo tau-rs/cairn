@@ -104,15 +104,21 @@ impl SearchIndex for TantivyIndex {
         let mut parser = QueryParser::for_index(&self.index, vec![self.body, self.path_text]);
         parser.set_conjunction_by_default();
         // Phrase-quote the query so its n-grams must be adjacent (substring
-        // match); strip embedded quotes so the parser can't break out.
+        // match); strip embedded quotes and backslashes so the parser can't
+        // break out or trigger Tantivy's escape grammar.
+        let sanitized = q.replace(['"', '\\'], " ");
         let parsed = parser
-            .parse_query(&format!("\"{}\"", q.replace('"', " ")))
+            .parse_query(&format!("\"{sanitized}\""))
             .map_err(adapt)?;
         let collector = TopDocs::with_limit(SEARCH_LIMIT).order_by_score();
         let top = searcher.search(&*parsed, &collector).map_err(adapt)?;
 
-        let mut sg = SnippetGenerator::create(&searcher, &*parsed, self.body).map_err(adapt)?;
-        sg.set_max_num_chars(SNIPPET_MAX_CHARS);
+        // Snippet generation is best-effort: if the generator can't be built,
+        // results still return with empty snippets (spec: non-fatal).
+        let mut sg = SnippetGenerator::create(&searcher, &*parsed, self.body).ok();
+        if let Some(g) = sg.as_mut() {
+            g.set_max_num_chars(SNIPPET_MAX_CHARS);
+        }
 
         let mut hits = Vec::with_capacity(top.len());
         for (score, addr) in top {
@@ -122,16 +128,22 @@ impl SearchIndex for TantivyIndex {
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
             let path = NotePath::new(path_str).map_err(adapt)?;
-            let snip = sg.snippet_from_doc(&d);
-            let highlights = snip
-                .highlighted()
-                .iter()
-                .map(|r| (r.start as u32, r.end as u32))
-                .collect();
+            let (snippet, highlights) = match sg.as_ref() {
+                Some(g) => {
+                    let snip = g.snippet_from_doc(&d);
+                    let hl = snip
+                        .highlighted()
+                        .iter()
+                        .map(|r| (r.start as u32, r.end as u32))
+                        .collect();
+                    (snip.fragment().to_string(), hl)
+                }
+                None => (String::new(), Vec::new()),
+            };
             hits.push(SearchHit {
                 path,
                 score,
-                snippet: snip.fragment().to_string(),
+                snippet,
                 highlights,
             });
         }
@@ -213,6 +225,21 @@ mod tests {
             .unwrap()
             .iter()
             .any(|h| h.path.as_str() == "rust-notes.md"));
+    }
+
+    #[test]
+    fn query_with_backslash_does_not_error() {
+        let mut idx = TantivyIndex::in_memory().unwrap();
+        idx.reindex(&[note("a.md", "ownership rules")]).unwrap();
+        // A query containing/ending with a backslash must not return Err.
+        assert!(idx.search("rules\\").is_ok());
+        assert!(idx.search("c:\\notes\\").is_ok());
+        // Sanity: a normal substring still matches after sanitization.
+        assert!(idx
+            .search("owners")
+            .unwrap()
+            .iter()
+            .any(|h| h.path.as_str() == "a.md"));
     }
 
     #[test]
