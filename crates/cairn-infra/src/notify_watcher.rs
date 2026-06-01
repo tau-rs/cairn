@@ -42,7 +42,7 @@ impl Watcher for NotifyWatcher {
         // so that strip_prefix works correctly against OS-reported event paths.
         let root = root
             .canonicalize()
-            .map_err(|e| PortError::Adapter(e.to_string()))?;
+            .map_err(|e| PortError::Adapter(format!("canonicalize {}: {e}", root.display())))?;
         let cb_root = root.clone();
         let mut debouncer = new_debouncer(
             Duration::from_millis(200),
@@ -65,5 +65,33 @@ impl Watcher for NotifyWatcher {
             .watch(&root, RecursiveMode::Recursive)
             .map_err(|e| PortError::Adapter(e.to_string()))?;
         Ok(WatchHandle::new(rx, Box::new(debouncer)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // `classify`'s filtering is pure (the existence check only runs after the
+    // path passes the `.md` + non-`.git` filters), so these cases need no real
+    // files and are flakiness-free.
+    #[test]
+    fn classify_ignores_git_and_non_md() {
+        let root = Path::new("/cairn");
+        assert_eq!(classify(root, Path::new("/cairn/.git/config")), None);
+        assert_eq!(classify(root, Path::new("/cairn/sub/.git/HEAD")), None);
+        assert_eq!(classify(root, Path::new("/cairn/note.txt")), None);
+        assert_eq!(classify(root, Path::new("/outside/a.md")), None); // not under root
+    }
+
+    #[test]
+    fn classify_absent_md_is_removed() {
+        // A `.md` path under root that does not exist on disk classifies as
+        // Removed (the existence branch).
+        let root = Path::new("/cairn");
+        assert_eq!(
+            classify(root, Path::new("/cairn/gone.md")),
+            Some(FsChange::Removed(NotePath::new("gone.md").unwrap()))
+        );
     }
 }
