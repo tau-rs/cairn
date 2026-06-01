@@ -88,9 +88,9 @@ impl VaultStore for LocalFsStore {
             return Err(PortError::AlreadyExists(to.as_str().to_string()));
         }
         if let Some(parent) = dst.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| PortError::Adapter(e.to_string()))?;
+            fs::create_dir_all(parent).map_err(|e| PortError::Adapter(e.to_string()))?;
         }
-        std::fs::rename(&src, &dst).map_err(|e| PortError::Adapter(e.to_string()))
+        fs::rename(&src, &dst).map_err(|e| PortError::Adapter(e.to_string()))
     }
 
     fn list(&self) -> Result<Vec<NotePath>, PortError> {
