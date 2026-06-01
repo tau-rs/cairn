@@ -81,6 +81,17 @@ impl AppState {
         let guard = self.engine.lock().expect("engine mutex poisoned");
         dispatch_query(&guard, query)
     }
+
+    /// Apply a watcher-reported filesystem change, publishing any resulting
+    /// events to subscribers. Best-effort: a transient failure is logged, not
+    /// propagated, so the watch loop keeps running.
+    pub fn apply_change_blocking(&self, change: &cairn_ports::FsChange) {
+        let mut guard = self.engine.lock().expect("engine mutex poisoned");
+        let mut sink = BroadcastSink(self.events.clone());
+        if let Err(e) = guard.apply_change(change, &mut sink) {
+            eprintln!("watch: apply_change failed: {e}");
+        }
+    }
 }
 
 fn status_for(err: &ServiceError) -> StatusCode {

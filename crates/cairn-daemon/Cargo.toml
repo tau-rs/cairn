@@ -14,6 +14,7 @@ path = "src/lib.rs"
 
 [dependencies]
 cairn-domain = { path = "../cairn-domain" }
+cairn-ports = { path = "../cairn-ports" }
 cairn-app = { path = "../cairn-app" }
 cairn-infra = { path = "../cairn-infra" }
 cairn-contract = { path = "../cairn-contract" }

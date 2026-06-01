@@ -257,6 +257,7 @@ dependencies = [
  "cairn-contract",
  "cairn-domain",
  "cairn-infra",
+ "cairn-ports",
  "cairn-service",
  "clap",
  "futures-util",
