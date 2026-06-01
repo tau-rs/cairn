@@ -187,6 +187,23 @@ Error status mapping: `not_found` → 404, `invalid_request` → 400, `internal`
 Malformed JSON is rejected by the HTTP layer (4xx) as a non-`ContractError` body —
 handle that defensively.
 
+#### Browser UI: allowlist your origin
+
+The daemon **denies cross-origin by default**. To let a browser UI on
+`http://localhost:5173` call it, either create `<cairn>/cairn.toml`:
+
+```toml
+[cors]
+origins = ["http://localhost:5173"]
+```
+
+or run the daemon with `--cors-origin http://localhost:5173` (the flag is
+repeatable; both sources are merged). On startup the daemon prints the active
+allowlist so you can confirm which origins are permitted.
+
+The WebSocket `/events` route needs no CORS config — browsers connect
+cross-origin to WebSocket endpoints directly without a preflight.
+
 ### 4b. In-process transport (Tauri desktop) — most efficient, offline-first
 
 For the desktop app, do **not** run a localhost daemon. Instead, the Tauri Rust
@@ -259,6 +276,10 @@ code above the interface doesn't change.
   rejected → `invalid_request`). Notes are `.md` files.
 - **Write-then-read consistency:** a `write_note` triggers a full reindex before its
   response returns, so a subsequent `search` reflects it immediately.
+- **CORS is deny-by-default.** The daemon blocks cross-origin browser requests
+  unless the origin is explicitly allowlisted (see §4a "Browser UI: allowlist your
+  origin"). A browser UI that gets no response (or a CORS network error) most likely
+  needs `--cors-origin <origin>` or a `[cors].origins` entry in `cairn.toml`.
 - **No auth / loopback only.** The daemon binds `127.0.0.1` with no authentication —
   fine for a local desktop app; do not expose it to a network. Auth/TLS is a deferred
   engine sub-project (ADR-0002).
