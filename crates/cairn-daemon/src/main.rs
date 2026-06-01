@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use cairn_app::{Engine, Event};
-use cairn_daemon::{build_router, AppState, CairnEngine};
+use cairn_daemon::{build_router, cors_layer, AppState, CairnEngine, Config};
 use cairn_infra::{GitVcs, InMemoryIndex, LocalFsStore, NotifyWatcher};
 use cairn_ports::Watcher;
 use clap::Parser;
@@ -24,6 +24,13 @@ struct Cli {
     /// Disable the filesystem watcher (no live events on external edits).
     #[arg(long)]
     no_watch: bool,
+    /// Path to a TOML settings file (default: `<cairn>/cairn.toml` if present).
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Allow a browser origin to call the daemon (CORS). Repeatable; merged
+    /// with `[cors].origins` from the settings file.
+    #[arg(long = "cors-origin")]
+    cors_origin: Vec<String>,
 }
 
 fn build_engine(root: &Path) -> Result<CairnEngine, String> {
@@ -47,7 +54,26 @@ async fn run() -> Result<(), String> {
     engine.reindex(&mut startup).map_err(|e| e.to_string())?;
 
     let state = AppState::new(engine);
-    let app = build_router(state.clone());
+
+    // CORS allowlist: settings file (or default <cairn>/cairn.toml) ∪ --cors-origin.
+    let config = match &cli.config {
+        Some(path) => Config::load(path)?,
+        None => Config::load_default(&cli.cairn)?,
+    };
+    let mut cors_origins = config.cors.origins;
+    cors_origins.extend(cli.cors_origin.iter().cloned());
+    cors_origins.sort();
+    cors_origins.dedup();
+    if cors_origins.is_empty() {
+        println!(
+            "CORS: no cross-origin origins allowed (add [cors].origins to {}/cairn.toml or pass --cors-origin)",
+            cli.cairn.display()
+        );
+    } else {
+        println!("CORS: allowing {}", cors_origins.join(", "));
+    }
+
+    let app = build_router(state.clone()).layer(cors_layer(&cors_origins));
 
     if !cli.no_watch {
         match NotifyWatcher.watch(&cli.cairn) {
