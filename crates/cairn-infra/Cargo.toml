@@ -10,6 +10,7 @@ cairn-domain = { path = "../cairn-domain" }
 cairn-ports = { path = "../cairn-ports" }
 git2 = { workspace = true }
 notify = { workspace = true }
+tantivy = { workspace = true }
 notify-debouncer-full = { workspace = true }
 
 [dev-dependencies]
