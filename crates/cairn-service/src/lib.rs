@@ -3,7 +3,8 @@
 
 use cairn_app::{Engine, Event as AppEvent, EventSink};
 use cairn_contract::{
-    Command, CommandResponse, ContractError, Event as WireEvent, Query, QueryResponse,
+    Command, CommandResponse, ContractError, Event as WireEvent, GraphEdge, NoteSummary, Query,
+    QueryResponse,
 };
 use cairn_domain::NotePath;
 use cairn_ports::{PortError, SearchIndex, VaultStore, Vcs};
@@ -126,6 +127,34 @@ pub fn dispatch_query<S: VaultStore, I: SearchIndex, V: Vcs>(
                 .map(|np| np.as_str().to_string())
                 .collect();
             Ok(QueryResponse::Paths { paths })
+        }
+        Query::ListNotes => {
+            let notes = engine
+                .list_notes()?
+                .into_iter()
+                .map(|n| NoteSummary {
+                    path: n.path.as_str().to_string(),
+                    title: n.display_title(),
+                })
+                .collect();
+            Ok(QueryResponse::Notes { notes })
+        }
+        Query::GetGraph => {
+            let graph = engine.graph()?;
+            let nodes = graph
+                .nodes()
+                .into_iter()
+                .map(|p| p.as_str().to_string())
+                .collect();
+            let edges = graph
+                .edges()
+                .into_iter()
+                .map(|(from, to)| GraphEdge {
+                    from: from.as_str().to_string(),
+                    to: to.as_str().to_string(),
+                })
+                .collect();
+            Ok(QueryResponse::Graph { nodes, edges })
         }
     }
 }
@@ -283,6 +312,54 @@ mod tests {
                 commit: "abc1234".into()
             }
         );
+    }
+
+    #[test]
+    fn list_notes_and_graph_queries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut sink: Vec<AppEvent> = Vec::new();
+        dispatch_command(
+            &mut eng,
+            &Command::WriteNote {
+                path: "a.md".into(),
+                contents: "---\ntitle: Alpha\n---\nsee [[b]]".into(),
+            },
+            &mut sink,
+        )
+        .unwrap();
+        dispatch_command(
+            &mut eng,
+            &Command::WriteNote {
+                path: "b.md".into(),
+                contents: "hi".into(),
+            },
+            &mut sink,
+        )
+        .unwrap();
+
+        match dispatch_query(&eng, &Query::ListNotes).unwrap() {
+            QueryResponse::Notes { notes } => {
+                assert_eq!(notes.len(), 2);
+                assert!(notes.iter().any(|n| n.path == "a.md" && n.title == "Alpha"));
+                assert!(notes.iter().any(|n| n.path == "b.md" && n.title == "b"));
+            }
+            other => panic!("expected Notes, got {other:?}"),
+        }
+
+        match dispatch_query(&eng, &Query::GetGraph).unwrap() {
+            QueryResponse::Graph { nodes, edges } => {
+                assert_eq!(nodes, vec!["a.md".to_string(), "b.md".to_string()]);
+                assert_eq!(
+                    edges,
+                    vec![GraphEdge {
+                        from: "a.md".into(),
+                        to: "b.md".into()
+                    }]
+                );
+            }
+            other => panic!("expected Graph, got {other:?}"),
+        }
     }
 
     #[test]
