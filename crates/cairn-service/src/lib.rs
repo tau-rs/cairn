@@ -89,6 +89,12 @@ pub fn dispatch_command<S: VaultStore, I: SearchIndex, V: Vcs>(
             engine.delete_note(&p, sink)?;
             Ok(CommandResponse::Done)
         }
+        Command::RenameNote { from, to } => {
+            let from = parse_path(from)?;
+            let to = parse_path(to)?;
+            engine.rename_note(&from, &to, sink)?;
+            Ok(CommandResponse::Done)
+        }
         Command::Commit { message } => {
             let commit = engine.commit(message, sink)?;
             Ok(CommandResponse::Committed { commit })
@@ -479,5 +485,104 @@ mod tests {
             ContractError::from(ServiceError::Internal("boom".into())),
             ContractError::Internal { .. }
         ));
+    }
+
+    #[test]
+    fn rename_dispatch_moves_rewrites_and_maps_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut sink: Vec<AppEvent> = Vec::new();
+
+        dispatch_command(
+            &mut eng,
+            &Command::WriteNote {
+                path: "a.md".into(),
+                contents: "i am a".into(),
+            },
+            &mut sink,
+        )
+        .unwrap();
+        dispatch_command(
+            &mut eng,
+            &Command::WriteNote {
+                path: "b.md".into(),
+                contents: "link to [[a]]".into(),
+            },
+            &mut sink,
+        )
+        .unwrap();
+        sink.clear();
+
+        // Success: move a.md -> c.md, rewriting [[a]] in b.md to [[c]].
+        let resp = dispatch_command(
+            &mut eng,
+            &Command::RenameNote {
+                from: "a.md".into(),
+                to: "c.md".into(),
+            },
+            &mut sink,
+        )
+        .unwrap();
+        assert_eq!(resp, CommandResponse::Done);
+        assert_eq!(
+            dispatch_query(
+                &eng,
+                &Query::GetNote {
+                    path: "c.md".into()
+                }
+            )
+            .unwrap(),
+            QueryResponse::Note {
+                contents: "i am a".into()
+            }
+        );
+        assert_eq!(
+            dispatch_query(
+                &eng,
+                &Query::GetNote {
+                    path: "b.md".into()
+                }
+            )
+            .unwrap(),
+            QueryResponse::Note {
+                contents: "link to [[c]]".into()
+            }
+        );
+
+        // Target exists -> InvalidRequest (AlreadyExists mapped).
+        let err = dispatch_command(
+            &mut eng,
+            &Command::RenameNote {
+                from: "b.md".into(),
+                to: "c.md".into(),
+            },
+            &mut sink,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ServiceError::InvalidRequest(_)));
+
+        // Missing source -> NotFound.
+        let err = dispatch_command(
+            &mut eng,
+            &Command::RenameNote {
+                from: "gone.md".into(),
+                to: "z.md".into(),
+            },
+            &mut sink,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ServiceError::NotFound(_)));
+
+        // Invalid path -> InvalidRequest.
+        let err = dispatch_command(
+            &mut eng,
+            &Command::RenameNote {
+                from: "../escape.md".into(),
+                to: "z.md".into(),
+            },
+            &mut sink,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ServiceError::InvalidRequest(_)));
     }
 }
