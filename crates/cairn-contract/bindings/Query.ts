@@ -15,4 +15,4 @@ query: string, } | { "type": "get_backlinks",
 /**
  * Relative note path.
  */
-path: string, };
+path: string, } | { "type": "list_notes" } | { "type": "get_graph" };

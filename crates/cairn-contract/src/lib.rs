@@ -51,6 +51,10 @@ pub enum Query {
         /// Relative note path.
         path: String,
     },
+    /// List every note with a display title.
+    ListNotes,
+    /// Fetch the full link graph.
+    GetGraph,
 }
 
 /// A push event emitted by the engine.
@@ -94,6 +98,26 @@ pub enum CommandResponse {
     },
 }
 
+/// A note's path and display title, for list views.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct NoteSummary {
+    /// Relative note path.
+    pub path: String,
+    /// Display title (frontmatter title, first heading, or filename).
+    pub title: String,
+}
+
+/// A directed link edge between two notes, by path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct GraphEdge {
+    /// Source note path.
+    pub from: String,
+    /// Target note path.
+    pub to: String,
+}
+
 /// Result of a successful query.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -108,6 +132,18 @@ pub enum QueryResponse {
     Paths {
         /// Relative note paths.
         paths: Vec<String>,
+    },
+    /// Note summaries (response to `ListNotes`).
+    Notes {
+        /// One per note.
+        notes: Vec<NoteSummary>,
+    },
+    /// The link graph (response to `GetGraph`).
+    Graph {
+        /// All note paths.
+        nodes: Vec<String>,
+        /// Directed link edges.
+        edges: Vec<GraphEdge>,
     },
 }
 
@@ -164,5 +200,38 @@ mod tests {
         let j = serde_json::to_string(&e).unwrap();
         assert!(j.contains("\"type\":\"not_found\""));
         assert_eq!(serde_json::from_str::<ContractError>(&j).unwrap(), e);
+    }
+
+    #[test]
+    fn list_and_graph_responses_roundtrip() {
+        let n = QueryResponse::Notes {
+            notes: vec![NoteSummary {
+                path: "a.md".into(),
+                title: "Alpha".into(),
+            }],
+        };
+        let j = serde_json::to_string(&n).unwrap();
+        assert!(j.contains("\"type\":\"notes\""));
+        assert_eq!(serde_json::from_str::<QueryResponse>(&j).unwrap(), n);
+
+        let g = QueryResponse::Graph {
+            nodes: vec!["a.md".into(), "b.md".into()],
+            edges: vec![GraphEdge {
+                from: "a.md".into(),
+                to: "b.md".into(),
+            }],
+        };
+        let j = serde_json::to_string(&g).unwrap();
+        assert!(j.contains("\"type\":\"graph\""));
+        assert_eq!(serde_json::from_str::<QueryResponse>(&j).unwrap(), g);
+
+        assert_eq!(
+            serde_json::to_string(&Query::ListNotes).unwrap(),
+            "{\"type\":\"list_notes\"}"
+        );
+        assert_eq!(
+            serde_json::from_str::<Query>("{\"type\":\"get_graph\"}").unwrap(),
+            Query::GetGraph
+        );
     }
 }
