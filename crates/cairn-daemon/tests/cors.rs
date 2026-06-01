@@ -2,13 +2,13 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use cairn_app::Engine;
 use cairn_daemon::{build_router, cors_layer, AppState};
-use cairn_infra::{GitVcs, InMemoryIndex, LocalFsStore};
+use cairn_infra::{GitVcs, LocalFsStore, TantivyIndex};
 use tower::ServiceExt; // for `oneshot`
 
 fn app(dir: &std::path::Path, origins: &[String]) -> axum::Router {
     let engine = Engine::new(
         LocalFsStore::open(dir).unwrap(),
-        InMemoryIndex::default(),
+        TantivyIndex::in_memory().unwrap(),
         GitVcs::open_or_init(dir).unwrap(),
     );
     build_router(AppState::new(engine)).layer(cors_layer(origins))

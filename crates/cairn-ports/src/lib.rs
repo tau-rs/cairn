@@ -47,12 +47,19 @@ pub trait VaultStore {
     fn list(&self) -> Result<Vec<NotePath>, PortError>;
 }
 
-/// A search hit. Currently just the matching note's path; results are
-/// ordered by path, not by relevance (ranking arrives with a real index).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A single ranked search match.
+#[derive(Debug, Clone, PartialEq)]
 pub struct SearchHit {
     /// The matching note.
     pub path: NotePath,
+    /// Relevance score (BM25; higher is more relevant). Not normalized — use
+    /// for relative ordering only.
+    pub score: f32,
+    /// A plain-text excerpt of the body around the best match. Empty if none.
+    pub snippet: String,
+    /// `(start, end)` byte ranges within `snippet` that matched, for UI
+    /// highlighting. Half-open.
+    pub highlights: Vec<(u32, u32)>,
 }
 
 /// Full-text style search over note content.

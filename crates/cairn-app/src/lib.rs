@@ -308,8 +308,12 @@ mod tests {
         );
 
         assert_eq!(
-            eng.search("target").unwrap(),
-            vec![SearchHit { path: b.clone() }]
+            eng.search("target")
+                .unwrap()
+                .iter()
+                .map(|h| &h.path)
+                .collect::<Vec<_>>(),
+            vec![&b]
         );
         assert_eq!(eng.backlinks(&b).unwrap(), vec![a]);
     }

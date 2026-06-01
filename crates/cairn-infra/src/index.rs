@@ -11,6 +11,20 @@ pub struct InMemoryIndex {
     docs: Vec<Note>,
 }
 
+/// Char-safe truncation of a body to at most `max` bytes, for the in-memory
+/// index's snippet (a faithful-enough test double; precise highlighting is
+/// Tantivy's job).
+fn truncate_snippet(body: &str, max: usize) -> String {
+    if body.len() <= max {
+        return body.to_string();
+    }
+    let mut end = max;
+    while !body.is_char_boundary(end) {
+        end -= 1;
+    }
+    body[..end].to_string()
+}
+
 impl SearchIndex for InMemoryIndex {
     fn reindex(&mut self, notes: &[Note]) -> Result<(), PortError> {
         self.docs = notes.to_vec();
@@ -27,6 +41,9 @@ impl SearchIndex for InMemoryIndex {
             })
             .map(|n| SearchHit {
                 path: n.path.clone(),
+                score: 1.0,
+                snippet: truncate_snippet(&n.body, 160),
+                highlights: Vec::new(),
             })
             .collect();
         hits.sort_by(|a, b| a.path.cmp(&b.path));
@@ -68,17 +85,8 @@ mod tests {
             .unwrap();
         // "alpha" matches zeta.md by body and alpha.md by path; sorted by path.
         let hits = idx.search("alpha").unwrap();
-        assert_eq!(
-            hits,
-            vec![
-                SearchHit {
-                    path: NotePath::new("alpha.md").unwrap()
-                },
-                SearchHit {
-                    path: NotePath::new("zeta.md").unwrap()
-                },
-            ]
-        );
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, vec!["alpha.md", "zeta.md"]);
     }
 
     #[test]
@@ -87,12 +95,11 @@ mod tests {
         idx.reindex(&[note("a.md", "Hello World"), note("b.md", "other")])
             .unwrap();
         let hits = idx.search("hello").unwrap();
-        assert_eq!(
-            hits,
-            vec![SearchHit {
-                path: NotePath::new("a.md").unwrap()
-            }]
-        );
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, vec!["a.md"]);
+        let hit = &hits[0];
+        assert_eq!(hit.score, 1.0);
+        assert!(hit.snippet.contains("Hello World"));
     }
 
     #[test]
@@ -100,10 +107,12 @@ mod tests {
         let mut idx = InMemoryIndex::default();
         idx.upsert(&note("a.md", "hello target")).unwrap();
         assert_eq!(
-            idx.search("target").unwrap(),
-            vec![SearchHit {
-                path: NotePath::new("a.md").unwrap()
-            }]
+            idx.search("target")
+                .unwrap()
+                .iter()
+                .map(|h| h.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a.md"]
         );
         idx.upsert(&note("a.md", "changed")).unwrap(); // replace, not duplicate
         assert!(idx.search("target").unwrap().is_empty());

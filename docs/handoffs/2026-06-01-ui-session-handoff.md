@@ -35,7 +35,9 @@ Capabilities exposed through the contract:
 
 - **Notes:** create/overwrite, read, delete, and **link-aware rename/move**
   (`rename_note` moves the file and rewrites `[[wikilinks]]` that pointed at it).
-- **Search:** case-insensitive substring over body + path (in-memory index for now).
+- **Search:** n-gram full-text over body + path, BM25-ranked, with a per-result
+  score and highlighted snippet (Tantivy, in-memory index rebuilt on startup).
+  Mid-word substring still matches (e.g. `ell` finds `hello`).
 - **Links:** `[[wikilink]]` extraction, backlinks, and the full link graph.
 - **List:** every note with a display title (for a file tree).
 - **Graph:** nodes + directed edges (for a graph view).
@@ -91,7 +93,8 @@ type CommandResponse =
 
 type QueryResponse =
   | { type: "note";  contents: string }         // <- get_note
-  | { type: "paths"; paths: string[] }          // <- search, get_backlinks, notes_by_tag
+  | { type: "paths"; paths: string[] }          // <- get_backlinks, notes_by_tag
+  | { type: "search_results"; results: SearchResult[] } // <- search (ranked)
   | { type: "notes"; notes: NoteSummary[] }     // <- list_notes
   | { type: "graph"; nodes: string[]; edges: GraphEdge[] } // <- get_graph
   | { type: "tags";  tags: TagCount[] };        // <- list_tags
@@ -99,6 +102,7 @@ type QueryResponse =
 interface NoteSummary { path: string; title: string; tags: string[] }
 interface GraphEdge   { from: string; to: string }  // directed: from links to to
 interface TagCount    { tag: string; count: number }
+interface SearchResult { path: string; score: number; snippet: string; highlights: [number, number][] }
 
 // ---- push events (server -> client) ----
 type Event =
@@ -126,7 +130,7 @@ type ContractError =
 | Query | success response |
 |---|---|
 | `get_note` | `note { contents }` |
-| `search` | `paths { paths }` |
+| `search` | `search_results { results }` |
 | `get_backlinks` | `paths { paths }` |
 | `list_notes` | `notes { notes }` |
 | `get_graph` | `graph { nodes, edges }` |
@@ -237,7 +241,7 @@ code above the interface doesn't change.
    paths; show `title`).
 3. **Note view / editor** ← `get_note` to open; `write_note` on save (debounce
    keystrokes — see §6). A "commit" button calls `commit`.
-4. **Search** ← `search` (substring today; ranking arrives later, same shape).
+4. **Search** ← `search` → `search_results { results }` (BM25-ranked; each result has `path`, `score`, `snippet`, `highlights`).
 5. **Backlinks panel** ← `get_backlinks` for the open note.
 6. **Graph view** ← `get_graph` (`nodes` + directed `edges`).
 7. **Tag pane / filter** ← `list_tags` (tag pills with counts); `notes_by_tag` to
@@ -302,7 +306,7 @@ code above the interface doesn't change.
 Deferred engine sub-projects, each a clean seam — build the UI assuming the current
 behavior; these are additive and won't change the contract shapes you already use:
 
-- **Tantivy** full-text search (today: in-memory substring; same `search`/`paths` API).
+- **Tantivy** full-text search — **done** (BM25-ranked, `search_results` response; see §2/§3).
 - **File-watcher deferred items** — the daemon watcher is done (see ADR-0003).
   Still deferred: the in-process/Tauri watcher (the daemon is the only watcher
   host today), incremental reads (changed files are still read in full), and

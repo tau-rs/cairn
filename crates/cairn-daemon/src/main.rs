@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use cairn_app::{Engine, Event};
 use cairn_daemon::{build_router, cors_layer, AppState, CairnEngine, Config};
-use cairn_infra::{GitVcs, InMemoryIndex, LocalFsStore, NotifyWatcher};
+use cairn_infra::{GitVcs, LocalFsStore, NotifyWatcher, TantivyIndex};
 use cairn_ports::Watcher;
 use clap::Parser;
 
@@ -36,7 +36,8 @@ struct Cli {
 fn build_engine(root: &Path) -> Result<CairnEngine, String> {
     let store = LocalFsStore::open(root).map_err(|e| e.to_string())?;
     let vcs = GitVcs::open_or_init(root).map_err(|e| e.to_string())?;
-    Ok(Engine::new(store, InMemoryIndex::default(), vcs))
+    let index = TantivyIndex::in_memory().map_err(|e| e.to_string())?;
+    Ok(Engine::new(store, index, vcs))
 }
 
 async fn run() -> Result<(), String> {

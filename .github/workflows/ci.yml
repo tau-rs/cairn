@@ -94,10 +94,10 @@ jobs:
 
   locked-check:
     # Guards the Cargo.lock MSRV pin: a `cargo update` / Dependabot bump
-    # that pulls a crate raising MSRV above the pinned Rust 1.85 fails
-    # here loudly instead of silently. rust-toolchain.toml pins 1.85, so
+    # that pulls a crate raising MSRV above the pinned Rust 1.88 fails
+    # here loudly instead of silently. rust-toolchain.toml pins 1.88, so
     # this is also the MSRV build check.
-    name: locked-check (MSRV 1.85)
+    name: locked-check (MSRV 1.88)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
