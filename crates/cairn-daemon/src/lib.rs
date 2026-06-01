@@ -2,6 +2,9 @@
 //! only; no authentication (LoopbackTrust). The engine runs synchronously
 //! under a mutex via `spawn_blocking`.
 
+pub mod config;
+pub use config::Config;
+
 use std::sync::{Arc, Mutex};
 
 use axum::{
