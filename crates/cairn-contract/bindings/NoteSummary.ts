@@ -11,4 +11,8 @@ path: string,
 /**
  * Display title (frontmatter title, first heading, or filename).
  */
-title: string, };
+title: string, 
+/**
+ * Frontmatter tags of the note.
+ */
+tags: Array<string>, };

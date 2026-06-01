@@ -4,7 +4,7 @@
 use cairn_app::{Engine, Event as AppEvent, EventSink};
 use cairn_contract::{
     Command, CommandResponse, ContractError, Event as WireEvent, GraphEdge, NoteSummary, Query,
-    QueryResponse,
+    QueryResponse, TagCount,
 };
 use cairn_domain::NotePath;
 use cairn_ports::{PortError, SearchIndex, VaultStore, Vcs};
@@ -135,6 +135,7 @@ pub fn dispatch_query<S: VaultStore, I: SearchIndex, V: Vcs>(
                 .map(|n| NoteSummary {
                     path: n.path.as_str().to_string(),
                     title: n.display_title(),
+                    tags: n.tags(),
                 })
                 .collect();
             Ok(QueryResponse::Notes { notes })
@@ -155,6 +156,25 @@ pub fn dispatch_query<S: VaultStore, I: SearchIndex, V: Vcs>(
                 })
                 .collect();
             Ok(QueryResponse::Graph { nodes, edges })
+        }
+        Query::ListTags => {
+            let tags = engine
+                .list_tags()?
+                .into_iter()
+                .map(|(tag, count)| TagCount {
+                    tag,
+                    count: u32::try_from(count).unwrap_or(u32::MAX),
+                })
+                .collect();
+            Ok(QueryResponse::Tags { tags })
+        }
+        Query::NotesByTag { tag } => {
+            let paths = engine
+                .notes_by_tag(tag)?
+                .into_iter()
+                .map(|p| p.as_str().to_string())
+                .collect();
+            Ok(QueryResponse::Paths { paths })
         }
     }
 }
@@ -359,6 +379,65 @@ mod tests {
                 );
             }
             other => panic!("expected Graph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tag_queries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut sink: Vec<AppEvent> = Vec::new();
+        dispatch_command(
+            &mut eng,
+            &Command::WriteNote {
+                path: "a.md".into(),
+                contents: "---\ntags: [rust, ideas]\n---\nx".into(),
+            },
+            &mut sink,
+        )
+        .unwrap();
+        dispatch_command(
+            &mut eng,
+            &Command::WriteNote {
+                path: "b.md".into(),
+                contents: "---\ntags: rust\n---\ny".into(),
+            },
+            &mut sink,
+        )
+        .unwrap();
+
+        match dispatch_query(&eng, &Query::ListTags).unwrap() {
+            QueryResponse::Tags { tags } => {
+                assert_eq!(
+                    tags,
+                    vec![
+                        TagCount {
+                            tag: "ideas".into(),
+                            count: 1
+                        },
+                        TagCount {
+                            tag: "rust".into(),
+                            count: 2
+                        },
+                    ]
+                );
+            }
+            other => panic!("expected Tags, got {other:?}"),
+        }
+
+        match dispatch_query(&eng, &Query::NotesByTag { tag: "rust".into() }).unwrap() {
+            QueryResponse::Paths { paths } => {
+                assert_eq!(paths, vec!["a.md".to_string(), "b.md".to_string()])
+            }
+            other => panic!("expected Paths, got {other:?}"),
+        }
+
+        match dispatch_query(&eng, &Query::ListNotes).unwrap() {
+            QueryResponse::Notes { notes } => {
+                let a = notes.iter().find(|n| n.path == "a.md").unwrap();
+                assert_eq!(a.tags, vec!["rust".to_string(), "ideas".to_string()]);
+            }
+            other => panic!("expected Notes, got {other:?}"),
         }
     }
 

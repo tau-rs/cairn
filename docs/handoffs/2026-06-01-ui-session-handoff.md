@@ -38,6 +38,8 @@ Capabilities exposed through the contract:
 - **Links:** `[[wikilink]]` extraction, backlinks, and the full link graph.
 - **List:** every note with a display title (for a file tree).
 - **Graph:** nodes + directed edges (for a graph view).
+- **Tags:** frontmatter `tags:` per note → list all tags with counts (`list_tags`)
+  and notes-by-tag (`notes_by_tag`); each note's tags also ride along in `list_notes`.
 - **Commit:** stage + commit all changes to git.
 - **Events:** push notifications when notes change / are deleted / the cairn is
   committed / the index rebuilds.
@@ -75,7 +77,9 @@ type Query =
   | { type: "search";        query: string }
   | { type: "get_backlinks"; path: string }
   | { type: "list_notes" }                      // no fields
-  | { type: "get_graph" };                      // no fields
+  | { type: "get_graph" }                       // no fields
+  | { type: "list_tags" }                       // no fields
+  | { type: "notes_by_tag";  tag: string };
 
 // ---- responses ----
 type CommandResponse =
@@ -84,12 +88,14 @@ type CommandResponse =
 
 type QueryResponse =
   | { type: "note";  contents: string }         // <- get_note
-  | { type: "paths"; paths: string[] }          // <- search, get_backlinks
+  | { type: "paths"; paths: string[] }          // <- search, get_backlinks, notes_by_tag
   | { type: "notes"; notes: NoteSummary[] }     // <- list_notes
-  | { type: "graph"; nodes: string[]; edges: GraphEdge[] }; // <- get_graph
+  | { type: "graph"; nodes: string[]; edges: GraphEdge[] } // <- get_graph
+  | { type: "tags";  tags: TagCount[] };        // <- list_tags
 
-interface NoteSummary { path: string; title: string }
+interface NoteSummary { path: string; title: string; tags: string[] }
 interface GraphEdge   { from: string; to: string }  // directed: from links to to
+interface TagCount    { tag: string; count: number }
 
 // ---- push events (server -> client) ----
 type Event =
@@ -120,6 +126,8 @@ type ContractError =
 | `get_backlinks` | `paths { paths }` |
 | `list_notes` | `notes { notes }` |
 | `get_graph` | `graph { nodes, edges }` |
+| `list_tags` | `tags { tags }` |
+| `notes_by_tag` | `paths { paths }` |
 
 **Which commands emit which events** (events arrive on the push stream, not the
 command response):
@@ -210,7 +218,9 @@ code above the interface doesn't change.
 4. **Search** ← `search` (substring today; ranking arrives later, same shape).
 5. **Backlinks panel** ← `get_backlinks` for the open note.
 6. **Graph view** ← `get_graph` (`nodes` + directed `edges`).
-7. **Live updates.** `subscribe` to events; on `note_changed` / `note_deleted`
+7. **Tag pane / filter** ← `list_tags` (tag pills with counts); `notes_by_tag` to
+   filter; show a note's tags from the `tags` field on each `list_notes` summary.
+8. **Live updates.** `subscribe` to events; on `note_changed` / `note_deleted`
    refresh the affected views; on `reindexed` you may refresh search. On (re)connect,
    re-run `list_notes` + `get_graph` to resync (see §6).
 
@@ -233,6 +243,14 @@ code above the interface doesn't change.
   explicit refresh.
 - **Titles** come from `display_title`: frontmatter `title:` → else first `# heading`
   in the body → else the filename stem. A bare note shows its filename.
+- **Tags are frontmatter-only.** Read from the `tags:` key; inline `#tags` in the
+  body are **not** parsed. Supported forms: inline array `[a, b]`, block list
+  (`- a` lines), and comma/space-separated scalar; quotes stripped, deduped per
+  note. Nested tags like `notes/ideas` are opaque strings (split on `/` yourself
+  for a tree). Known limits of the hand-rolled parser: a *multi-line* inline array
+  and a `-tag` block item with no space after the dash are not parsed (a YAML
+  parser is the deferred path). `list_tags`/`notes_by_tag` are O(n) like the graph —
+  don't poll them per keystroke.
 - **Graph semantics:** `nodes` includes *every* note (including ones with no links);
   ordering is deterministic (sorted by path), so no client-side sort is needed;
   edges only connect *existing* notes — a `[[missing]]` link is dropped, so there are

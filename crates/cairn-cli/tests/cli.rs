@@ -111,3 +111,31 @@ fn list_and_graph_subcommands() {
         .success()
         .stdout(contains("a.md -> b.md"));
 }
+
+#[test]
+fn tags_and_tagged_subcommands() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    cairn(dir).arg("init").assert().success();
+    cairn(dir)
+        .args(["write", "a.md", "--", "---\ntags: [rust, ideas]\n---\nx"])
+        .assert()
+        .success();
+    cairn(dir)
+        .args(["write", "b.md", "--", "---\ntags: rust\n---\ny"])
+        .assert()
+        .success();
+
+    cairn(dir)
+        .arg("tags")
+        .assert()
+        .success()
+        .stdout(contains("rust\t2"))
+        .stdout(contains("ideas\t1"));
+    cairn(dir)
+        .args(["tagged", "rust"])
+        .assert()
+        .success()
+        .stdout(contains("a.md"))
+        .stdout(contains("b.md"));
+}

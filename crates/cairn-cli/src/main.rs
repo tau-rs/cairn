@@ -54,6 +54,13 @@ enum Command {
     List,
     /// Print the link graph as `from -> to` edges.
     Graph,
+    /// List all tags with note counts.
+    Tags,
+    /// List notes carrying a tag.
+    Tagged {
+        /// The tag to filter by.
+        tag: String,
+    },
 }
 
 fn build_engine(root: &Path) -> Result<Engine<LocalFsStore, InMemoryIndex, GitVcs>, String> {
@@ -147,6 +154,25 @@ fn run() -> Result<(), String> {
             {
                 for edge in edges {
                     println!("{} -> {}", edge.from, edge.to);
+                }
+            }
+        }
+        Command::Tags => {
+            if let QueryResponse::Tags { tags } =
+                dispatch_query(&engine, &WireQuery::ListTags).map_err(|e| e.to_string())?
+            {
+                for t in tags {
+                    println!("{}\t{}", t.tag, t.count);
+                }
+            }
+        }
+        Command::Tagged { tag } => {
+            if let QueryResponse::Paths { paths } =
+                dispatch_query(&engine, &WireQuery::NotesByTag { tag })
+                    .map_err(|e| e.to_string())?
+            {
+                for p in paths {
+                    println!("{p}");
                 }
             }
         }
