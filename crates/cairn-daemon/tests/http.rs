@@ -125,3 +125,22 @@ async fn malformed_json_is_client_error() {
         .unwrap();
     assert!(resp.status().is_client_error());
 }
+
+#[tokio::test]
+async fn list_notes_over_http() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = build_router(state(tmp.path()));
+
+    let (status, _) = post_json(
+        app.clone(),
+        "/command",
+        serde_json::json!({"type":"write_note","path":"a.md","contents":"hi"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = post_json(app, "/query", serde_json::json!({"type":"list_notes"})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["type"], "notes");
+    assert_eq!(body["notes"][0]["path"], "a.md");
+}
