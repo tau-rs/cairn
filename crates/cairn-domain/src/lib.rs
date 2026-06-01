@@ -5,7 +5,7 @@ pub mod note;
 pub use note::{Note, NotePath, NotePathError};
 
 pub mod link;
-pub use link::{extract_links, LinkTarget};
+pub use link::{extract_links, rewrite_link_target, LinkTarget};
 
 pub mod graph;
 pub use graph::Graph;
