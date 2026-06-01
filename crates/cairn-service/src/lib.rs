@@ -27,6 +27,7 @@ impl From<PortError> for ServiceError {
     fn from(e: PortError) -> Self {
         match e {
             PortError::NotFound(s) => ServiceError::NotFound(s),
+            PortError::AlreadyExists(s) => ServiceError::InvalidRequest(s),
             PortError::Adapter(s) => ServiceError::Internal(s),
         }
     }

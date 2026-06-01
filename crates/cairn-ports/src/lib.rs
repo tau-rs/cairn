@@ -12,6 +12,9 @@ pub enum PortError {
     /// An underlying adapter failed.
     #[error("{0}")]
     Adapter(String),
+    /// The target of a create/rename already exists.
+    #[error("already exists: {0}")]
+    AlreadyExists(String),
 }
 
 /// Read/write access to note content in a cairn.
@@ -31,6 +34,12 @@ pub trait VaultStore {
     /// # Errors
     /// Returns [`PortError`] if the adapter fails.
     fn delete(&mut self, path: &NotePath) -> Result<(), PortError>;
+    /// Move a note from `from` to `to`.
+    ///
+    /// # Errors
+    /// `NotFound` if `from` is missing; `AlreadyExists` if `to` exists; `Adapter`
+    /// on other failures.
+    fn rename(&mut self, from: &NotePath, to: &NotePath) -> Result<(), PortError>;
     /// List all note paths in the cairn.
     ///
     /// # Errors
