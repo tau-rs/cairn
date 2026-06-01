@@ -85,8 +85,8 @@ pub enum Event {
 #[ts(export)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CommandResponse {
-    /// A write or delete succeeded.
-    Written,
+    /// A simple command (write or delete) succeeded.
+    Done,
     /// A commit was created.
     Committed {
         /// Short commit id.

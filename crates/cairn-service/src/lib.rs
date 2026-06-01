@@ -69,6 +69,8 @@ fn parse_path(raw: &str) -> Result<NotePath, ServiceError> {
 ///
 /// # Errors
 /// Returns [`ServiceError`] on invalid input or engine failure.
+/// Callers serving a wire transport map the error via
+/// [`ContractError::from`].
 pub fn dispatch_command<S: VaultStore, I: SearchIndex, V: Vcs>(
     engine: &mut Engine<S, I, V>,
     command: &Command,
@@ -78,12 +80,12 @@ pub fn dispatch_command<S: VaultStore, I: SearchIndex, V: Vcs>(
         Command::WriteNote { path, contents } => {
             let p = parse_path(path)?;
             engine.write_note(&p, contents, sink)?;
-            Ok(CommandResponse::Written)
+            Ok(CommandResponse::Done)
         }
         Command::DeleteNote { path } => {
             let p = parse_path(path)?;
             engine.delete_note(&p, sink)?;
-            Ok(CommandResponse::Written)
+            Ok(CommandResponse::Done)
         }
         Command::Commit { message } => {
             let commit = engine.commit(message, sink)?;
@@ -96,6 +98,8 @@ pub fn dispatch_command<S: VaultStore, I: SearchIndex, V: Vcs>(
 ///
 /// # Errors
 /// Returns [`ServiceError`] on invalid input or engine failure.
+/// Callers serving a wire transport map the error via
+/// [`ContractError::from`].
 pub fn dispatch_query<S: VaultStore, I: SearchIndex, V: Vcs>(
     engine: &Engine<S, I, V>,
     query: &Query,
@@ -154,7 +158,7 @@ mod tests {
             &mut sink,
         )
         .unwrap();
-        assert_eq!(resp, CommandResponse::Written);
+        assert_eq!(resp, CommandResponse::Done);
 
         dispatch_command(
             &mut eng,
@@ -267,5 +271,56 @@ mod tests {
             app_event_to_wire(AppEvent::Reindexed(3)),
             WireEvent::Reindexed { count: 3 }
         );
+        assert_eq!(
+            app_event_to_wire(AppEvent::NoteDeleted(p.clone())),
+            WireEvent::NoteDeleted {
+                path: "a.md".into()
+            }
+        );
+        assert_eq!(
+            app_event_to_wire(AppEvent::Committed("abc1234".into())),
+            WireEvent::Committed {
+                commit: "abc1234".into()
+            }
+        );
+    }
+
+    #[test]
+    fn delete_dispatch_and_error_mappings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut sink: Vec<AppEvent> = Vec::new();
+
+        dispatch_command(
+            &mut eng,
+            &Command::WriteNote {
+                path: "a.md".into(),
+                contents: "hi".into(),
+            },
+            &mut sink,
+        )
+        .unwrap();
+        sink.clear();
+
+        let resp = dispatch_command(
+            &mut eng,
+            &Command::DeleteNote {
+                path: "a.md".into(),
+            },
+            &mut sink,
+        )
+        .unwrap();
+        assert_eq!(resp, CommandResponse::Done);
+        assert!(sink.contains(&AppEvent::NoteDeleted(NotePath::new("a.md").unwrap())));
+
+        // ContractError mapping for the non-NotFound arms.
+        assert!(matches!(
+            ContractError::from(ServiceError::InvalidRequest("bad".into())),
+            ContractError::InvalidRequest { .. }
+        ));
+        assert!(matches!(
+            ContractError::from(ServiceError::Internal("boom".into())),
+            ContractError::Internal { .. }
+        ));
     }
 }

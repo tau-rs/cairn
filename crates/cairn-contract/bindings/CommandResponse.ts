@@ -3,7 +3,7 @@
 /**
  * Result of a successful command.
  */
-export type CommandResponse = { "type": "written" } | { "type": "committed", 
+export type CommandResponse = { "type": "done" } | { "type": "committed", 
 /**
  * Short commit id.
  */
