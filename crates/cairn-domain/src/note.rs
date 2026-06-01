@@ -136,6 +136,59 @@ impl Note {
         self.body.hash(&mut h);
         h.finish()
     }
+
+    /// Tags declared in the note's frontmatter `tags:` key. Frontmatter-only
+    /// (inline `#tags` are not parsed). Supports inline arrays
+    /// (`tags: [a, b]`), block lists (`- a` lines), and comma/space-separated
+    /// scalars (`tags: a, b` / `tags: a b`). Values are trimmed, unquoted, and
+    /// de-duplicated in first-seen order. Only the literal key `tags:` matches.
+    #[must_use]
+    pub fn tags(&self) -> Vec<String> {
+        let Some(fm) = &self.frontmatter else {
+            return Vec::new();
+        };
+        let mut out: Vec<String> = Vec::new();
+        let mut lines = fm.lines();
+        while let Some(line) = lines.next() {
+            let Some(rest) = line.trim_start().strip_prefix("tags:") else {
+                continue;
+            };
+            let rest = rest.trim();
+            if let Some(inner) = rest.strip_prefix('[') {
+                let inner = inner.strip_suffix(']').unwrap_or(inner);
+                for tok in inner.split(',') {
+                    push_tag(&mut out, tok);
+                }
+            } else if rest.is_empty() {
+                // Block list: consume following "- item" lines.
+                for item_line in lines.by_ref() {
+                    let t = item_line.trim_start();
+                    if let Some(item) = t.strip_prefix("- ") {
+                        push_tag(&mut out, item);
+                    } else if t.is_empty() {
+                        continue;
+                    } else {
+                        break;
+                    }
+                }
+            } else {
+                for tok in rest.split([',', ' ', '\t']) {
+                    push_tag(&mut out, tok);
+                }
+            }
+            break; // only the first `tags:` key
+        }
+        out
+    }
+}
+
+/// Trim, strip one layer of surrounding quotes, and push a tag if non-empty
+/// and not already present (dedup, first-seen order).
+fn push_tag(out: &mut Vec<String>, raw: &str) {
+    let t = raw.trim().trim_matches('"').trim_matches('\'').trim();
+    if !t.is_empty() && !out.iter().any(|x| x == t) {
+        out.push(t.to_string());
+    }
 }
 
 #[cfg(test)]
@@ -208,5 +261,41 @@ mod tests {
         let b = Note::parse(p, "---\ntitle: X\n---\nDIFFERENT");
         assert_eq!(a1.content_hash(), a2.content_hash());
         assert_ne!(a1.content_hash(), b.content_hash());
+    }
+
+    fn tags_of(raw: &str) -> Vec<String> {
+        Note::parse(NotePath::new("a.md").unwrap(), raw).tags()
+    }
+
+    #[test]
+    fn tags_parses_all_frontmatter_forms() {
+        assert_eq!(
+            tags_of("---\ntags: [rust, \"ideas\"]\n---\nbody"),
+            vec!["rust", "ideas"]
+        );
+        assert_eq!(
+            tags_of("---\ntags:\n  - rust\n  - ideas\n---\nbody"),
+            vec!["rust", "ideas"]
+        );
+        assert_eq!(
+            tags_of("---\ntags: rust, ideas\n---\nbody"),
+            vec!["rust", "ideas"]
+        );
+        assert_eq!(
+            tags_of("---\ntags: rust ideas\n---\nbody"),
+            vec!["rust", "ideas"]
+        );
+        assert_eq!(
+            tags_of("---\ntags: notes/ideas\n---\nbody"),
+            vec!["notes/ideas"]
+        );
+    }
+
+    #[test]
+    fn tags_dedup_empty_and_non_matches() {
+        assert_eq!(tags_of("---\ntags: rust, rust, rust\n---\nb"), vec!["rust"]);
+        assert!(tags_of("no frontmatter here").is_empty());
+        assert!(tags_of("---\ntitle: X\n---\nb").is_empty());
+        assert!(tags_of("---\ntagsfoo: rust\n---\nb").is_empty());
     }
 }
