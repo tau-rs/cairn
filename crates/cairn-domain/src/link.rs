@@ -100,5 +100,11 @@ mod tests {
         );
         assert_eq!(rewrite_link_target("no links", "a", "b"), "no links");
         assert_eq!(rewrite_link_target("[[a]] [[a]]", "a", "b"), "[[b]] [[b]]");
+        // UTF-8 safety: multibyte content around brackets must not panic and is
+        // preserved byte-for-byte.
+        assert_eq!(
+            rewrite_link_target("héllo [[a]] wörld", "a", "b"),
+            "héllo [[b]] wörld"
+        );
     }
 }
