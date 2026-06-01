@@ -4,8 +4,9 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use cairn_app::{Engine, Event};
-use cairn_domain::NotePath;
+use cairn_contract::{Command as WireCommand, CommandResponse, Query as WireQuery, QueryResponse};
 use cairn_infra::{GitVcs, InMemoryIndex, LocalFsStore};
+use cairn_service::{dispatch_command, dispatch_query};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -80,32 +81,51 @@ fn run() -> Result<(), String> {
             println!("initialized cairn at {}", root.display());
         }
         Command::Write { path, contents } => {
-            let p = NotePath::new(&path).map_err(|e| e.to_string())?;
-            engine
-                .write_note(&p, &contents, &mut events)
-                .map_err(|e| e.to_string())?;
+            let resp = dispatch_command(
+                &mut engine,
+                &WireCommand::WriteNote {
+                    path: path.clone(),
+                    contents,
+                },
+                &mut events,
+            )
+            .map_err(|e| e.to_string())?;
+            debug_assert!(matches!(resp, CommandResponse::Done));
             println!("wrote {path}");
         }
         Command::Read { path } => {
-            let p = NotePath::new(&path).map_err(|e| e.to_string())?;
-            print!("{}", engine.read_note(&p).map_err(|e| e.to_string())?);
+            match dispatch_query(&engine, &WireQuery::GetNote { path })
+                .map_err(|e| e.to_string())?
+            {
+                QueryResponse::Note { contents } => print!("{contents}"),
+                QueryResponse::Paths { .. } => unreachable!("GetNote returns Note"),
+            }
         }
         Command::Search { query } => {
-            for hit in engine.search(&query).map_err(|e| e.to_string())? {
-                println!("{}", hit.path.as_str());
+            if let QueryResponse::Paths { paths } =
+                dispatch_query(&engine, &WireQuery::Search { query }).map_err(|e| e.to_string())?
+            {
+                for p in paths {
+                    println!("{p}");
+                }
             }
         }
         Command::Backlinks { path } => {
-            let p = NotePath::new(&path).map_err(|e| e.to_string())?;
-            for b in engine.backlinks(&p).map_err(|e| e.to_string())? {
-                println!("{}", b.as_str());
+            if let QueryResponse::Paths { paths } =
+                dispatch_query(&engine, &WireQuery::GetBacklinks { path })
+                    .map_err(|e| e.to_string())?
+            {
+                for p in paths {
+                    println!("{p}");
+                }
             }
         }
         Command::Commit { message } => {
-            let id = engine
-                .commit(&message, &mut events)
+            let resp = dispatch_command(&mut engine, &WireCommand::Commit { message }, &mut events)
                 .map_err(|e| e.to_string())?;
-            println!("committed {id}");
+            if let CommandResponse::Committed { commit } = resp {
+                println!("committed {commit}");
+            }
         }
     }
     Ok(())

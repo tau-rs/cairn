@@ -14,6 +14,8 @@ cairn-domain = { path = "../cairn-domain" }
 cairn-ports = { path = "../cairn-ports" }
 cairn-infra = { path = "../cairn-infra" }
 cairn-app = { path = "../cairn-app" }
+cairn-contract = { path = "../cairn-contract" }
+cairn-service = { path = "../cairn-service" }
 clap = { workspace = true }
 
 [dev-dependencies]
