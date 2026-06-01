@@ -113,6 +113,45 @@ fn list_and_graph_subcommands() {
 }
 
 #[test]
+fn rename_moves_note_and_rewrites_links() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    cairn(dir).arg("init").assert().success();
+    cairn(dir)
+        .args(["write", "a.md", "i am a"])
+        .assert()
+        .success();
+    cairn(dir)
+        .args(["write", "b.md", "link to [[a]] here"])
+        .assert()
+        .success();
+
+    cairn(dir)
+        .args(["rename", "a.md", "c.md"])
+        .assert()
+        .success()
+        .stdout(contains("renamed a.md -> c.md"));
+
+    // Old path gone, new path present with the same content.
+    cairn(dir)
+        .args(["read", "a.md"])
+        .assert()
+        .failure()
+        .stderr(contains("error:"));
+    cairn(dir)
+        .args(["read", "c.md"])
+        .assert()
+        .success()
+        .stdout(contains("i am a"));
+    // The link in b.md was rewritten a -> c.
+    cairn(dir)
+        .args(["read", "b.md"])
+        .assert()
+        .success()
+        .stdout(contains("link to [[c]] here"));
+}
+
+#[test]
 fn tags_and_tagged_subcommands() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();

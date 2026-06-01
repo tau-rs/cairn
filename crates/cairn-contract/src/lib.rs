@@ -24,6 +24,13 @@ pub enum Command {
         /// Relative note path.
         path: String,
     },
+    /// Rename or move a note (link-aware).
+    RenameNote {
+        /// Current relative path.
+        from: String,
+        /// New relative path (may be in a different directory).
+        to: String,
+    },
     /// Commit all changes with a message.
     Commit {
         /// Commit message.
@@ -207,6 +214,19 @@ mod tests {
         assert!(json.contains("\"type\":\"write_note\""));
         let back: Command = serde_json::from_str(&json).unwrap();
         assert_eq!(back, cmd);
+    }
+
+    #[test]
+    fn rename_note_command_roundtrips_with_snake_case_tag() {
+        let cmd = Command::RenameNote {
+            from: "a.md".into(),
+            to: "dir/b.md".into(),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"type\":\"rename_note\""));
+        assert!(json.contains("\"from\":\"a.md\""));
+        assert!(json.contains("\"to\":\"dir/b.md\""));
+        assert_eq!(serde_json::from_str::<Command>(&json).unwrap(), cmd);
     }
 
     #[test]

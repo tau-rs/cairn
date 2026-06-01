@@ -164,3 +164,52 @@ async fn list_tags_over_http() {
     assert_eq!(body["tags"][0]["tag"], "rust");
     assert_eq!(body["tags"][0]["count"], 1);
 }
+
+#[tokio::test]
+async fn rename_note_over_http() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = build_router(state(tmp.path()));
+
+    let (status, _) = post_json(
+        app.clone(),
+        "/command",
+        serde_json::json!({"type":"write_note","path":"a.md","contents":"i am a"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = post_json(
+        app.clone(),
+        "/command",
+        serde_json::json!({"type":"write_note","path":"b.md","contents":"link to [[a]]"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Rename a.md -> c.md: 200 + {"type":"done"}.
+    let (status, body) = post_json(
+        app.clone(),
+        "/command",
+        serde_json::json!({"type":"rename_note","from":"a.md","to":"c.md"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["type"], "done");
+
+    // The moved note is readable at its new path; the link in b.md was rewritten.
+    let (status, body) = post_json(
+        app.clone(),
+        "/query",
+        serde_json::json!({"type":"get_note","path":"c.md"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["contents"], "i am a");
+    let (status, body) = post_json(
+        app,
+        "/query",
+        serde_json::json!({"type":"get_note","path":"b.md"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["contents"], "link to [[c]]");
+}

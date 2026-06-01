@@ -33,7 +33,8 @@ dispatcher), `cairn-daemon` (HTTP+WS), `cairn-cli`.
 
 Capabilities exposed through the contract:
 
-- **Notes:** create/overwrite, read, delete (markdown files in a git-backed cairn).
+- **Notes:** create/overwrite, read, delete, and **link-aware rename/move**
+  (`rename_note` moves the file and rewrites `[[wikilinks]]` that pointed at it).
 - **Search:** case-insensitive substring over body + path (in-memory index for now).
 - **Links:** `[[wikilink]]` extraction, backlinks, and the full link graph.
 - **List:** every note with a display title (for a file tree).
@@ -53,6 +54,7 @@ cargo run -p cairn-cli -- --cairn ./demo list        # a.md <tab> <title>  ...
 cargo run -p cairn-cli -- --cairn ./demo search target   # -> b.md
 cargo run -p cairn-cli -- --cairn ./demo backlinks b.md  # -> a.md
 cargo run -p cairn-cli -- --cairn ./demo graph       # a.md -> b.md
+cargo run -p cairn-cli -- --cairn ./demo rename b.md c.md   # moves b.md->c.md, rewrites [[b]] in a.md to [[c]]
 cargo run -p cairn-cli -- --cairn ./demo commit "first"
 ```
 
@@ -70,6 +72,7 @@ discriminant in **snake_case**.
 type Command =
   | { type: "write_note";  path: string; contents: string }
   | { type: "delete_note"; path: string }
+  | { type: "rename_note"; from: string; to: string }   // link-aware move/rename
   | { type: "commit";      message: string };
 
 type Query =
@@ -83,7 +86,7 @@ type Query =
 
 // ---- responses ----
 type CommandResponse =
-  | { type: "done" }                            // write_note / delete_note ack
+  | { type: "done" }                            // write_note / delete_note / rename_note ack
   | { type: "committed"; commit: string };      // short git commit id
 
 type QueryResponse =
@@ -117,6 +120,7 @@ type ContractError =
 |---|---|
 | `write_note` | `done` |
 | `delete_note` | `done` |
+| `rename_note` | `done` |
 | `commit` | `committed { commit }` |
 
 | Query | success response |
@@ -136,6 +140,7 @@ command response):
 |---|---|
 | `write_note` | `note_changed`, then `reindexed` |
 | `delete_note` | `note_deleted`, then `reindexed` |
+| `rename_note` | `note_deleted` (old path), `note_changed` (new path), then a `note_changed` per note whose `[[wikilink]]` was rewritten (each followed by `reindexed`) |
 | `commit` | `committed` |
 
 ---
@@ -301,7 +306,9 @@ behavior; these are additive and won't change the contract shapes you already us
 - **File-watcher deferred items** — the daemon watcher is done (see ADR-0003).
   Still deferred: the in-process/Tauri watcher (the daemon is the only watcher
   host today), incremental reads (changed files are still read in full), and
-  rename stitching (renames surface as a `note_deleted` + `note_changed` pair).
+  watcher-level rename stitching (a rename done *externally on disk* still surfaces
+  to the watcher as a `note_deleted` + `note_changed` pair — but the explicit
+  `rename_note` **command** is now link-aware; see §2/§3).
 - **Auth/TLS + network exposure** for the daemon.
 - **CRDT live collaboration** (multi-cursor).
 - **tau agent integration** (`AgentRuntime` port is `NullRuntime` today).

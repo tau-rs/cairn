@@ -15,7 +15,15 @@ contents: string, } | { "type": "delete_note",
 /**
  * Relative note path.
  */
-path: string, } | { "type": "commit", 
+path: string, } | { "type": "rename_note", 
+/**
+ * Current relative path.
+ */
+from: string, 
+/**
+ * New relative path (may be in a different directory).
+ */
+to: string, } | { "type": "commit", 
 /**
  * Commit message.
  */

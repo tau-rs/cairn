@@ -1,7 +1,7 @@
 //! Application use-cases: orchestrate ports to fulfill commands and queries,
 //! emitting domain events. No transport or serialization lives here.
 
-use cairn_domain::{Graph, Note, NotePath};
+use cairn_domain::{rewrite_link_target, Graph, Note, NotePath};
 use cairn_ports::{FsChange, PortError, SearchHit, SearchIndex, VaultStore, Vcs};
 use std::collections::HashMap;
 
@@ -160,6 +160,42 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
     ) -> Result<(), PortError> {
         self.store.delete(path)?;
         self.apply_change(&FsChange::Removed(path.clone()), sink)
+    }
+
+    /// Rename or move a note, link-aware: moves the file, then rewrites
+    /// `[[wikilinks]]` that pointed at the old stem to the new stem in every
+    /// note. Emits `NoteDeleted(from)` + `NoteChanged(to)` (+ a `NoteChanged`
+    /// per rewritten note, + `Reindexed`s), all via [`Engine::apply_change`].
+    ///
+    /// A pure directory move (same stem) does not rewrite links. The rewrite
+    /// loop includes the moved note itself, so a self-link is fixed too.
+    ///
+    /// # Errors
+    /// Propagates [`PortError`] from the store (`NotFound` if `from` is missing,
+    /// `AlreadyExists` if `to` exists, `Adapter` otherwise).
+    pub fn rename_note(
+        &mut self,
+        from: &NotePath,
+        to: &NotePath,
+        sink: &mut dyn EventSink,
+    ) -> Result<(), PortError> {
+        self.store.rename(from, to)?;
+        self.apply_change(&FsChange::Removed(from.clone()), sink)?;
+        self.apply_change(&FsChange::Changed(to.clone()), sink)?;
+
+        let old_stem = from.stem();
+        let new_stem = to.stem();
+        if old_stem != new_stem {
+            for path in self.store.list()? {
+                let raw = self.store.read(&path)?;
+                let rewritten = rewrite_link_target(&raw, old_stem, new_stem);
+                if rewritten != raw {
+                    self.store.write(&path, &rewritten)?;
+                    self.apply_change(&FsChange::Changed(path.clone()), sink)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Search note content.
@@ -386,5 +422,65 @@ mod tests {
             .unwrap();
         assert_eq!(eng.list_notes().unwrap().len(), 2);
         assert_eq!(eng.graph().unwrap().edges().len(), 1);
+    }
+
+    #[test]
+    fn rename_moves_file_and_rewrites_links() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut ev = Vec::new();
+        let a = NotePath::new("a.md").unwrap();
+        let b = NotePath::new("b.md").unwrap();
+        let c = NotePath::new("c.md").unwrap();
+        eng.write_note(&a, "i am a", &mut ev).unwrap();
+        eng.write_note(&b, "link to [[a]] here", &mut ev).unwrap();
+
+        let mut ev2 = Vec::new();
+        eng.rename_note(&a, &c, &mut ev2).unwrap();
+
+        // file moved
+        assert!(matches!(eng.read_note(&a), Err(PortError::NotFound(_))));
+        assert_eq!(eng.read_note(&c).unwrap(), "i am a");
+        // link in b rewritten a -> c (stems)
+        assert_eq!(eng.read_note(&b).unwrap(), "link to [[c]] here");
+        // events: move (delete a + change c) then the rewrite of b
+        assert!(ev2.contains(&Event::NoteDeleted(a.clone())));
+        assert!(ev2.contains(&Event::NoteChanged(c.clone())));
+        assert!(ev2.contains(&Event::NoteChanged(b.clone())));
+    }
+
+    #[test]
+    fn pure_directory_move_keeps_stem_and_does_not_rewrite() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut ev = Vec::new();
+        let a = NotePath::new("a.md").unwrap();
+        let moved = NotePath::new("dir/a.md").unwrap();
+        let b = NotePath::new("b.md").unwrap();
+        eng.write_note(&a, "x", &mut ev).unwrap();
+        eng.write_note(&b, "see [[a]]", &mut ev).unwrap();
+
+        let mut ev2 = Vec::new();
+        eng.rename_note(&a, &moved, &mut ev2).unwrap();
+
+        assert_eq!(eng.read_note(&moved).unwrap(), "x");
+        // same stem "a" -> link NOT rewritten
+        assert_eq!(eng.read_note(&b).unwrap(), "see [[a]]");
+        assert!(!ev2.contains(&Event::NoteChanged(b.clone())));
+    }
+
+    #[test]
+    fn rename_onto_existing_note_is_already_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut ev = Vec::new();
+        let a = NotePath::new("a.md").unwrap();
+        let b = NotePath::new("b.md").unwrap();
+        eng.write_note(&a, "a", &mut ev).unwrap();
+        eng.write_note(&b, "b", &mut ev).unwrap();
+        assert!(matches!(
+            eng.rename_note(&a, &b, &mut Vec::new()),
+            Err(PortError::AlreadyExists(_))
+        ));
     }
 }

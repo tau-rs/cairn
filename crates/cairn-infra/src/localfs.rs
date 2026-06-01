@@ -78,6 +78,21 @@ impl VaultStore for LocalFsStore {
         })
     }
 
+    fn rename(&mut self, from: &NotePath, to: &NotePath) -> Result<(), PortError> {
+        let src = self.full(from);
+        let dst = self.full(to);
+        if !src.exists() {
+            return Err(PortError::NotFound(from.as_str().to_string()));
+        }
+        if dst.exists() {
+            return Err(PortError::AlreadyExists(to.as_str().to_string()));
+        }
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent).map_err(|e| PortError::Adapter(e.to_string()))?;
+        }
+        fs::rename(&src, &dst).map_err(|e| PortError::Adapter(e.to_string()))
+    }
+
     fn list(&self) -> Result<Vec<NotePath>, PortError> {
         let mut out = Vec::new();
         if self.root.exists() {
@@ -108,5 +123,30 @@ mod tests {
         let store = LocalFsStore::open(tmp.path()).unwrap();
         let p = NotePath::new("nope.md").unwrap();
         assert!(matches!(store.read(&p), Err(PortError::NotFound(_))));
+    }
+
+    #[test]
+    fn rename_moves_into_subdir_and_refuses_clobber() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = LocalFsStore::open(tmp.path()).unwrap();
+        let a = NotePath::new("a.md").unwrap();
+        let b = NotePath::new("dir/b.md").unwrap();
+        store.write(&a, "hello").unwrap();
+
+        store.rename(&a, &b).unwrap();
+        assert!(matches!(store.read(&a), Err(PortError::NotFound(_))));
+        assert_eq!(store.read(&b).unwrap(), "hello");
+
+        let c = NotePath::new("c.md").unwrap();
+        store.write(&c, "x").unwrap();
+        assert!(matches!(
+            store.rename(&c, &b),
+            Err(PortError::AlreadyExists(_))
+        ));
+        let gone = NotePath::new("gone.md").unwrap();
+        assert!(matches!(
+            store.rename(&gone, &NotePath::new("z.md").unwrap()),
+            Err(PortError::NotFound(_))
+        ));
     }
 }
