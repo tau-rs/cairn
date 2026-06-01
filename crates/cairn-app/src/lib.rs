@@ -115,8 +115,11 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
         path: &NotePath,
         sink: &mut dyn EventSink,
     ) -> Result<(), PortError> {
-        if self.memo.remove(path).is_some() {
+        if self.memo.contains_key(path) {
+            // Fallible op first, then the infallible memo drop, so index and
+            // memo stay consistent if a future index adapter's remove fails.
             self.index.remove(path)?;
+            self.memo.remove(path);
             sink.emit(Event::NoteDeleted(path.clone()));
             sink.emit(Event::Reindexed(self.memo.len()));
         }

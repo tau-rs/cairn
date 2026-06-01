@@ -124,8 +124,10 @@ impl Note {
         self.path.stem().to_string()
     }
 
-    /// A stable non-cryptographic hash of the note's content (frontmatter +
-    /// body), for change detection / memoization. Not for security.
+    /// A non-cryptographic hash of the note's content (frontmatter + body),
+    /// for in-memory change detection / memoization. Not for security, and
+    /// not stable across Rust versions or process restarts — do not persist
+    /// it or compare hashes across processes.
     #[must_use]
     pub fn content_hash(&self) -> u64 {
         use std::hash::{Hash, Hasher};
