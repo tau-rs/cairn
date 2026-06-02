@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use cairn_domain::NotePath;
-use cairn_ports::{PortError, VaultStore};
+use cairn_ports::{FileStamp, PortError, VaultStore};
 
 /// Stores notes as files under `root`.
 #[derive(Debug, Clone)]
@@ -101,11 +101,46 @@ impl VaultStore for LocalFsStore {
         out.sort();
         Ok(out)
     }
+
+    fn stamp(&self, path: &NotePath) -> Result<FileStamp, PortError> {
+        let full = self.full(path);
+        let meta = match std::fs::metadata(&full) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(PortError::NotFound(path.as_str().to_string()));
+            }
+            Err(e) => return Err(PortError::Adapter(e.to_string())),
+        };
+        let modified = meta
+            .modified()
+            .map_err(|e| PortError::Adapter(e.to_string()))?;
+        Ok(FileStamp {
+            modified,
+            len: meta.len(),
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stamp_reflects_writes_and_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = LocalFsStore::open(tmp.path()).unwrap();
+        let a = NotePath::new("a.md").unwrap();
+        assert!(matches!(store.stamp(&a), Err(PortError::NotFound(_))));
+
+        store.write(&a, "hello").unwrap();
+        let s1 = store.stamp(&a).unwrap();
+        assert_eq!(s1.len, 5);
+
+        // Different length guarantees a different stamp regardless of mtime resolution.
+        store.write(&a, "hello world!!").unwrap();
+        let s2 = store.stamp(&a).unwrap();
+        assert_ne!(s1, s2);
+    }
 
     #[test]
     fn write_read_list_roundtrip() {
