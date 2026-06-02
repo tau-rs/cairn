@@ -292,6 +292,8 @@ mod tests {
                 Event::NoteChanged(NotePath::new("a.md").unwrap()),
                 Event::NoteDeleted(NotePath::new("b.md").unwrap()),
                 Event::Reindexed(3),
+                // Committed is also noise for a human watch view.
+                Event::Committed("abc1234".into()),
             ],
         );
         assert_eq!(out, "changed a.md\nremoved b.md\n");
@@ -303,14 +305,17 @@ mod tests {
             true,
             vec![
                 Event::NoteChanged(NotePath::new("a.md").unwrap()),
+                Event::NoteDeleted(NotePath::new("b.md").unwrap()),
                 Event::Reindexed(2),
             ],
         );
         let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines.len(), 2);
+        assert_eq!(lines.len(), 3);
         assert!(lines[0].contains("\"type\":\"note_changed\""));
         assert!(lines[0].contains("\"path\":\"a.md\""));
-        assert!(lines[1].contains("\"type\":\"reindexed\""));
-        assert!(lines[1].contains("\"count\":2"));
+        assert!(lines[1].contains("\"type\":\"note_deleted\""));
+        assert!(lines[1].contains("\"path\":\"b.md\""));
+        assert!(lines[2].contains("\"type\":\"reindexed\""));
+        assert!(lines[2].contains("\"count\":2"));
     }
 }
