@@ -275,6 +275,8 @@ dependencies = [
  "cairn-domain",
  "cairn-infra",
  "cairn-ports",
+ "serde",
+ "serde_json",
  "tempfile",
 ]
 

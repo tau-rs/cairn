@@ -8,6 +8,8 @@ repository.workspace = true
 [dependencies]
 cairn-domain = { path = "../cairn-domain" }
 cairn-ports = { path = "../cairn-ports" }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 cairn-infra = { path = "../cairn-infra" }
