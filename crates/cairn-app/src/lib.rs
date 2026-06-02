@@ -731,6 +731,8 @@ mod tests {
         let idx_dir = tmp.path().join(".cairn/index");
         std::fs::write(tmp.path().join("a.md"), "alpha body").unwrap();
         std::fs::write(tmp.path().join("b.md"), "beta body").unwrap();
+        // c.md is left untouched between runs — it must NOT be re-read.
+        std::fs::write(tmp.path().join("c.md"), "gamma body").unwrap();
 
         {
             let mut eng = Engine::new(
@@ -754,10 +756,12 @@ mod tests {
             GitVcs::open_or_init(tmp.path()).unwrap(),
         );
         eng.reconcile(&mut Vec::new()).unwrap();
+        // Only the changed a.md is re-read; the unchanged c.md is skipped via
+        // the stamp, and the deleted b.md is removed without a read.
         assert_eq!(
             reads.load(Ordering::SeqCst),
             1,
-            "only the changed note is re-read"
+            "only the changed note is re-read; unchanged c.md is skipped"
         );
         assert!(eng
             .search("CHANGED")
@@ -765,5 +769,11 @@ mod tests {
             .iter()
             .any(|h| h.path.as_str() == "a.md"));
         assert!(eng.search("beta").unwrap().is_empty());
+        // The unchanged note survived (trusted from the persisted index).
+        assert!(eng
+            .search("gamma")
+            .unwrap()
+            .iter()
+            .any(|h| h.path.as_str() == "c.md"));
     }
 }
