@@ -53,6 +53,10 @@ Capabilities exposed through the contract:
   (auto-gitignored) and reconciles on startup, so it starts fast after the first run.
   Pass `--no-persist` (or `[index] persist = false` in `cairn.toml`) for an ephemeral
   in-memory index. (CLI read access to the persisted index is a later phase.)
+- **In-memory note cache:** `list_notes`, `graph`, `get_backlinks`, `list_tags`, and
+  `notes_by_tag` are served from an in-memory cache of parsed notes (populated on first
+  use, kept live by the watcher) instead of re-reading the vault per call — so polling
+  these from the UI is cheap after the first call.
 
 Try it via the CLI (a worked in-process consumer):
 ```
@@ -272,9 +276,9 @@ code above the interface doesn't change.
   the daemon with `--no-watch` to disable. Cairn's own writes and no-op rewrites
   are silently deduped by a content-hash memo, so the command path emits no
   duplicate events. Events are still best-effort (resync on reconnect).
-- **`list_notes` is O(n).** It walks and parses every note on each call (no caching
-  yet). Don't poll it on every keystroke; call it on open, on relevant events, or on
-  explicit refresh.
+- **`list_notes` call cadence.** Call it on open, on relevant events, or on explicit
+  refresh — not on every keystroke (a network round-trip per keystroke is wasteful
+  regardless of server cost).
 - **Titles** come from `display_title`: frontmatter `title:` → else first `# heading`
   in the body → else the filename stem. A bare note shows its filename.
 - **Tags are frontmatter-only.** Read from the `tags:` key; inline `#tags` in the
@@ -283,8 +287,9 @@ code above the interface doesn't change.
   note. Nested tags like `notes/ideas` are opaque strings (split on `/` yourself
   for a tree). Known limits of the hand-rolled parser: a *multi-line* inline array
   and a `-tag` block item with no space after the dash are not parsed (a YAML
-  parser is the deferred path). `list_tags`/`notes_by_tag` are O(n) like the graph —
-  don't poll them per keystroke.
+  parser is the deferred path). `list_tags`/`notes_by_tag` are served from the
+  in-memory cache after the first call — polling on events is fine; per-keystroke is
+  still wasteful (network round-trip).
 - **Graph semantics:** `nodes` includes *every* note (including ones with no links);
   ordering is deterministic (sorted by path), so no client-side sort is needed;
   edges only connect *existing* notes — a `[[missing]]` link is dropped, so there are
