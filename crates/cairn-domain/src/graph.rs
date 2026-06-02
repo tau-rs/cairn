@@ -21,16 +21,20 @@ impl Graph {
     /// Build a graph from all notes. Targets are resolved to a note whose
     /// stem equals the target text; unresolved targets are dropped.
     #[must_use]
-    pub fn build(notes: &[Note]) -> Self {
+    pub fn build<'a>(notes: impl IntoIterator<Item = &'a Note>) -> Self {
+        let notes: Vec<&Note> = notes.into_iter().collect();
         // Last note wins when two notes share a stem; callers should keep
         // note stems unique within a cairn.
-        let by_stem: BTreeMap<&str, &NotePath> =
-            notes.iter().map(|n| (n.path.stem(), &n.path)).collect();
+        let by_stem: BTreeMap<&str, &NotePath> = notes
+            .iter()
+            .copied()
+            .map(|n| (n.path.stem(), &n.path))
+            .collect();
 
         let mut forward: BTreeMap<NotePath, Vec<NotePath>> = BTreeMap::new();
         let mut backward: BTreeMap<NotePath, Vec<NotePath>> = BTreeMap::new();
 
-        for note in notes {
+        for note in notes.iter().copied() {
             let mut targets: Vec<NotePath> = extract_links(&note.body)
                 .into_iter()
                 .filter_map(|t| by_stem.get(t.0.as_str()).copied().cloned())
@@ -94,8 +98,8 @@ mod tests {
 
     #[test]
     fn resolves_forward_and_backlinks_by_stem() {
-        let notes = vec![note("a.md", "links to [[b]]"), note("dir/b.md", "no links")];
-        let g = Graph::build(&notes);
+        let notes = [note("a.md", "links to [[b]]"), note("dir/b.md", "no links")];
+        let g = Graph::build(notes.iter());
         let a = NotePath::new("a.md").unwrap();
         let b = NotePath::new("dir/b.md").unwrap();
         assert_eq!(g.forward_links(&a), &[b.clone()]);
@@ -104,15 +108,15 @@ mod tests {
 
     #[test]
     fn drops_unresolved_targets() {
-        let notes = vec![note("a.md", "links to [[missing]]")];
-        let g = Graph::build(&notes);
+        let notes = [note("a.md", "links to [[missing]]")];
+        let g = Graph::build(notes.iter());
         assert!(g.forward_links(&NotePath::new("a.md").unwrap()).is_empty());
     }
 
     #[test]
     fn nodes_and_edges_expose_the_graph() {
-        let notes = vec![note("a.md", "see [[b]]"), note("b.md", "no links")];
-        let g = Graph::build(&notes);
+        let notes = [note("a.md", "see [[b]]"), note("b.md", "no links")];
+        let g = Graph::build(notes.iter());
         let a = NotePath::new("a.md").unwrap();
         let b = NotePath::new("b.md").unwrap();
         assert_eq!(g.nodes(), vec![&a, &b]);

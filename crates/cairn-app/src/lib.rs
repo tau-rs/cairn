@@ -367,7 +367,7 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
     /// Returns [`PortError`] if a port operation fails.
     pub fn backlinks(&self, path: &NotePath) -> Result<Vec<NotePath>, PortError> {
         let notes = self.load_all_notes()?;
-        let graph = Graph::build(&notes);
+        let graph = Graph::build(notes.iter());
         Ok(graph.backlinks(path).to_vec())
     }
 
@@ -384,7 +384,7 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
     /// # Errors
     /// Returns [`PortError`] if a port operation fails.
     pub fn graph(&self) -> Result<Graph, PortError> {
-        Ok(Graph::build(&self.load_all_notes()?))
+        Ok(Graph::build(self.load_all_notes()?.iter()))
     }
 
     /// All tags across the cairn with note counts, sorted by tag.
