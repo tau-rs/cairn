@@ -1,13 +1,46 @@
 //! The `cairn` CLI: an in-process consumer of the engine.
 
+use std::io::Write;
 use std::path::Path;
 use std::process::ExitCode;
 
-use cairn_app::{Engine, Event};
+use cairn_app::{Engine, Event, EventSink};
 use cairn_contract::{Command as WireCommand, CommandResponse, Query as WireQuery, QueryResponse};
-use cairn_infra::{GitVcs, LocalFsStore, TantivyIndex};
-use cairn_service::{dispatch_command, dispatch_query};
+use cairn_infra::{GitVcs, LocalFsStore, NotifyWatcher, TantivyIndex};
+use cairn_ports::Watcher;
+use cairn_service::{app_event_to_wire, dispatch_command, dispatch_query, run_watch_loop};
 use clap::{Parser, Subcommand};
+
+/// Renders engine events for `cairn watch`. Generic over the writer so it is
+/// unit-testable without spawning the blocking command.
+struct WatchSink<W: Write> {
+    json: bool,
+    out: W,
+}
+
+impl<W: Write> EventSink for WatchSink<W> {
+    fn emit(&mut self, event: Event) {
+        if self.json {
+            let wire = app_event_to_wire(event);
+            let _ = writeln!(
+                self.out,
+                "{}",
+                serde_json::to_string(&wire).expect("wire event serializes")
+            );
+        } else {
+            match event {
+                Event::NoteChanged(p) => {
+                    let _ = writeln!(self.out, "changed {}", p.as_str());
+                }
+                Event::NoteDeleted(p) => {
+                    let _ = writeln!(self.out, "removed {}", p.as_str());
+                }
+                // Reindexed / Committed are noise for a human watch view.
+                _ => {}
+            }
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "cairn", about = "Cairn note engine")]
@@ -34,6 +67,12 @@ enum Command {
     Read {
         /// Relative note path.
         path: String,
+    },
+    /// Watch the cairn for changes and stream them until interrupted.
+    Watch {
+        /// Emit one JSON event per line instead of human-readable lines.
+        #[arg(long)]
+        json: bool,
     },
     /// Rename or move a note (link-aware).
     Rename {
@@ -200,6 +239,21 @@ fn run() -> Result<(), String> {
                 }
             }
         }
+        Command::Watch { json } => {
+            let handle = NotifyWatcher
+                .watch(&root)
+                .map_err(|e| format!("file watcher: {e}"))?;
+            eprintln!("watching {} for changes", root.display());
+            let mut sink = WatchSink {
+                json,
+                out: std::io::stdout(),
+            };
+            run_watch_loop(&handle, |change| {
+                if let Err(e) = engine.apply_change(change, &mut sink) {
+                    eprintln!("watch: {e}");
+                }
+            });
+        }
     }
     Ok(())
 }
@@ -211,5 +265,52 @@ fn main() -> ExitCode {
             eprintln!("error: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cairn_domain::NotePath;
+
+    fn render(json: bool, events: Vec<Event>) -> String {
+        let mut sink = WatchSink {
+            json,
+            out: Vec::<u8>::new(),
+        };
+        for e in events {
+            sink.emit(e);
+        }
+        String::from_utf8(sink.out).unwrap()
+    }
+
+    #[test]
+    fn human_lines_skip_reindexed() {
+        let out = render(
+            false,
+            vec![
+                Event::NoteChanged(NotePath::new("a.md").unwrap()),
+                Event::NoteDeleted(NotePath::new("b.md").unwrap()),
+                Event::Reindexed(3),
+            ],
+        );
+        assert_eq!(out, "changed a.md\nremoved b.md\n");
+    }
+
+    #[test]
+    fn json_lines_include_all_wire_events() {
+        let out = render(
+            true,
+            vec![
+                Event::NoteChanged(NotePath::new("a.md").unwrap()),
+                Event::Reindexed(2),
+            ],
+        );
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("\"type\":\"note_changed\""));
+        assert!(lines[0].contains("\"path\":\"a.md\""));
+        assert!(lines[1].contains("\"type\":\"reindexed\""));
+        assert!(lines[1].contains("\"count\":2"));
     }
 }
