@@ -254,8 +254,32 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
         Ok(())
     }
 
-    /// Create or overwrite a note; emits via the memo diff (see
-    /// [`Engine::apply_change`]).
+    /// Index a note whose new `contents` we just wrote ourselves. Unlike
+    /// [`Engine::apply_change`], this does NOT stat-guard: a same-length
+    /// self-write can share the previous `(mtime, len)` on coarse-resolution
+    /// filesystems (e.g. Windows), and a command write must never be skipped.
+    /// Still deduped by content hash. Records the fresh stamp so a later
+    /// external event on this path stat-guards correctly.
+    fn apply_write(
+        &mut self,
+        path: &NotePath,
+        contents: &str,
+        sink: &mut dyn EventSink,
+    ) -> Result<(), PortError> {
+        let note = Note::parse(path.clone(), contents);
+        let hash = note.content_hash();
+        self.stamps.insert(path.clone(), self.store.stamp(path)?);
+        if self.memo.get(path) == Some(&hash) {
+            return Ok(());
+        }
+        self.index.upsert(&note)?;
+        self.memo.insert(path.clone(), hash);
+        sink.emit(Event::NoteChanged(path.clone()));
+        sink.emit(Event::Reindexed(self.memo.len()));
+        Ok(())
+    }
+
+    /// Create or overwrite a note; emits via the memo diff.
     ///
     /// # Errors
     /// Returns [`PortError`] if a port operation fails.
@@ -266,7 +290,7 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
         sink: &mut dyn EventSink,
     ) -> Result<(), PortError> {
         self.store.write(path, contents)?;
-        self.apply_change(&FsChange::Changed(path.clone()), sink)
+        self.apply_write(path, contents, sink)
     }
 
     /// Read a note's raw contents.
@@ -319,7 +343,10 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
                 let rewritten = rewrite_link_target(&raw, old_stem, new_stem);
                 if rewritten != raw {
                     self.store.write(&path, &rewritten)?;
-                    self.apply_change(&FsChange::Changed(path.clone()), sink)?;
+                    // A link rewrite is often the same length (e.g. `[[a]]`->`[[c]]`);
+                    // index the known content directly so the stat-guard can't skip
+                    // it on a coarse-mtime filesystem.
+                    self.apply_write(&path, &rewritten, sink)?;
                 }
             }
         }
