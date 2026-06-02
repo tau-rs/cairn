@@ -104,7 +104,7 @@ impl VaultStore for LocalFsStore {
 
     fn stamp(&self, path: &NotePath) -> Result<FileStamp, PortError> {
         let full = self.full(path);
-        let meta = match std::fs::metadata(&full) {
+        let meta = match fs::metadata(&full) {
             Ok(m) => m,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Err(PortError::NotFound(path.as_str().to_string()));
