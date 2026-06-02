@@ -2,7 +2,7 @@
 //! emitting domain events. No transport or serialization lives here.
 
 use cairn_domain::{rewrite_link_target, Graph, Note, NotePath};
-use cairn_ports::{FsChange, PortError, SearchHit, SearchIndex, VaultStore, Vcs};
+use cairn_ports::{FileStamp, FsChange, PortError, SearchHit, SearchIndex, VaultStore, Vcs};
 use std::collections::HashMap;
 
 /// A domain event emitted as a side effect of a command.
@@ -36,6 +36,7 @@ pub struct Engine<S, I, V> {
     index: I,
     vcs: V,
     memo: HashMap<NotePath, u64>,
+    stamps: HashMap<NotePath, FileStamp>,
 }
 
 impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
@@ -46,6 +47,7 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
             index,
             vcs,
             memo: HashMap::new(),
+            stamps: HashMap::new(),
         }
     }
 
@@ -73,6 +75,11 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
             .iter()
             .map(|n| (n.path.clone(), n.content_hash()))
             .collect();
+        let mut stamps = HashMap::with_capacity(notes.len());
+        for n in &notes {
+            stamps.insert(n.path.clone(), self.store.stamp(&n.path)?);
+        }
+        self.stamps = stamps;
         sink.emit(Event::Reindexed(notes.len()));
         Ok(())
     }
@@ -90,6 +97,16 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
     ) -> Result<(), PortError> {
         match change {
             FsChange::Changed(path) => {
+                // Stat-guard: skip the read entirely when the file's (mtime,len)
+                // is unchanged (a spurious/duplicate watcher event).
+                let stamp = match self.store.stamp(path) {
+                    Ok(s) => s,
+                    Err(PortError::NotFound(_)) => return self.apply_removal(path, sink),
+                    Err(e) => return Err(e),
+                };
+                if self.stamps.get(path) == Some(&stamp) {
+                    return Ok(());
+                }
                 let raw = match self.store.read(path) {
                     Ok(raw) => raw,
                     Err(PortError::NotFound(_)) => return self.apply_removal(path, sink),
@@ -97,6 +114,9 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
                 };
                 let note = Note::parse(path.clone(), &raw);
                 let hash = note.content_hash();
+                // Record the new stamp even if content reverted, so the next
+                // unchanged event short-circuits.
+                self.stamps.insert(path.clone(), stamp);
                 if self.memo.get(path) == Some(&hash) {
                     return Ok(());
                 }
@@ -120,6 +140,7 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
             // memo stay consistent if a future index adapter's remove fails.
             self.index.remove(path)?;
             self.memo.remove(path);
+            self.stamps.remove(path);
             sink.emit(Event::NoteDeleted(path.clone()));
             sink.emit(Event::Reindexed(self.memo.len()));
         }
@@ -277,6 +298,67 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
 mod tests {
     use super::*;
     use cairn_infra::{GitVcs, InMemoryIndex, LocalFsStore};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// A `VaultStore` that counts `read` calls, delegating everything else to
+    /// an inner `LocalFsStore`.
+    struct CountingStore {
+        inner: LocalFsStore,
+        reads: Arc<AtomicUsize>,
+    }
+    impl VaultStore for CountingStore {
+        fn read(&self, path: &NotePath) -> Result<String, PortError> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.inner.read(path)
+        }
+        fn write(&mut self, path: &NotePath, contents: &str) -> Result<(), PortError> {
+            self.inner.write(path, contents)
+        }
+        fn delete(&mut self, path: &NotePath) -> Result<(), PortError> {
+            self.inner.delete(path)
+        }
+        fn rename(&mut self, from: &NotePath, to: &NotePath) -> Result<(), PortError> {
+            self.inner.rename(from, to)
+        }
+        fn list(&self) -> Result<Vec<NotePath>, PortError> {
+            self.inner.list()
+        }
+        fn stamp(&self, path: &NotePath) -> Result<FileStamp, PortError> {
+            self.inner.stamp(path)
+        }
+    }
+
+    #[test]
+    fn stat_guard_skips_read_when_stamp_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let store = CountingStore {
+            inner: LocalFsStore::open(tmp.path()).unwrap(),
+            reads: reads.clone(),
+        };
+        let mut eng = Engine::new(
+            store,
+            InMemoryIndex::default(),
+            GitVcs::open_or_init(tmp.path()).unwrap(),
+        );
+
+        std::fs::write(tmp.path().join("a.md"), "hello").unwrap();
+        let mut ev = Vec::new();
+        eng.reindex(&mut ev).unwrap(); // reads a.md once, seeds stamp
+        let before = reads.load(Ordering::SeqCst);
+
+        // Unchanged file: the stat-guard must skip the read AND emit nothing.
+        let a = NotePath::new("a.md").unwrap();
+        let mut e2 = Vec::new();
+        eng.apply_change(&FsChange::Changed(a), &mut e2).unwrap();
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            before,
+            "stat-guard must skip the read"
+        );
+        assert!(e2.is_empty());
+    }
 
     fn engine(dir: &std::path::Path) -> Engine<LocalFsStore, InMemoryIndex, GitVcs> {
         Engine::new(
