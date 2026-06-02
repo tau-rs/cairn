@@ -11,6 +11,33 @@ pub struct Config {
     /// CORS settings.
     #[serde(default)]
     pub cors: CorsConfig,
+    /// On-disk index settings.
+    #[serde(default)]
+    pub index: IndexConfig,
+}
+
+/// On-disk index persistence settings.
+#[derive(Debug, Deserialize)]
+pub struct IndexConfig {
+    /// Persist the index under `<cairn>/.cairn/index` (default true).
+    #[serde(default = "default_true")]
+    pub persist: bool,
+    /// Override the index directory (defaults to `<cairn>/.cairn/index`).
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+impl Default for IndexConfig {
+    fn default() -> Self {
+        Self {
+            persist: true,
+            path: None,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// CORS allowlist configuration.
@@ -89,5 +116,19 @@ mod tests {
             Config::load(&p).unwrap().cors.origins,
             vec!["http://x".to_string()]
         );
+    }
+
+    #[test]
+    fn index_persist_defaults_true() {
+        let c: Config = toml::from_str("").unwrap();
+        assert!(c.index.persist);
+        let c: Config = toml::from_str("[index]\n").unwrap();
+        assert!(c.index.persist);
+    }
+
+    #[test]
+    fn index_persist_can_be_disabled() {
+        let c: Config = toml::from_str("[index]\npersist = false").unwrap();
+        assert!(!c.index.persist);
     }
 }

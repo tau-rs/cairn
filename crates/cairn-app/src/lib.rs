@@ -3,7 +3,22 @@
 
 use cairn_domain::{rewrite_link_target, Graph, Note, NotePath};
 use cairn_ports::{FileStamp, FsChange, PortError, SearchHit, SearchIndex, VaultStore, Vcs};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, UNIX_EPOCH};
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StateEntry {
+    path: String,
+    hash: u64,
+    mtime_secs: u64,
+    mtime_nanos: u32,
+    len: u64,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct StatePayload {
+    entries: Vec<StateEntry>,
+}
 
 /// A domain event emitted as a side effect of a command.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,12 +78,7 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
         Ok(notes)
     }
 
-    /// Rebuild the index and the content-hash memo from the store (startup /
-    /// full rescan). Emits [`Event::Reindexed`].
-    ///
-    /// # Errors
-    /// Returns [`PortError`] if a port operation fails.
-    pub fn reindex(&mut self, sink: &mut dyn EventSink) -> Result<(), PortError> {
+    fn rebuild(&mut self) -> Result<(), PortError> {
         let notes = self.load_all_notes()?;
         self.index.reindex(&notes)?;
         self.memo = notes
@@ -80,8 +90,103 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
             stamps.insert(n.path.clone(), self.store.stamp(&n.path)?);
         }
         self.stamps = stamps;
-        sink.emit(Event::Reindexed(notes.len()));
         Ok(())
+    }
+
+    /// Rebuild the index and the content-hash memo from the store (startup /
+    /// full rescan). Emits [`Event::Reindexed`].
+    ///
+    /// # Errors
+    /// Returns [`PortError`] if a port operation fails.
+    pub fn reindex(&mut self, sink: &mut dyn EventSink) -> Result<(), PortError> {
+        self.rebuild()?;
+        sink.emit(Event::Reindexed(self.memo.len()));
+        Ok(())
+    }
+
+    /// Startup reconcile against a persisted index: load `state.json`, seed memo
+    /// and stamps, then stat each current note and re-index only what changed,
+    /// removing notes gone from disk. Saves the refreshed state, emits a single
+    /// [`Event::Reindexed`], and falls back to a full rebuild if state is absent
+    /// or invalid.
+    ///
+    /// # Errors
+    /// Returns [`PortError`] if a port operation fails.
+    pub fn reconcile(&mut self, sink: &mut dyn EventSink) -> Result<(), PortError> {
+        match self.store.read_meta()? {
+            Some(json) => match parse_state(&json) {
+                Ok(restored) => self.reconcile_warm(restored, sink),
+                Err(()) => self.reconcile_cold(sink),
+            },
+            None => self.reconcile_cold(sink),
+        }
+    }
+
+    fn reconcile_cold(&mut self, sink: &mut dyn EventSink) -> Result<(), PortError> {
+        self.rebuild()?;
+        self.save_state()?;
+        sink.emit(Event::Reindexed(self.memo.len()));
+        Ok(())
+    }
+
+    fn reconcile_warm(
+        &mut self,
+        restored: RestoredState,
+        sink: &mut dyn EventSink,
+    ) -> Result<(), PortError> {
+        self.memo = restored.iter().map(|(p, (h, _))| (p.clone(), *h)).collect();
+        self.stamps = restored.iter().map(|(p, (_, s))| (p.clone(), *s)).collect();
+
+        let current = self.store.list()?;
+        let current_set: HashSet<&NotePath> = current.iter().collect();
+        let removed: Vec<NotePath> = restored
+            .keys()
+            .filter(|p| !current_set.contains(*p))
+            .cloned()
+            .collect();
+        for p in removed {
+            self.index.remove(&p)?;
+            self.memo.remove(&p);
+            self.stamps.remove(&p);
+        }
+
+        for path in current {
+            let stamp = self.store.stamp(&path)?;
+            if self.stamps.get(&path) == Some(&stamp) {
+                continue; // unchanged on disk → trust the persisted index
+            }
+            let raw = self.store.read(&path)?;
+            let note = Note::parse(path.clone(), &raw);
+            let hash = note.content_hash();
+            self.index.upsert(&note)?;
+            self.memo.insert(path.clone(), hash);
+            self.stamps.insert(path, stamp);
+        }
+
+        self.save_state()?;
+        sink.emit(Event::Reindexed(self.memo.len()));
+        Ok(())
+    }
+
+    fn save_state(&self) -> Result<(), PortError> {
+        let mut entries = Vec::with_capacity(self.stamps.len());
+        for (path, stamp) in &self.stamps {
+            let hash = self.memo.get(path).copied().unwrap_or(0);
+            let dur = stamp
+                .modified
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default();
+            entries.push(StateEntry {
+                path: path.as_str().to_string(),
+                hash,
+                mtime_secs: dur.as_secs(),
+                mtime_nanos: dur.subsec_nanos(),
+                len: stamp.len,
+            });
+        }
+        let json = serde_json::to_string(&StatePayload { entries })
+            .map_err(|e| PortError::Adapter(e.to_string()))?;
+        self.store.write_meta(&json)
     }
 
     /// Apply a single filesystem change, deduped via the content-hash memo.
@@ -149,8 +254,32 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
         Ok(())
     }
 
-    /// Create or overwrite a note; emits via the memo diff (see
-    /// [`Engine::apply_change`]).
+    /// Index a note whose new `contents` we just wrote ourselves. Unlike
+    /// [`Engine::apply_change`], this does NOT stat-guard: a same-length
+    /// self-write can share the previous `(mtime, len)` on coarse-resolution
+    /// filesystems (e.g. Windows), and a command write must never be skipped.
+    /// Still deduped by content hash. Records the fresh stamp so a later
+    /// external event on this path stat-guards correctly.
+    fn apply_write(
+        &mut self,
+        path: &NotePath,
+        contents: &str,
+        sink: &mut dyn EventSink,
+    ) -> Result<(), PortError> {
+        let note = Note::parse(path.clone(), contents);
+        let hash = note.content_hash();
+        self.stamps.insert(path.clone(), self.store.stamp(path)?);
+        if self.memo.get(path) == Some(&hash) {
+            return Ok(());
+        }
+        self.index.upsert(&note)?;
+        self.memo.insert(path.clone(), hash);
+        sink.emit(Event::NoteChanged(path.clone()));
+        sink.emit(Event::Reindexed(self.memo.len()));
+        Ok(())
+    }
+
+    /// Create or overwrite a note; emits via the memo diff.
     ///
     /// # Errors
     /// Returns [`PortError`] if a port operation fails.
@@ -161,7 +290,7 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
         sink: &mut dyn EventSink,
     ) -> Result<(), PortError> {
         self.store.write(path, contents)?;
-        self.apply_change(&FsChange::Changed(path.clone()), sink)
+        self.apply_write(path, contents, sink)
     }
 
     /// Read a note's raw contents.
@@ -214,7 +343,10 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
                 let rewritten = rewrite_link_target(&raw, old_stem, new_stem);
                 if rewritten != raw {
                     self.store.write(&path, &rewritten)?;
-                    self.apply_change(&FsChange::Changed(path.clone()), sink)?;
+                    // A link rewrite is often the same length (e.g. `[[a]]`->`[[c]]`);
+                    // index the known content directly so the stat-guard can't skip
+                    // it on a coarse-mtime filesystem.
+                    self.apply_write(&path, &rewritten, sink)?;
                 }
             }
         }
@@ -296,10 +428,32 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
     }
 }
 
+type RestoredState = HashMap<NotePath, (u64, FileStamp)>;
+
+fn parse_state(json: &str) -> Result<RestoredState, ()> {
+    let payload: StatePayload = serde_json::from_str(json).map_err(|_| ())?;
+    let mut map = HashMap::with_capacity(payload.entries.len());
+    for e in payload.entries {
+        let path = NotePath::new(&e.path).map_err(|_| ())?;
+        let modified = UNIX_EPOCH + Duration::new(e.mtime_secs, e.mtime_nanos);
+        map.insert(
+            path,
+            (
+                e.hash,
+                FileStamp {
+                    modified,
+                    len: e.len,
+                },
+            ),
+        );
+    }
+    Ok(map)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cairn_infra::{GitVcs, InMemoryIndex, LocalFsStore};
+    use cairn_infra::{GitVcs, InMemoryIndex, LocalFsStore, TantivyIndex};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
@@ -328,6 +482,12 @@ mod tests {
         }
         fn stamp(&self, path: &NotePath) -> Result<FileStamp, PortError> {
             self.inner.stamp(path)
+        }
+        fn read_meta(&self) -> Result<Option<String>, PortError> {
+            self.inner.read_meta()
+        }
+        fn write_meta(&self, data: &str) -> Result<(), PortError> {
+            self.inner.write_meta(data)
         }
     }
 
@@ -570,5 +730,77 @@ mod tests {
             eng.rename_note(&a, &b, &mut Vec::new()),
             Err(PortError::AlreadyExists(_))
         ));
+    }
+
+    #[test]
+    fn reconcile_cold_builds_and_writes_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.md"), "ownership rules").unwrap();
+        let mut eng = Engine::new(
+            LocalFsStore::open(tmp.path()).unwrap(),
+            TantivyIndex::open_at(&tmp.path().join(".cairn/index")).unwrap(),
+            GitVcs::open_or_init(tmp.path()).unwrap(),
+        );
+        eng.reconcile(&mut Vec::new()).unwrap();
+        assert!(eng
+            .search("ownership")
+            .unwrap()
+            .iter()
+            .any(|h| h.path.as_str() == "a.md"));
+        // state.json was written — assert via a fresh store reading the same dir.
+        let store = LocalFsStore::open(tmp.path()).unwrap();
+        assert!(store.read_meta().unwrap().is_some());
+    }
+
+    #[test]
+    fn reconcile_warm_skips_unchanged_and_catches_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let idx_dir = tmp.path().join(".cairn/index");
+        std::fs::write(tmp.path().join("a.md"), "alpha body").unwrap();
+        std::fs::write(tmp.path().join("b.md"), "beta body").unwrap();
+        // c.md is left untouched between runs — it must NOT be re-read.
+        std::fs::write(tmp.path().join("c.md"), "gamma body").unwrap();
+
+        {
+            let mut eng = Engine::new(
+                LocalFsStore::open(tmp.path()).unwrap(),
+                TantivyIndex::open_at(&idx_dir).unwrap(),
+                GitVcs::open_or_init(tmp.path()).unwrap(),
+            );
+            eng.reconcile(&mut Vec::new()).unwrap();
+        }
+
+        std::fs::write(tmp.path().join("a.md"), "alpha CHANGED body").unwrap();
+        std::fs::remove_file(tmp.path().join("b.md")).unwrap();
+
+        let reads = Arc::new(AtomicUsize::new(0));
+        let mut eng = Engine::new(
+            CountingStore {
+                inner: LocalFsStore::open(tmp.path()).unwrap(),
+                reads: reads.clone(),
+            },
+            TantivyIndex::open_at(&idx_dir).unwrap(),
+            GitVcs::open_or_init(tmp.path()).unwrap(),
+        );
+        eng.reconcile(&mut Vec::new()).unwrap();
+        // Only the changed a.md is re-read; the unchanged c.md is skipped via
+        // the stamp, and the deleted b.md is removed without a read.
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            1,
+            "only the changed note is re-read; unchanged c.md is skipped"
+        );
+        assert!(eng
+            .search("CHANGED")
+            .unwrap()
+            .iter()
+            .any(|h| h.path.as_str() == "a.md"));
+        assert!(eng.search("beta").unwrap().is_empty());
+        // The unchanged note survived (trusted from the persisted index).
+        assert!(eng
+            .search("gamma")
+            .unwrap()
+            .iter()
+            .any(|h| h.path.as_str() == "c.md"));
     }
 }

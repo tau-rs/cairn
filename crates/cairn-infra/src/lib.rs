@@ -9,7 +9,7 @@ mod tantivy_index;
 
 pub use git::GitVcs;
 pub use index::InMemoryIndex;
-pub use localfs::LocalFsStore;
+pub use localfs::{ensure_cairn_dir, LocalFsStore};
 pub use notify_watcher::NotifyWatcher;
 pub use seams::{BlockingExecutor, NoCollab, NoopWatcher, NullRuntime};
 pub use tantivy_index::TantivyIndex;

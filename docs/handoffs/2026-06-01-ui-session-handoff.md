@@ -49,6 +49,10 @@ Capabilities exposed through the contract:
 - **Live watching:** external `.md` edits / `git pull` push `note_changed`/`note_deleted`
   events — over the daemon WebSocket and, in-process, via `cairn watch` or by driving
   `cairn_service::run_watch_loop` + `Engine::apply_change` in an embedder.
+- **Persistent index:** the daemon persists its search index under `<cairn>/.cairn/`
+  (auto-gitignored) and reconciles on startup, so it starts fast after the first run.
+  Pass `--no-persist` (or `[index] persist = false` in `cairn.toml`) for an ephemeral
+  in-memory index. (CLI read access to the persisted index is a later phase.)
 
 Try it via the CLI (a worked in-process consumer):
 ```
