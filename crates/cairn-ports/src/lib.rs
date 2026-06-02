@@ -60,6 +60,18 @@ pub trait VaultStore {
     /// # Errors
     /// `NotFound` if the note is missing; `Adapter` on other failures.
     fn stamp(&self, path: &NotePath) -> Result<FileStamp, PortError>;
+
+    /// Read the persisted engine metadata blob (`<root>/.cairn/state.json`), if present.
+    ///
+    /// # Errors
+    /// `Adapter` on a read/IO failure. A missing file is `Ok(None)`, not an error.
+    fn read_meta(&self) -> Result<Option<String>, PortError>;
+
+    /// Write the engine metadata blob, creating `<root>/.cairn/` if needed.
+    ///
+    /// # Errors
+    /// `Adapter` on an IO failure.
+    fn write_meta(&self, data: &str) -> Result<(), PortError>;
 }
 
 /// A single ranked search match.

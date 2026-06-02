@@ -6,6 +6,21 @@ use std::path::{Path, PathBuf};
 use cairn_domain::NotePath;
 use cairn_ports::{FileStamp, PortError, VaultStore};
 
+/// Create `<root>/.cairn/` and a `.gitignore` (`*`) so the cache never enters
+/// the user's notes repo. Idempotent. Returns the `.cairn` directory path.
+///
+/// # Errors
+/// `Adapter` if the directory or `.gitignore` cannot be created.
+pub fn ensure_cairn_dir(root: &Path) -> Result<PathBuf, PortError> {
+    let dir = root.join(".cairn");
+    fs::create_dir_all(&dir).map_err(|e| PortError::Adapter(e.to_string()))?;
+    let ignore = dir.join(".gitignore");
+    if !ignore.exists() {
+        fs::write(&ignore, "*\n").map_err(|e| PortError::Adapter(e.to_string()))?;
+    }
+    Ok(dir)
+}
+
 /// Stores notes as files under `root`.
 #[derive(Debug, Clone)]
 pub struct LocalFsStore {
@@ -119,11 +134,38 @@ impl VaultStore for LocalFsStore {
             len: meta.len(),
         })
     }
+
+    fn read_meta(&self) -> Result<Option<String>, PortError> {
+        let path = self.root.join(".cairn").join("state.json");
+        match fs::read_to_string(&path) {
+            Ok(s) => Ok(Some(s)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(PortError::Adapter(e.to_string())),
+        }
+    }
+
+    fn write_meta(&self, data: &str) -> Result<(), PortError> {
+        let dir = ensure_cairn_dir(&self.root)?;
+        fs::write(dir.join("state.json"), data).map_err(|e| PortError::Adapter(e.to_string()))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn meta_roundtrips_and_creates_gitignored_cairn_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = LocalFsStore::open(tmp.path()).unwrap();
+        assert!(store.read_meta().unwrap().is_none());
+
+        store.write_meta("{\"x\":1}").unwrap();
+        assert_eq!(store.read_meta().unwrap().as_deref(), Some("{\"x\":1}"));
+
+        let ignore = tmp.path().join(".cairn").join(".gitignore");
+        assert_eq!(std::fs::read_to_string(ignore).unwrap(), "*\n");
+    }
 
     #[test]
     fn stamp_reflects_writes_and_missing() {

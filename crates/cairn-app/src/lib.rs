@@ -329,6 +329,12 @@ mod tests {
         fn stamp(&self, path: &NotePath) -> Result<FileStamp, PortError> {
             self.inner.stamp(path)
         }
+        fn read_meta(&self) -> Result<Option<String>, PortError> {
+            self.inner.read_meta()
+        }
+        fn write_meta(&self, data: &str) -> Result<(), PortError> {
+            self.inner.write_meta(data)
+        }
     }
 
     #[test]
