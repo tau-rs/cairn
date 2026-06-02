@@ -78,9 +78,9 @@ async fn run() -> Result<(), String> {
             Ok(handle) => {
                 let watch_state = state.clone();
                 tokio::task::spawn_blocking(move || {
-                    while let Ok(change) = handle.changes.recv() {
-                        watch_state.apply_change_blocking(&change);
-                    }
+                    cairn_service::run_watch_loop(&handle, |change| {
+                        watch_state.apply_change_blocking(change)
+                    });
                 });
                 println!("watching {} for changes", cli.cairn.display());
             }
