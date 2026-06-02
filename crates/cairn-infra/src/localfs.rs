@@ -51,7 +51,12 @@ impl LocalFsStore {
                 .map_err(|e| PortError::Adapter(e.to_string()))?
                 .is_dir()
             {
-                if path.file_name().is_some_and(|n| n == ".git") {
+                // Skip VCS and the cairn cache (`.cairn/` holds the persisted
+                // index + state, never notes).
+                if path
+                    .file_name()
+                    .is_some_and(|n| n == ".git" || n == ".cairn")
+                {
                     continue;
                 }
                 self.collect_md(&path, out)?;
