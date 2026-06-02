@@ -24,6 +24,9 @@ struct Cli {
     /// Disable the filesystem watcher (no live events on external edits).
     #[arg(long)]
     no_watch: bool,
+    /// Disable the on-disk index (use an ephemeral in-memory index).
+    #[arg(long)]
+    no_persist: bool,
     /// Path to a TOML settings file (default: `<cairn>/cairn.toml` if present).
     #[arg(long)]
     config: Option<PathBuf>,
@@ -50,17 +53,40 @@ async fn run() -> Result<(), String> {
             cli.cairn.display()
         ));
     }
-    let mut engine = build_engine(&cli.cairn)?;
-    let mut startup: Vec<Event> = Vec::new();
-    engine.reindex(&mut startup).map_err(|e| e.to_string())?;
 
-    let state = AppState::new(engine);
-
-    // CORS allowlist: settings file (or default <cairn>/cairn.toml) ∪ --cors-origin.
+    // Load config before building the engine so index settings are available.
     let config = match &cli.config {
         Some(path) => Config::load(path)?,
         None => Config::load_default(&cli.cairn)?,
     };
+
+    let mut startup: Vec<Event> = Vec::new();
+    let persist = config.index.persist && !cli.no_persist;
+    let engine = if persist {
+        let index_dir = config
+            .index
+            .path
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| cli.cairn.join(".cairn").join("index"));
+        cairn_infra::ensure_cairn_dir(&cli.cairn).map_err(|e| e.to_string())?;
+        let store = LocalFsStore::open(&cli.cairn).map_err(|e| e.to_string())?;
+        let vcs = GitVcs::open_or_init(&cli.cairn).map_err(|e| e.to_string())?;
+        let index = TantivyIndex::open_at(&index_dir).map_err(|e| e.to_string())?;
+        let mut eng = Engine::new(store, index, vcs);
+        eng.reconcile(&mut startup).map_err(|e| e.to_string())?;
+        println!("persisting index at {}", index_dir.display());
+        eng
+    } else {
+        let mut eng = build_engine(&cli.cairn)?;
+        eng.reindex(&mut startup).map_err(|e| e.to_string())?;
+        println!("index: in-memory (not persisted)");
+        eng
+    };
+
+    let state = AppState::new(engine);
+
+    // CORS allowlist: settings file (or default <cairn>/cairn.toml) ∪ --cors-origin.
     let cors_origins = cairn_daemon::merge_cors_origins(config.cors.origins, &cli.cors_origin);
     if cors_origins.is_empty() {
         println!(
