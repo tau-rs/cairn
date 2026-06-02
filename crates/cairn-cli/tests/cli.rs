@@ -84,6 +84,12 @@ fn commands_require_an_initialized_cairn() {
         .assert()
         .failure()
         .stderr(contains("not a cairn"));
+    // `watch` is also guarded — it must require an existing cairn.
+    cairn(dir)
+        .args(["watch"])
+        .assert()
+        .failure()
+        .stderr(contains("not a cairn"));
     // And it must NOT have created a .git directory.
     assert!(!dir.join(".git").exists());
 }

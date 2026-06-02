@@ -46,6 +46,9 @@ Capabilities exposed through the contract:
 - **Commit:** stage + commit all changes to git.
 - **Events:** push notifications when notes change / are deleted / the cairn is
   committed / the index rebuilds.
+- **Live watching:** external `.md` edits / `git pull` push `note_changed`/`note_deleted`
+  events — over the daemon WebSocket and, in-process, via `cairn watch` or by driving
+  `cairn_service::run_watch_loop` + `Engine::apply_change` in an embedder.
 
 Try it via the CLI (a worked in-process consumer):
 ```
@@ -58,6 +61,7 @@ cargo run -p cairn-cli -- --cairn ./demo backlinks b.md  # -> a.md
 cargo run -p cairn-cli -- --cairn ./demo graph       # a.md -> b.md
 cargo run -p cairn-cli -- --cairn ./demo rename b.md c.md   # moves b.md->c.md, rewrites [[b]] in a.md to [[c]]
 cargo run -p cairn-cli -- --cairn ./demo commit "first"
+cargo run -p cairn-cli -- --cairn ./demo watch        # stream live changes (Ctrl-C to stop); --json for machine output
 ```
 
 ---
@@ -307,12 +311,13 @@ Deferred engine sub-projects, each a clean seam — build the UI assuming the cu
 behavior; these are additive and won't change the contract shapes you already use:
 
 - **Tantivy** full-text search — **done** (BM25-ranked, `search_results` response; see §2/§3).
-- **File-watcher deferred items** — the daemon watcher is done (see ADR-0003).
-  Still deferred: the in-process/Tauri watcher (the daemon is the only watcher
-  host today), incremental reads (changed files are still read in full), and
-  watcher-level rename stitching (a rename done *externally on disk* still surfaces
-  to the watcher as a `note_deleted` + `note_changed` pair — but the explicit
-  `rename_note` **command** is now link-aware; see §2/§3).
+- **File-watcher deferred items** — the daemon watcher and in-process watcher are done
+  (see ADR-0003, ADR-0005). `cairn watch` and `cairn_service::run_watch_loop` provide the
+  in-process path; the daemon refactored onto the same loop. Still deferred: incremental
+  reads (changed files are still read in full), and watcher-level rename stitching (a rename
+  done *externally on disk* still surfaces to the watcher as a `note_deleted` +
+  `note_changed` pair — but the explicit `rename_note` **command** is now link-aware; see
+  §2/§3).
 - **Auth/TLS + network exposure** for the daemon.
 - **CRDT live collaboration** (multi-cursor).
 - **tau agent integration** (`AgentRuntime` port is `NullRuntime` today).

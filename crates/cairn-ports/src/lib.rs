@@ -17,6 +17,16 @@ pub enum PortError {
     AlreadyExists(String),
 }
 
+/// Cheap file-change fingerprint: a note's last-modified time and byte length,
+/// obtained without reading contents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileStamp {
+    /// Last modification time.
+    pub modified: std::time::SystemTime,
+    /// File length in bytes.
+    pub len: u64,
+}
+
 /// Read/write access to note content in a cairn.
 pub trait VaultStore {
     /// Read a note's raw contents.
@@ -45,6 +55,11 @@ pub trait VaultStore {
     /// # Errors
     /// Returns [`PortError`] if the adapter fails.
     fn list(&self) -> Result<Vec<NotePath>, PortError>;
+    /// Stat a note's change-fingerprint without reading its contents.
+    ///
+    /// # Errors
+    /// `NotFound` if the note is missing; `Adapter` on other failures.
+    fn stamp(&self, path: &NotePath) -> Result<FileStamp, PortError>;
 }
 
 /// A single ranked search match.

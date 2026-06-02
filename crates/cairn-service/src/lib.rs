@@ -7,7 +7,20 @@ use cairn_contract::{
     QueryResponse, SearchResult, TagCount,
 };
 use cairn_domain::NotePath;
-use cairn_ports::{PortError, SearchIndex, VaultStore, Vcs};
+use cairn_ports::{FsChange, PortError, SearchIndex, VaultStore, Vcs, WatchHandle};
+
+/// Drain a watch handle until its sender drops, invoking `on_change` for each
+/// debounced change. Blocking — run on a dedicated thread (CLI `watch`) or via
+/// `tokio::task::spawn_blocking` (daemon).
+///
+/// The engine-apply + event-forwarding lives in the caller's `on_change`: the
+/// daemon locks a shared engine per change while the CLI owns it, and output
+/// differs — centralizing only the drain keeps this testable.
+pub fn run_watch_loop(handle: &WatchHandle, mut on_change: impl FnMut(&FsChange)) {
+    while let Ok(change) = handle.changes.recv() {
+        on_change(&change);
+    }
+}
 
 /// Errors surfaced when dispatching a contract request.
 #[derive(Debug, thiserror::Error)]
@@ -490,6 +503,28 @@ mod tests {
             ContractError::from(ServiceError::Internal("boom".into())),
             ContractError::Internal { .. }
         ));
+    }
+
+    #[test]
+    fn run_watch_loop_drains_until_sender_drops() {
+        use cairn_ports::{FsChange, WatchHandle};
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = WatchHandle::new(rx, Box::new(()));
+        tx.send(FsChange::Changed(NotePath::new("a.md").unwrap()))
+            .unwrap();
+        tx.send(FsChange::Removed(NotePath::new("b.md").unwrap()))
+            .unwrap();
+        drop(tx); // close the channel → loop ends
+
+        let mut seen = Vec::new();
+        run_watch_loop(&handle, |c| seen.push(c.clone()));
+        assert_eq!(
+            seen,
+            vec![
+                FsChange::Changed(NotePath::new("a.md").unwrap()),
+                FsChange::Removed(NotePath::new("b.md").unwrap()),
+            ]
+        );
     }
 
     #[test]
