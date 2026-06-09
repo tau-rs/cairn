@@ -19,4 +19,4 @@ path: string, } | { "type": "list_notes" } | { "type": "get_graph" } | { "type":
 /**
  * The tag to filter by.
  */
-tag: string, };
+tag: string, } | { "type": "list_plugins" };

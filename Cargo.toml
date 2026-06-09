@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/cairn-domain",
+    "crates/cairn-plugin-protocol",
     "crates/cairn-ports",
     "crates/cairn-infra",
     "crates/cairn-app",
@@ -9,6 +10,7 @@ members = [
     "crates/cairn-service",
     "crates/cairn-cli",
     "crates/cairn-daemon",
+    "crates/cairn-plugin-example",
 ]
 
 [workspace.package]

@@ -57,6 +57,11 @@ Capabilities exposed through the contract:
   `notes_by_tag` are served from an in-memory cache of parsed notes (populated on first
   use, kept live by the watcher) instead of re-reading the vault per call — so polling
   these from the UI is cheap after the first call.
+- **Plugins (engine, slice 1):** out-of-process plugins under
+  `<cairn>/.cairn/plugins/<id>/manifest.toml` (JSON-RPC/stdio). Drive them via the contract:
+  `{ type: "list_plugins" }` -> `{ type: "plugins", plugins: PluginSummary[] }`, and
+  `{ type: "invoke_plugin_command", plugin, command, args }` -> `{ type: "plugin_result", result }`.
+  Host-callbacks, capability enforcement, and sandbox are later slices.
 
 Try it via the CLI (a worked in-process consumer):
 ```

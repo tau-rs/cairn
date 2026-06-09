@@ -333,12 +333,35 @@ name = "cairn-infra"
 version = "0.0.0"
 dependencies = [
  "cairn-domain",
+ "cairn-plugin-protocol",
  "cairn-ports",
  "git2",
  "notify",
  "notify-debouncer-full",
+ "serde_json",
  "tantivy",
  "tempfile",
+ "toml",
+]
+
+[[package]]
+name = "cairn-plugin-example"
+version = "0.0.0"
+dependencies = [
+ "cairn-infra",
+ "cairn-plugin-protocol",
+ "cairn-ports",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "cairn-plugin-protocol"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "toml",
 ]
 
 [[package]]
@@ -346,6 +369,7 @@ name = "cairn-ports"
 version = "0.0.0"
 dependencies = [
  "cairn-domain",
+ "serde_json",
  "thiserror",
 ]
 
@@ -358,6 +382,7 @@ dependencies = [
  "cairn-domain",
  "cairn-infra",
  "cairn-ports",
+ "serde_json",
  "tempfile",
  "thiserror",
 ]
@@ -2268,6 +2293,7 @@ version = "11.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4994acea2522cd2b3b85c1d9529a55991e3ad5e25cdcd3de9d505972c4379424"
 dependencies = [
+ "serde_json",
  "thiserror",
  "ts-rs-macros",
 ]

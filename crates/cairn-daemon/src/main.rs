@@ -62,7 +62,7 @@ async fn run() -> Result<(), String> {
 
     let mut startup: Vec<Event> = Vec::new();
     let persist = config.index.persist && !cli.no_persist;
-    let engine = if persist {
+    let mut engine = if persist {
         let index_dir = config
             .index
             .path
@@ -83,6 +83,12 @@ async fn run() -> Result<(), String> {
         println!("index: in-memory (not persisted)");
         eng
     };
+
+    // Load engine plugins from <cairn>/.cairn/plugins (absent dir => none).
+    match cairn_infra::ProcessPluginHost::load(&cli.cairn.join(".cairn").join("plugins")) {
+        Ok(host) => engine.set_plugin_host(Box::new(host)),
+        Err(e) => eprintln!("warning: plugin host disabled: {e}"),
+    }
 
     let state = AppState::new(engine);
 
