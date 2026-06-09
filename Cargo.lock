@@ -371,6 +371,7 @@ dependencies = [
  "cairn-domain",
  "cairn-infra",
  "cairn-ports",
+ "serde_json",
  "tempfile",
  "thiserror",
 ]
