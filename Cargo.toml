@@ -10,6 +10,7 @@ members = [
     "crates/cairn-service",
     "crates/cairn-cli",
     "crates/cairn-daemon",
+    "crates/cairn-plugin-example",
 ]
 
 [workspace.package]
