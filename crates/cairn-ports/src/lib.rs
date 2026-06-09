@@ -182,3 +182,61 @@ pub trait AgentRuntime {
     /// Returns [`PortError`] if no runtime is configured or the action fails.
     fn run_action(&self, action: &str, context: Option<&str>) -> Result<String, PortError>;
 }
+
+/// A loaded plugin and the commands it declared at handshake.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginInfo {
+    /// Manifest id.
+    pub id: String,
+    /// Display name.
+    pub name: String,
+    /// Plugin version.
+    pub version: String,
+    /// Commands the plugin handles.
+    pub commands: Vec<PluginCommand>,
+}
+
+/// A command a plugin can handle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginCommand {
+    /// Command id (used to invoke).
+    pub id: String,
+    /// Human title.
+    pub title: String,
+}
+
+/// Hosts out-of-process plugins. Seam: [`NoopPluginHost`].
+pub trait PluginHost: Send {
+    /// The loaded plugins and their declared commands.
+    fn plugins(&self) -> Vec<PluginInfo>;
+
+    /// Invoke `command` on `plugin` with JSON `args`, returning its JSON result.
+    ///
+    /// # Errors
+    /// [`PortError::NotFound`] if the plugin/command is unknown; [`PortError::Adapter`]
+    /// on a transport or plugin-reported error.
+    fn invoke(
+        &mut self,
+        plugin: &str,
+        command: &str,
+        args: &serde_json::Value,
+    ) -> Result<serde_json::Value, PortError>;
+}
+
+/// No-plugins seam — the engine's default host.
+#[derive(Debug, Default)]
+pub struct NoopPluginHost;
+
+impl PluginHost for NoopPluginHost {
+    fn plugins(&self) -> Vec<PluginInfo> {
+        Vec::new()
+    }
+    fn invoke(
+        &mut self,
+        plugin: &str,
+        _command: &str,
+        _args: &serde_json::Value,
+    ) -> Result<serde_json::Value, PortError> {
+        Err(PortError::NotFound(format!("plugin {plugin}")))
+    }
+}

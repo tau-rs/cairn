@@ -8,6 +8,7 @@ repository.workspace = true
 [dependencies]
 cairn-domain = { path = "../cairn-domain" }
 thiserror = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
