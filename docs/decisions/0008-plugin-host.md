@@ -31,7 +31,18 @@ can't touch the cairn).
 The full out-of-process path is proven end-to-end (an example plugin spawned via the
 host, handshake, command invoke). The daemon loads plugins on startup
 (absent/broken → graceful). Plugins exit on stdin EOF; `Drop` also kills them (no
-orphans). Deferred to later slices: plugin SDK (slice 2), host-callbacks + capability
-enforcement (slice 3), vault events (4), content processors / port backends (5), OS
-sandbox (6), git-URL distribution (7); UI plugins are the UI session's. JSON-RPC id
-correlation is unchecked (safe under one-in-flight; revisit if concurrency is added).
+orphans). Deferred to later slices: plugin SDK (slice 2), vault events (4), content
+processors / port backends (5), OS sandbox (6), git-URL distribution (7); UI plugins
+are the UI session's. JSON-RPC id correlation is unchecked (safe under one-in-flight;
+revisit if concurrency is added).
+
+**Slice 3a (done):** bidirectional RPC — a plugin command can call back to the host
+mid-invoke (the host's invoke is now a full-duplex dispatch loop over an `Incoming`
+message: a callback request or the invoke response). Capabilities are now *enforced*
+at the callback boundary (the host gates each `host/*` method on a manifest-declared,
+namespaced capability string). Scope is one read-only callback, `host/readNote`
+(requires `fs:read`); the re-entrancy (engine `&mut self` vs the borrowed host) is
+resolved by `mem::replace`-ing the host out of the engine for the invoke's duration.
+Deferred to **slice 3b:** write callbacks (`host/writeNote`) + event emission, plus
+`search`/`listNotes` and the `net`/`agent` capabilities. See
+`docs/superpowers/specs/2026-06-09-plugin-host-slice3a-design.md`.

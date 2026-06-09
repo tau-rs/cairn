@@ -205,6 +205,18 @@ pub struct PluginCommand {
     pub title: String,
 }
 
+/// Operations a plugin may request of the host *during* an invoke. The host gates
+/// each on a declared capability before calling through to the implementation
+/// (the engine).
+pub trait PluginCallbacks {
+    /// Read a note's raw contents by path. Gated on the `fs:read` capability.
+    ///
+    /// # Errors
+    /// [`PortError::NotFound`] if the note does not exist; [`PortError::Adapter`]
+    /// on a storage failure.
+    fn read_note(&mut self, path: &str) -> Result<String, PortError>;
+}
+
 /// Hosts out-of-process plugins. Seam: [`NoopPluginHost`].
 pub trait PluginHost: Send {
     /// The loaded plugins and their declared commands.
@@ -220,6 +232,7 @@ pub trait PluginHost: Send {
         plugin: &str,
         command: &str,
         args: &serde_json::Value,
+        callbacks: &mut dyn PluginCallbacks,
     ) -> Result<serde_json::Value, PortError>;
 }
 
@@ -236,6 +249,7 @@ impl PluginHost for NoopPluginHost {
         plugin: &str,
         _command: &str,
         _args: &serde_json::Value,
+        _callbacks: &mut dyn PluginCallbacks,
     ) -> Result<serde_json::Value, PortError> {
         Err(PortError::NotFound(format!("plugin {plugin}")))
     }

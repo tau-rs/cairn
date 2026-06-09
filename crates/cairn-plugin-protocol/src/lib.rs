@@ -11,6 +11,16 @@ pub const JSONRPC_VERSION: &str = "2.0";
 pub const METHOD_INITIALIZE: &str = "initialize";
 pub const METHOD_INVOKE: &str = "invokeCommand";
 
+/// Plugin -> host: read a note's raw contents. Requires the `fs:read` capability.
+pub const METHOD_READ_NOTE: &str = "host/readNote";
+
+/// JSON-RPC error code: the host refused a callback (capability not declared, or
+/// unknown host method).
+pub const CALLBACK_DENIED: i64 = -32001;
+/// JSON-RPC error code: a callback's host operation failed (e.g. note not found,
+/// or malformed params).
+pub const CALLBACK_FAILED: i64 = -32002;
+
 /// A JSON-RPC request (host -> plugin).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Request {
@@ -65,6 +75,32 @@ pub struct CommandDecl {
 pub struct InvokeParams {
     pub command: String,
     pub args: serde_json::Value,
+}
+
+/// Params of the `host/readNote` callback.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadNoteParams {
+    pub path: String,
+}
+
+/// Result of the `host/readNote` callback.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadNoteResult {
+    pub contents: String,
+}
+
+/// A message the host reads from a plugin *during* an invoke: either a callback
+/// request from the plugin, or the response to the host's invoke. Distinguished
+/// untagged by the presence of `method` (Request) vs `result`/`error` (Response).
+/// The `Request` variant is listed first so serde tries it before `Response`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Incoming {
+    // Tried first: requires `method`. MUST stay before `Response` — `Response`
+    // has no `deny_unknown_fields`, so a request JSON would otherwise decode as
+    // a `Response` with its `method` field silently ignored.
+    Request(Request),
+    Response(Response),
 }
 
 /// A plugin manifest (`<cairn>/.cairn/plugins/<id>/manifest.toml`). Parsed by
@@ -183,5 +219,43 @@ mod tests {
         assert_eq!(m.engine.command, "./x");
         assert!(m.engine.args.is_empty());
         assert!(m.engine.capabilities.is_empty());
+    }
+
+    #[test]
+    fn incoming_decodes_request_and_response_variants() {
+        // A message carrying `method` is a host-callback Request.
+        let req_json =
+            r#"{"jsonrpc":"2.0","id":7,"method":"host/readNote","params":{"path":"a.md"}}"#;
+        match serde_json::from_str::<Incoming>(req_json).unwrap() {
+            Incoming::Request(r) => {
+                assert_eq!(r.method, METHOD_READ_NOTE);
+                assert_eq!(r.id, 7);
+            }
+            Incoming::Response(_) => panic!("expected Request variant"),
+        }
+
+        // A message carrying `result` (no `method`) is a Response.
+        let resp_json = r#"{"jsonrpc":"2.0","id":7,"result":{"contents":"hi"}}"#;
+        match serde_json::from_str::<Incoming>(resp_json).unwrap() {
+            Incoming::Response(r) => {
+                assert_eq!(r.id, 7);
+                assert_eq!(r.result.unwrap()["contents"], "hi");
+            }
+            Incoming::Request(_) => panic!("expected Response variant"),
+        }
+    }
+
+    #[test]
+    fn read_note_result_roundtrips() {
+        let rn = ReadNoteResult {
+            contents: "body".into(),
+        };
+        let v = serde_json::to_value(&rn).unwrap();
+        assert_eq!(
+            serde_json::from_value::<ReadNoteResult>(v)
+                .unwrap()
+                .contents,
+            "body"
+        );
     }
 }
