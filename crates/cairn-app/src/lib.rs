@@ -471,7 +471,12 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
         self.plugins.plugins()
     }
 
-    /// Invoke a plugin command.
+    /// Invoke a plugin command, servicing any host-callbacks it makes mid-invoke.
+    ///
+    /// The host is moved out of `self` for the duration (see below). If the host
+    /// *panics*, `self.plugins` is left as a [`NoopPluginHost`] rather than
+    /// restored — accepted, since a panicking host already implies a poisoned
+    /// engine (no `catch_unwind` guard).
     ///
     /// # Errors
     /// Propagates [`PortError`] from the plugin host.
