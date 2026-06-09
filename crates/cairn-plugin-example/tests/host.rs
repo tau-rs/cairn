@@ -37,7 +37,12 @@ fn host_loads_invokes_and_rejects_unknown() {
     assert!(plugins[0].commands.iter().any(|c| c.id == "echo"));
 
     let out = host
-        .invoke("example", "echo", &serde_json::json!({"x": 1, "y": "z"}), &mut cb)
+        .invoke(
+            "example",
+            "echo",
+            &serde_json::json!({"x": 1, "y": "z"}),
+            &mut cb,
+        )
         .unwrap();
     assert_eq!(out, serde_json::json!({"x": 1, "y": "z"}));
 
@@ -68,10 +73,18 @@ fn note_len_reads_via_callback() {
     .unwrap();
 
     let mut host = ProcessPluginHost::load(&tmp.path().join(".cairn").join("plugins")).unwrap();
-    let mut cb = MapCallbacks(HashMap::from([("note.md".to_string(), "hello body".to_string())]));
+    let mut cb = MapCallbacks(HashMap::from([(
+        "note.md".to_string(),
+        "hello body".to_string(),
+    )]));
 
     let out = host
-        .invoke("example", "noteLen", &serde_json::json!({"path": "note.md"}), &mut cb)
+        .invoke(
+            "example",
+            "noteLen",
+            &serde_json::json!({"path": "note.md"}),
+            &mut cb,
+        )
         .unwrap();
     assert_eq!(out, serde_json::json!({"len": 10}));
 }
@@ -93,10 +106,21 @@ fn note_len_denied_without_capability() {
     .unwrap();
 
     let mut host = ProcessPluginHost::load(&tmp.path().join(".cairn").join("plugins")).unwrap();
-    let mut cb = MapCallbacks(HashMap::from([("note.md".to_string(), "hello body".to_string())]));
+    let mut cb = MapCallbacks(HashMap::from([(
+        "note.md".to_string(),
+        "hello body".to_string(),
+    )]));
 
     let err = host
-        .invoke("example", "noteLen", &serde_json::json!({"path": "note.md"}), &mut cb)
+        .invoke(
+            "example",
+            "noteLen",
+            &serde_json::json!({"path": "note.md"}),
+            &mut cb,
+        )
         .unwrap_err();
-    assert!(matches!(err, PortError::Adapter(_)), "expected Adapter, got {err:?}");
+    assert!(
+        matches!(err, PortError::Adapter(_)),
+        "expected Adapter, got {err:?}"
+    );
 }

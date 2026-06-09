@@ -224,7 +224,8 @@ mod tests {
     #[test]
     fn incoming_decodes_request_and_response_variants() {
         // A message carrying `method` is a host-callback Request.
-        let req_json = r#"{"jsonrpc":"2.0","id":7,"method":"host/readNote","params":{"path":"a.md"}}"#;
+        let req_json =
+            r#"{"jsonrpc":"2.0","id":7,"method":"host/readNote","params":{"path":"a.md"}}"#;
         match serde_json::from_str::<Incoming>(req_json).unwrap() {
             Incoming::Request(r) => {
                 assert_eq!(r.method, METHOD_READ_NOTE);
@@ -246,8 +247,15 @@ mod tests {
 
     #[test]
     fn read_note_result_roundtrips() {
-        let rn = ReadNoteResult { contents: "body".into() };
+        let rn = ReadNoteResult {
+            contents: "body".into(),
+        };
         let v = serde_json::to_value(&rn).unwrap();
-        assert_eq!(serde_json::from_value::<ReadNoteResult>(v).unwrap().contents, "body");
+        assert_eq!(
+            serde_json::from_value::<ReadNoteResult>(v)
+                .unwrap()
+                .contents,
+            "body"
+        );
     }
 }

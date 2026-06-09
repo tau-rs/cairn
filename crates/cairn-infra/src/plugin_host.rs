@@ -101,11 +101,7 @@ impl LoadedPlugin {
     }
 
     /// Build the response to one host-callback request, gating on capability.
-    fn service_callback(
-        &self,
-        cb: &Request,
-        callbacks: &mut dyn PluginCallbacks,
-    ) -> Response {
+    fn service_callback(&self, cb: &Request, callbacks: &mut dyn PluginCallbacks) -> Response {
         let mut resp = Response {
             jsonrpc: JSONRPC_VERSION.to_string(),
             id: cb.id,
@@ -134,7 +130,8 @@ impl LoadedPlugin {
                     match serde_json::from_value::<ReadNoteParams>(cb.params.clone()) {
                         Ok(p) => match callbacks.read_note(&p.path) {
                             Ok(contents) => {
-                                resp.result = serde_json::to_value(ReadNoteResult { contents }).ok();
+                                resp.result =
+                                    serde_json::to_value(ReadNoteResult { contents }).ok();
                             }
                             Err(e) => {
                                 resp.error = Some(RpcError {
