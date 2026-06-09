@@ -2,7 +2,10 @@
 //! emitting domain events. No transport or serialization lives here.
 
 use cairn_domain::{rewrite_link_target, Graph, Note, NotePath};
-use cairn_ports::{FileStamp, FsChange, PortError, SearchHit, SearchIndex, VaultStore, Vcs};
+use cairn_ports::{
+    FileStamp, FsChange, NoopPluginHost, PluginHost, PluginInfo, PortError, SearchHit, SearchIndex,
+    VaultStore, Vcs,
+};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, UNIX_EPOCH};
@@ -54,6 +57,7 @@ pub struct Engine<S, I, V> {
     memo: HashMap<NotePath, u64>,
     stamps: HashMap<NotePath, FileStamp>,
     notes_cache: RefCell<Option<HashMap<NotePath, Note>>>,
+    plugins: Box<dyn PluginHost>,
 }
 
 impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
@@ -66,6 +70,7 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
             memo: HashMap::new(),
             stamps: HashMap::new(),
             notes_cache: RefCell::new(None),
+            plugins: Box::new(NoopPluginHost),
         }
     }
 
@@ -453,6 +458,30 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
         let id = self.vcs.commit_all(message)?;
         sink.emit(Event::Committed(id.clone()));
         Ok(id)
+    }
+
+    /// Replace the plugin host (the composition root injects the real one).
+    pub fn set_plugin_host(&mut self, host: Box<dyn PluginHost>) {
+        self.plugins = host;
+    }
+
+    /// Loaded plugins and their declared commands.
+    #[must_use]
+    pub fn list_plugins(&self) -> Vec<PluginInfo> {
+        self.plugins.plugins()
+    }
+
+    /// Invoke a plugin command.
+    ///
+    /// # Errors
+    /// Propagates [`PortError`] from the plugin host.
+    pub fn invoke_plugin_command(
+        &mut self,
+        plugin: &str,
+        command: &str,
+        args: &serde_json::Value,
+    ) -> Result<serde_json::Value, PortError> {
+        self.plugins.invoke(plugin, command, args)
     }
 }
 
@@ -850,6 +879,17 @@ mod tests {
             after_reindex,
             "reindex did not invalidate the cache"
         );
+    }
+
+    #[test]
+    fn default_plugin_host_is_noop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        assert!(eng.list_plugins().is_empty());
+        let err = eng
+            .invoke_plugin_command("nope", "x", &serde_json::Value::Null)
+            .unwrap_err();
+        assert!(matches!(err, PortError::NotFound(_)));
     }
 
     #[test]
