@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use cairn_domain::NotePath;
 use cairn_ports::{FsChange, PortError, WatchHandle, Watcher};
-use notify::{RecursiveMode, Watcher as NotifyWatcherTrait};
+use notify::RecursiveMode;
 use notify_debouncer_full::{new_debouncer, DebounceEventResult};
 
 /// Filesystem watcher over a cairn directory.
@@ -61,7 +61,6 @@ impl Watcher for NotifyWatcher {
         )
         .map_err(|e| PortError::Adapter(e.to_string()))?;
         debouncer
-            .watcher()
             .watch(&root, RecursiveMode::Recursive)
             .map_err(|e| PortError::Adapter(e.to_string()))?;
         Ok(WatchHandle::new(rx, Box::new(debouncer)))

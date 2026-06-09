@@ -155,7 +155,7 @@ async fn forward_events(mut socket: WebSocket, mut rx: broadcast::Receiver<WireE
                 match event {
                     Ok(ev) => {
                         let Ok(text) = serde_json::to_string(&ev) else { continue };
-                        if socket.send(Message::Text(text)).await.is_err() {
+                        if socket.send(Message::Text(text.into())).await.is_err() {
                             break;
                         }
                     }
