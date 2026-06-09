@@ -342,6 +342,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cairn-plugin-protocol"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
 name = "cairn-ports"
 version = "0.0.0"
 dependencies = [
