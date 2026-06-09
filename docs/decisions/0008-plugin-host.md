@@ -14,7 +14,7 @@ everything heavier.
 
 Own a standalone `cairn-plugin-protocol` crate — **JSON-RPC 2.0 over NDJSON
 (line-delimited) on stdio, MCP-style** — with **no tau dependency** (industry
-pattern: don't couple to a sister app's in-flight protocol; JSON-RPC over
+pattern: don't couple to a sister app's in-flight protocol; JSON-RPC rather than
 MessagePack for debuggability + standards alignment, future MCP-compatible for the
 agent-tool role). A `ProcessPluginHost` adapter (`cairn-infra`) spawns each
 `<cairn>/.cairn/plugins/<id>/manifest.toml` binary and speaks the protocol
