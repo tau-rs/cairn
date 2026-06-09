@@ -7,11 +7,12 @@ fn host_loads_invokes_and_rejects_unknown() {
     let tmp = tempfile::tempdir().unwrap();
     let pdir = tmp.path().join(".cairn").join("plugins").join("example");
     std::fs::create_dir_all(&pdir).unwrap();
+    // The command path goes in a TOML *literal* string (single quotes): on
+    // Windows the path has backslashes, which a basic ("...") string would treat
+    // as invalid escapes.
     std::fs::write(
         pdir.join("manifest.toml"),
-        format!(
-            "id=\"example\"\nname=\"Example\"\nversion=\"0.1.0\"\n[engine]\ncommand=\"{bin}\"\n"
-        ),
+        format!("id=\"example\"\nname=\"Example\"\nversion=\"0.1.0\"\n[engine]\ncommand='{bin}'\n"),
     )
     .unwrap();
 
