@@ -8,10 +8,13 @@ repository.workspace = true
 [dependencies]
 cairn-domain = { path = "../cairn-domain" }
 cairn-ports = { path = "../cairn-ports" }
+cairn-plugin-protocol = { path = "../cairn-plugin-protocol" }
 git2 = { workspace = true }
 notify = { workspace = true }
 tantivy = { workspace = true }
 notify-debouncer-full = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

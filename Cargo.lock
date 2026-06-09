@@ -333,12 +333,15 @@ name = "cairn-infra"
 version = "0.0.0"
 dependencies = [
  "cairn-domain",
+ "cairn-plugin-protocol",
  "cairn-ports",
  "git2",
  "notify",
  "notify-debouncer-full",
+ "serde_json",
  "tantivy",
  "tempfile",
+ "toml",
 ]
 
 [[package]]
