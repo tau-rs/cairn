@@ -3,8 +3,8 @@
 
 use cairn_app::{Engine, Event as AppEvent, EventSink};
 use cairn_contract::{
-    Command, CommandResponse, ContractError, Event as WireEvent, GraphEdge, NoteSummary, Query,
-    QueryResponse, SearchResult, TagCount,
+    Command, CommandResponse, ContractError, Event as WireEvent, GraphEdge, NoteSummary,
+    PluginCommandSummary, PluginSummary, Query, QueryResponse, SearchResult, TagCount,
 };
 use cairn_domain::NotePath;
 use cairn_ports::{FsChange, PortError, SearchIndex, VaultStore, Vcs, WatchHandle};
@@ -112,10 +112,14 @@ pub fn dispatch_command<S: VaultStore, I: SearchIndex, V: Vcs>(
             let commit = engine.commit(message, sink)?;
             Ok(CommandResponse::Committed { commit })
         }
-        // TODO(PH6): wire through PluginHost
-        Command::InvokePluginCommand { .. } => Err(ServiceError::InvalidRequest(
-            "plugin commands not yet wired".into(),
-        )),
+        Command::InvokePluginCommand {
+            plugin,
+            command,
+            args,
+        } => {
+            let result = engine.invoke_plugin_command(plugin, command, args)?;
+            Ok(CommandResponse::PluginResult { result })
+        }
     }
 }
 
@@ -205,10 +209,26 @@ pub fn dispatch_query<S: VaultStore, I: SearchIndex, V: Vcs>(
                 .collect();
             Ok(QueryResponse::Paths { paths })
         }
-        // TODO(PH6): wire through PluginHost
-        Query::ListPlugins => Err(ServiceError::InvalidRequest(
-            "plugin listing not yet wired".into(),
-        )),
+        Query::ListPlugins => {
+            let plugins = engine
+                .list_plugins()
+                .into_iter()
+                .map(|p| PluginSummary {
+                    id: p.id,
+                    name: p.name,
+                    version: p.version,
+                    commands: p
+                        .commands
+                        .into_iter()
+                        .map(|c| PluginCommandSummary {
+                            id: c.id,
+                            title: c.title,
+                        })
+                        .collect(),
+                })
+                .collect();
+            Ok(QueryResponse::Plugins { plugins })
+        }
     }
 }
 
@@ -511,6 +531,28 @@ mod tests {
             ContractError::from(ServiceError::Internal("boom".into())),
             ContractError::Internal { .. }
         ));
+    }
+
+    #[test]
+    fn list_plugins_empty_and_invoke_unknown_is_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        match dispatch_query(&eng, &Query::ListPlugins).unwrap() {
+            QueryResponse::Plugins { plugins } => assert!(plugins.is_empty()),
+            other => panic!("expected Plugins, got {other:?}"),
+        }
+        let mut sink: Vec<AppEvent> = Vec::new();
+        let err = dispatch_command(
+            &mut eng,
+            &Command::InvokePluginCommand {
+                plugin: "nope".into(),
+                command: "x".into(),
+                args: serde_json::Value::Null,
+            },
+            &mut sink,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ServiceError::NotFound(_)));
     }
 
     #[test]
