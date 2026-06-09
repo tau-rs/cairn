@@ -8,7 +8,7 @@ use cairn_plugin_protocol::{
     read_message, write_message, CommandDecl, InitializeParams, InitializeResult, InvokeParams,
     Manifest, Request, Response, JSONRPC_VERSION, METHOD_INITIALIZE, METHOD_INVOKE,
 };
-use cairn_ports::{PluginCommand, PluginHost, PluginInfo, PortError};
+use cairn_ports::{PluginCallbacks, PluginCommand, PluginHost, PluginInfo, PortError};
 
 fn adapt<E: std::fmt::Display>(e: E) -> PortError {
     PortError::Adapter(e.to_string())
@@ -149,6 +149,7 @@ impl PluginHost for ProcessPluginHost {
         plugin: &str,
         command: &str,
         args: &serde_json::Value,
+        _callbacks: &mut dyn PluginCallbacks,
     ) -> Result<serde_json::Value, PortError> {
         let p = self
             .loaded

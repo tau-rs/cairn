@@ -3,8 +3,8 @@
 
 use cairn_domain::{rewrite_link_target, Graph, Note, NotePath};
 use cairn_ports::{
-    FileStamp, FsChange, NoopPluginHost, PluginHost, PluginInfo, PortError, SearchHit, SearchIndex,
-    VaultStore, Vcs,
+    FileStamp, FsChange, NoopPluginHost, PluginCallbacks, PluginHost, PluginInfo, PortError,
+    SearchHit, SearchIndex, VaultStore, Vcs,
 };
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -481,7 +481,31 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
         command: &str,
         args: &serde_json::Value,
     ) -> Result<serde_json::Value, PortError> {
-        self.plugins.invoke(plugin, command, args)
+        // Move the real host into a local so `self.plugins` no longer aliases it;
+        // the callbacks handler can then borrow the rest of `self` (the store) to
+        // service host-callbacks the plugin sends mid-invoke.
+        let mut host = std::mem::replace(&mut self.plugins, Box::new(NoopPluginHost));
+        let result = {
+            let mut cb = EngineCallbacks { engine: self };
+            host.invoke(plugin, command, args, &mut cb)
+            // cb is dropped here, releasing the &mut self borrow
+        };
+        self.plugins = host;
+        result
+    }
+}
+
+/// Bridges plugin host-callbacks to engine operations. Held only for the duration
+/// of a single `invoke_plugin_command`, while `self.plugins` is a `NoopPluginHost`.
+struct EngineCallbacks<'a, S, I, V> {
+    engine: &'a mut Engine<S, I, V>,
+}
+
+impl<S: VaultStore, I: SearchIndex, V: Vcs> PluginCallbacks for EngineCallbacks<'_, S, I, V> {
+    fn read_note(&mut self, path: &str) -> Result<String, PortError> {
+        let np = NotePath::new(path)
+            .map_err(|e| PortError::NotFound(format!("invalid note path {path}: {e}")))?;
+        self.engine.read_note(&np)
     }
 }
 
@@ -879,6 +903,45 @@ mod tests {
             after_reindex,
             "reindex did not invalidate the cache"
         );
+    }
+
+    /// A stub host whose invoke calls back into the engine via the callbacks
+    /// handler — exercises the mem::replace re-entrancy in invoke_plugin_command.
+    struct CallbackEcho;
+    impl PluginHost for CallbackEcho {
+        fn plugins(&self) -> Vec<PluginInfo> {
+            vec![PluginInfo {
+                id: "cb".into(),
+                name: "cb".into(),
+                version: "0".into(),
+                commands: Vec::new(),
+            }]
+        }
+        fn invoke(
+            &mut self,
+            _plugin: &str,
+            _command: &str,
+            args: &serde_json::Value,
+            callbacks: &mut dyn cairn_ports::PluginCallbacks,
+        ) -> Result<serde_json::Value, PortError> {
+            let path = args["path"].as_str().unwrap_or_default();
+            let contents = callbacks.read_note(path)?;
+            Ok(serde_json::json!({ "contents": contents }))
+        }
+    }
+
+    #[test]
+    fn invoke_services_read_callback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut events = Vec::new();
+        eng.write_note(&NotePath::new("a.md").unwrap(), "hello body", &mut events)
+            .unwrap();
+        eng.set_plugin_host(Box::new(CallbackEcho));
+        let out = eng
+            .invoke_plugin_command("cb", "readit", &serde_json::json!({ "path": "a.md" }))
+            .unwrap();
+        assert_eq!(out["contents"], "hello body");
     }
 
     #[test]
