@@ -5,13 +5,24 @@ use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use cairn_plugin_protocol::{
-    read_message, write_message, CommandDecl, InitializeParams, InitializeResult, InvokeParams,
-    Manifest, Request, Response, JSONRPC_VERSION, METHOD_INITIALIZE, METHOD_INVOKE,
+    read_message, write_message, CommandDecl, Incoming, InitializeParams, InitializeResult,
+    InvokeParams, Manifest, ReadNoteParams, ReadNoteResult, Request, Response, RpcError,
+    CALLBACK_DENIED, CALLBACK_FAILED, JSONRPC_VERSION, METHOD_INITIALIZE, METHOD_INVOKE,
+    METHOD_READ_NOTE,
 };
 use cairn_ports::{PluginCallbacks, PluginCommand, PluginHost, PluginInfo, PortError};
 
 fn adapt<E: std::fmt::Display>(e: E) -> PortError {
     PortError::Adapter(e.to_string())
+}
+
+/// The capability a host-callback method requires, or `None` if the method is
+/// unknown to the host.
+fn required_cap(method: &str) -> Option<&'static str> {
+    match method {
+        METHOD_READ_NOTE => Some("fs:read"),
+        _ => None,
+    }
 }
 
 struct LoadedPlugin {
@@ -20,6 +31,8 @@ struct LoadedPlugin {
     stdout: BufReader<ChildStdout>,
     info: PluginInfo,
     next_id: u64,
+    /// Capabilities the manifest declared; gates host-callbacks.
+    capabilities: Vec<String>,
 }
 
 impl LoadedPlugin {
@@ -45,6 +58,108 @@ impl LoadedPlugin {
         }
         resp.result
             .ok_or_else(|| PortError::Adapter("plugin response had no result".into()))
+    }
+
+    /// Invoke a command, servicing any host-callbacks the plugin sends until it
+    /// returns the response to our invoke request.
+    fn invoke_command(
+        &mut self,
+        params: serde_json::Value,
+        callbacks: &mut dyn PluginCallbacks,
+    ) -> Result<serde_json::Value, PortError> {
+        self.next_id += 1;
+        let invoke_id = self.next_id;
+        let req = Request {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id: invoke_id,
+            method: METHOD_INVOKE.to_string(),
+            params,
+        };
+        write_message(&mut self.stdin, &req).map_err(adapt)?;
+        loop {
+            let msg: Incoming = read_message(&mut self.stdout)
+                .map_err(adapt)?
+                .ok_or_else(|| PortError::Adapter("plugin closed its output".into()))?;
+            match msg {
+                Incoming::Response(resp) => {
+                    if resp.id != invoke_id {
+                        continue; // stray id; one-in-flight invariant, ignore
+                    }
+                    if let Some(err) = resp.error {
+                        return Err(PortError::Adapter(format!("plugin error: {}", err.message)));
+                    }
+                    return resp
+                        .result
+                        .ok_or_else(|| PortError::Adapter("plugin response had no result".into()));
+                }
+                Incoming::Request(cb) => {
+                    let response = self.service_callback(&cb, callbacks);
+                    write_message(&mut self.stdin, &response).map_err(adapt)?;
+                }
+            }
+        }
+    }
+
+    /// Build the response to one host-callback request, gating on capability.
+    fn service_callback(
+        &self,
+        cb: &Request,
+        callbacks: &mut dyn PluginCallbacks,
+    ) -> Response {
+        let mut resp = Response {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id: cb.id,
+            result: None,
+            error: None,
+        };
+        let required = required_cap(&cb.method);
+        match required {
+            None => {
+                resp.error = Some(RpcError {
+                    code: CALLBACK_DENIED,
+                    message: format!("unknown host method {}", cb.method),
+                });
+            }
+            Some(cap) if !self.capabilities.iter().any(|c| c == cap) => {
+                resp.error = Some(RpcError {
+                    code: CALLBACK_DENIED,
+                    message: format!("capability {cap} not declared"),
+                });
+            }
+            // The cap is declared; dispatch the method. This match must stay in
+            // sync with `required_cap` — the `_` arm is only reachable if a method
+            // gains a capability there without a dispatch arm here.
+            Some(_) => match cb.method.as_str() {
+                METHOD_READ_NOTE => {
+                    match serde_json::from_value::<ReadNoteParams>(cb.params.clone()) {
+                        Ok(p) => match callbacks.read_note(&p.path) {
+                            Ok(contents) => {
+                                resp.result = serde_json::to_value(ReadNoteResult { contents }).ok();
+                            }
+                            Err(e) => {
+                                resp.error = Some(RpcError {
+                                    code: CALLBACK_FAILED,
+                                    message: e.to_string(),
+                                });
+                            }
+                        },
+                        Err(e) => {
+                            resp.error = Some(RpcError {
+                                code: CALLBACK_FAILED,
+                                message: e.to_string(),
+                            });
+                        }
+                    }
+                }
+                _ => {
+                    resp.error = Some(RpcError {
+                        code: CALLBACK_DENIED,
+                        message: format!("unknown host method {}", cb.method),
+                    });
+                }
+            },
+        }
+        resp
     }
 }
 
@@ -121,6 +236,7 @@ impl ProcessPluginHost {
                 commands: Vec::new(),
             },
             next_id: 0,
+            capabilities: manifest.engine.capabilities.clone(),
         };
         let init_params = serde_json::to_value(InitializeParams {
             host_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -149,7 +265,7 @@ impl PluginHost for ProcessPluginHost {
         plugin: &str,
         command: &str,
         args: &serde_json::Value,
-        _callbacks: &mut dyn PluginCallbacks,
+        callbacks: &mut dyn PluginCallbacks,
     ) -> Result<serde_json::Value, PortError> {
         let p = self
             .loaded
@@ -164,7 +280,7 @@ impl PluginHost for ProcessPluginHost {
             args: args.clone(),
         })
         .map_err(adapt)?;
-        p.call(METHOD_INVOKE, params)
+        p.invoke_command(params, callbacks)
     }
 }
 
