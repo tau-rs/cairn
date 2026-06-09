@@ -112,6 +112,10 @@ pub fn dispatch_command<S: VaultStore, I: SearchIndex, V: Vcs>(
             let commit = engine.commit(message, sink)?;
             Ok(CommandResponse::Committed { commit })
         }
+        // TODO(PH6): wire through PluginHost
+        Command::InvokePluginCommand { .. } => Err(ServiceError::InvalidRequest(
+            "plugin commands not yet wired".into(),
+        )),
     }
 }
 
@@ -201,6 +205,10 @@ pub fn dispatch_query<S: VaultStore, I: SearchIndex, V: Vcs>(
                 .collect();
             Ok(QueryResponse::Paths { paths })
         }
+        // TODO(PH6): wire through PluginHost
+        Query::ListPlugins => Err(ServiceError::InvalidRequest(
+            "plugin listing not yet wired".into(),
+        )),
     }
 }
 

@@ -36,6 +36,15 @@ pub enum Command {
         /// Commit message.
         message: String,
     },
+    /// Invoke a command exposed by a loaded plugin.
+    InvokePluginCommand {
+        /// Plugin id.
+        plugin: String,
+        /// Command id.
+        command: String,
+        /// Arbitrary JSON arguments.
+        args: serde_json::Value,
+    },
 }
 
 /// A read-only request.
@@ -69,6 +78,8 @@ pub enum Query {
         /// The tag to filter by.
         tag: String,
     },
+    /// List loaded plugins and their commands.
+    ListPlugins,
 }
 
 /// A push event emitted by the engine.
@@ -99,7 +110,7 @@ pub enum Event {
 }
 
 /// Result of a successful command.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CommandResponse {
@@ -110,6 +121,35 @@ pub enum CommandResponse {
         /// Short commit id.
         commit: String,
     },
+    /// Result of a plugin command (arbitrary JSON).
+    PluginResult {
+        /// The command's JSON output.
+        result: serde_json::Value,
+    },
+}
+
+/// A loaded plugin and its commands (response to `ListPlugins`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PluginSummary {
+    /// Manifest id.
+    pub id: String,
+    /// Display name.
+    pub name: String,
+    /// Version.
+    pub version: String,
+    /// Declared commands.
+    pub commands: Vec<PluginCommandSummary>,
+}
+
+/// A command a plugin handles.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PluginCommandSummary {
+    /// Command id.
+    pub id: String,
+    /// Human title.
+    pub title: String,
 }
 
 /// A note's path and display title, for list views.
@@ -194,6 +234,11 @@ pub enum QueryResponse {
     Tags {
         /// One per distinct tag, sorted by tag.
         tags: Vec<TagCount>,
+    },
+    /// Loaded plugins (response to `ListPlugins`).
+    Plugins {
+        /// One per loaded plugin.
+        plugins: Vec<PluginSummary>,
     },
 }
 
@@ -312,6 +357,33 @@ mod tests {
         let j = serde_json::to_string(&r).unwrap();
         assert!(j.contains("\"type\":\"search_results\""));
         assert_eq!(serde_json::from_str::<QueryResponse>(&j).unwrap(), r);
+    }
+
+    #[test]
+    fn plugin_command_and_response_roundtrip() {
+        let cmd = Command::InvokePluginCommand {
+            plugin: "p".into(),
+            command: "echo".into(),
+            args: serde_json::json!({"x": 1}),
+        };
+        let j = serde_json::to_string(&cmd).unwrap();
+        assert!(j.contains("\"type\":\"invoke_plugin_command\""));
+        assert_eq!(serde_json::from_str::<Command>(&j).unwrap(), cmd);
+
+        let resp = QueryResponse::Plugins {
+            plugins: vec![PluginSummary {
+                id: "p".into(),
+                name: "P".into(),
+                version: "0.1.0".into(),
+                commands: vec![PluginCommandSummary {
+                    id: "echo".into(),
+                    title: "Echo".into(),
+                }],
+            }],
+        };
+        let j = serde_json::to_string(&resp).unwrap();
+        assert!(j.contains("\"type\":\"plugins\""));
+        assert_eq!(serde_json::from_str::<QueryResponse>(&j).unwrap(), resp);
     }
 
     #[test]
