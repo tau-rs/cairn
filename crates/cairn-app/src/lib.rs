@@ -3,6 +3,7 @@
 
 use cairn_domain::{rewrite_link_target, Graph, Note, NotePath};
 use cairn_ports::{FileStamp, FsChange, PortError, SearchHit, SearchIndex, VaultStore, Vcs};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -52,6 +53,7 @@ pub struct Engine<S, I, V> {
     vcs: V,
     memo: HashMap<NotePath, u64>,
     stamps: HashMap<NotePath, FileStamp>,
+    notes_cache: RefCell<Option<HashMap<NotePath, Note>>>,
 }
 
 impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
@@ -63,6 +65,7 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
             vcs,
             memo: HashMap::new(),
             stamps: HashMap::new(),
+            notes_cache: RefCell::new(None),
         }
     }
 
@@ -76,6 +79,21 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
             notes.push(Note::parse(path, &raw));
         }
         Ok(notes)
+    }
+
+    /// Ensure the parsed-note cache is populated (reading the vault once if
+    /// empty), then run `f` over it.
+    fn with_notes<R>(&self, f: impl FnOnce(&HashMap<NotePath, Note>) -> R) -> Result<R, PortError> {
+        if self.notes_cache.borrow().is_none() {
+            let map: HashMap<NotePath, Note> = self
+                .load_all_notes()?
+                .into_iter()
+                .map(|n| (n.path.clone(), n))
+                .collect();
+            *self.notes_cache.borrow_mut() = Some(map);
+        }
+        let guard = self.notes_cache.borrow();
+        Ok(f(guard.as_ref().expect("cache populated above")))
     }
 
     fn rebuild(&mut self) -> Result<(), PortError> {
@@ -222,6 +240,9 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
                 // Record the new stamp even if content reverted, so the next
                 // unchanged event short-circuits.
                 self.stamps.insert(path.clone(), stamp);
+                if let Some(map) = self.notes_cache.get_mut() {
+                    map.insert(path.clone(), note.clone());
+                }
                 if self.memo.get(path) == Some(&hash) {
                     return Ok(());
                 }
@@ -243,6 +264,9 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
         // Drop the stamp unconditionally: a note seen by the stat-guard but
         // never indexed (no memo entry) would otherwise leak its stamp here.
         self.stamps.remove(path);
+        if let Some(map) = self.notes_cache.get_mut() {
+            map.remove(path);
+        }
         if self.memo.contains_key(path) {
             // Fallible op first, then the infallible memo drop, so index and
             // memo stay consistent if a future index adapter's remove fails.
@@ -269,6 +293,9 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
         let note = Note::parse(path.clone(), contents);
         let hash = note.content_hash();
         self.stamps.insert(path.clone(), self.store.stamp(path)?);
+        if let Some(map) = self.notes_cache.get_mut() {
+            map.insert(path.clone(), note.clone());
+        }
         if self.memo.get(path) == Some(&hash) {
             return Ok(());
         }
@@ -361,60 +388,61 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
         self.index.search(query)
     }
 
-    /// Backlinks for a note, computed from the current store contents.
+    /// Backlinks for a note, computed from the cached notes.
     ///
     /// # Errors
-    /// Returns [`PortError`] if a port operation fails.
+    /// Returns [`PortError`] if the cache must be populated and a port fails.
     pub fn backlinks(&self, path: &NotePath) -> Result<Vec<NotePath>, PortError> {
-        let notes = self.load_all_notes()?;
-        let graph = Graph::build(&notes);
-        Ok(graph.backlinks(path).to_vec())
+        self.with_notes(|m| Graph::build(m.values()).backlinks(path).to_vec())
     }
 
-    /// All parsed notes in the cairn.
+    /// All parsed notes in the cairn (from the cache).
     ///
     /// # Errors
-    /// Returns [`PortError`] if a port operation fails.
+    /// Returns [`PortError`] if the cache must be populated and a port fails.
     pub fn list_notes(&self) -> Result<Vec<Note>, PortError> {
-        self.load_all_notes()
+        self.with_notes(|m| m.values().cloned().collect())
     }
 
-    /// The link graph derived from the current notes.
+    /// The link graph derived from the cached notes.
     ///
     /// # Errors
-    /// Returns [`PortError`] if a port operation fails.
+    /// Returns [`PortError`] if the cache must be populated and a port fails.
     pub fn graph(&self) -> Result<Graph, PortError> {
-        Ok(Graph::build(&self.load_all_notes()?))
+        self.with_notes(|m| Graph::build(m.values()))
     }
 
     /// All tags across the cairn with note counts, sorted by tag.
     ///
     /// # Errors
-    /// Returns [`PortError`] if a port operation fails.
+    /// Returns [`PortError`] if the cache must be populated and a port fails.
     pub fn list_tags(&self) -> Result<Vec<(String, usize)>, PortError> {
-        let mut counts: std::collections::BTreeMap<String, usize> =
-            std::collections::BTreeMap::new();
-        for note in self.load_all_notes()? {
-            for tag in note.tags() {
-                *counts.entry(tag).or_insert(0) += 1;
+        self.with_notes(|m| {
+            let mut counts: std::collections::BTreeMap<String, usize> =
+                std::collections::BTreeMap::new();
+            for note in m.values() {
+                for tag in note.tags() {
+                    *counts.entry(tag).or_insert(0) += 1;
+                }
             }
-        }
-        Ok(counts.into_iter().collect())
+            counts.into_iter().collect()
+        })
     }
 
     /// Notes carrying `tag`, sorted by path.
     ///
     /// # Errors
-    /// Returns [`PortError`] if a port operation fails.
+    /// Returns [`PortError`] if the cache must be populated and a port fails.
     pub fn notes_by_tag(&self, tag: &str) -> Result<Vec<NotePath>, PortError> {
-        let mut out: Vec<NotePath> = self
-            .load_all_notes()?
-            .into_iter()
-            .filter(|n| n.tags().iter().any(|t| t == tag))
-            .map(|n| n.path)
-            .collect();
-        out.sort();
-        Ok(out)
+        self.with_notes(|m| {
+            let mut out: Vec<NotePath> = m
+                .values()
+                .filter(|n| n.tags().iter().any(|t| t == tag))
+                .map(|n| n.path.clone())
+                .collect();
+            out.sort();
+            out
+        })
     }
 
     /// Commit all changes.
@@ -750,6 +778,78 @@ mod tests {
         // state.json was written — assert via a fresh store reading the same dir.
         let store = LocalFsStore::open(tmp.path()).unwrap();
         assert!(store.read_meta().unwrap().is_some());
+    }
+
+    #[test]
+    fn note_cache_serves_queries_and_stays_live() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.md"), "see [[b]]").unwrap();
+        std::fs::write(tmp.path().join("b.md"), "hi").unwrap();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let mut eng = Engine::new(
+            CountingStore {
+                inner: LocalFsStore::open(tmp.path()).unwrap(),
+                reads: reads.clone(),
+            },
+            InMemoryIndex::default(),
+            GitVcs::open_or_init(tmp.path()).unwrap(),
+        );
+
+        assert_eq!(eng.list_notes().unwrap().len(), 2);
+        let after_first = reads.load(Ordering::SeqCst);
+        assert!(after_first >= 2);
+
+        assert_eq!(eng.graph().unwrap().edges().len(), 1);
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            after_first,
+            "cache hit: no re-read"
+        );
+
+        let mut ev = Vec::new();
+        eng.write_note(&NotePath::new("c.md").unwrap(), "from c to [[b]]", &mut ev)
+            .unwrap();
+        assert_eq!(eng.list_notes().unwrap().len(), 3);
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            after_first,
+            "write kept cache live"
+        );
+
+        eng.delete_note(&NotePath::new("a.md").unwrap(), &mut ev)
+            .unwrap();
+        assert_eq!(eng.list_notes().unwrap().len(), 2);
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            after_first,
+            "delete kept cache live"
+        );
+    }
+
+    #[test]
+    fn reindex_does_not_invalidate_the_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.md"), "x").unwrap();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let mut eng = Engine::new(
+            CountingStore {
+                inner: LocalFsStore::open(tmp.path()).unwrap(),
+                reads: reads.clone(),
+            },
+            InMemoryIndex::default(),
+            GitVcs::open_or_init(tmp.path()).unwrap(),
+        );
+        eng.list_notes().unwrap();
+        let base = reads.load(Ordering::SeqCst);
+        eng.reindex(&mut Vec::new()).unwrap();
+        let after_reindex = reads.load(Ordering::SeqCst);
+        assert!(after_reindex > base, "reindex reads for the index");
+        eng.list_notes().unwrap();
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            after_reindex,
+            "reindex did not invalidate the cache"
+        );
     }
 
     #[test]
