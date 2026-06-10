@@ -150,6 +150,9 @@ mod tests {
     fn plugins_timeout_parses() {
         let c: Config = toml::from_str("[plugins]\ntimeout_secs = 60").unwrap();
         assert_eq!(c.plugins.timeout_secs, Some(60));
+        // 0 parses as Some(0) (the daemon then guards it); it isn't swallowed.
+        let z: Config = toml::from_str("[plugins]\ntimeout_secs = 0").unwrap();
+        assert_eq!(z.plugins.timeout_secs, Some(0));
     }
 
     #[test]
