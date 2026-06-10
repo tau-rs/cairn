@@ -30,6 +30,12 @@ impl PluginCallbacks for MapCallbacks {
         Ok(())
     }
 
+    fn delete_note(&mut self, path: &str) -> Result<(), PortError> {
+        // NB: Ok even if absent, unlike Engine::delete_note (which returns NotFound).
+        self.0.remove(path);
+        Ok(())
+    }
+
     fn search(&mut self, query: &str) -> Result<Vec<SearchHit>, PortError> {
         // Substring match over values. Hit order is unspecified (HashMap order);
         // tests must assert only on counts, not ordering.
