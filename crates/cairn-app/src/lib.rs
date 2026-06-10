@@ -4,7 +4,7 @@
 use cairn_domain::{rewrite_link_target, Graph, Note, NotePath};
 use cairn_ports::{
     FileStamp, FsChange, NoopPluginHost, PluginCallbacks, PluginEvent, PluginHost, PluginInfo,
-    PortError, SearchHit, SearchIndex, VaultStore, Vcs,
+    PortError, Revision, SearchHit, SearchIndex, VaultStore, Vcs,
 };
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -458,6 +458,39 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
         let id = self.vcs.commit_all(message)?;
         sink.emit(Event::Committed(id.clone()));
         Ok(id)
+    }
+
+    /// A note's commit history (newest first).
+    ///
+    /// # Errors
+    /// Returns [`PortError`] if the VCS adapter fails.
+    pub fn note_history(&self, path: &NotePath) -> Result<Vec<Revision>, PortError> {
+        self.vcs.history(path.as_str())
+    }
+
+    /// A note's contents at a past revision.
+    ///
+    /// # Errors
+    /// [`PortError::NotFound`] if the note didn't exist at that revision;
+    /// [`PortError`] on a VCS failure.
+    pub fn note_at(&self, path: &NotePath, revision: &str) -> Result<String, PortError> {
+        self.vcs.show(path.as_str(), revision)
+    }
+
+    /// Restore a note to a past revision: write that revision's contents as the
+    /// current note (a pending change to commit later). Emits `NoteChanged`.
+    ///
+    /// # Errors
+    /// [`PortError::NotFound`] if the note didn't exist at that revision;
+    /// [`PortError`] on a VCS or storage failure.
+    pub fn restore_note(
+        &mut self,
+        path: &NotePath,
+        revision: &str,
+        sink: &mut dyn EventSink,
+    ) -> Result<(), PortError> {
+        let contents = self.vcs.show(path.as_str(), revision)?;
+        self.write_note(path, &contents, sink)
     }
 
     /// Replace the plugin host (the composition root injects the real one).
@@ -1192,5 +1225,27 @@ mod tests {
             "seen"
         );
         assert!(events.contains(&Event::NoteChanged(NotePath::new("seen.md").unwrap())));
+    }
+
+    #[test]
+    fn restore_writes_old_content_and_emits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let a = NotePath::new("a.md").unwrap();
+        let mut events = Vec::new();
+        eng.write_note(&a, "v1", &mut events).unwrap();
+        eng.commit("v1", &mut events).unwrap();
+        eng.write_note(&a, "v2", &mut events).unwrap();
+        eng.commit("v2", &mut events).unwrap();
+
+        let hist = eng.note_history(&a).unwrap();
+        assert_eq!(hist.len(), 2);
+        let v1_rev = hist[1].id.clone(); // oldest = v1
+        assert_eq!(eng.note_at(&a, &v1_rev).unwrap(), "v1");
+
+        events.clear();
+        eng.restore_note(&a, &v1_rev, &mut events).unwrap();
+        assert_eq!(eng.read_note(&a).unwrap(), "v1");
+        assert!(events.contains(&Event::NoteChanged(a.clone())));
     }
 }
