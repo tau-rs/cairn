@@ -87,7 +87,7 @@ pub enum CairnEventKind {
     NoteDeleted,
 }
 
-/// Params of the `cairn/event` notification. Ack result is an empty object `{}`.
+/// Params of the `cairn/event` request. Ack result is an empty object `{}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CairnEvent {
     pub kind: CairnEventKind,
