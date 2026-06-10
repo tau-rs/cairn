@@ -113,6 +113,19 @@ pub trait SearchIndex {
     fn remove(&mut self, path: &NotePath) -> Result<(), PortError>;
 }
 
+/// One commit in a note's history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Revision {
+    /// Short commit id (7 chars).
+    pub id: String,
+    /// Commit summary (first line of the message).
+    pub message: String,
+    /// Commit time, seconds since the Unix epoch.
+    pub timestamp_secs: i64,
+    /// Author name.
+    pub author: String,
+}
+
 /// Version control over the cairn directory.
 pub trait Vcs {
     /// Stage all changes and create a commit with `message`. Returns the
@@ -121,6 +134,20 @@ pub trait Vcs {
     /// # Errors
     /// Returns [`PortError`] if the adapter fails.
     fn commit_all(&mut self, message: &str) -> Result<String, PortError>;
+
+    /// Commits that added/changed/removed `path`, newest first.
+    ///
+    /// # Errors
+    /// [`PortError::Adapter`] on a git failure. An empty repo or a never-committed
+    /// note yields `Ok(vec![])`.
+    fn history(&self, path: &str) -> Result<Vec<Revision>, PortError>;
+
+    /// The note's contents at `revision` (a git revspec: short/full hash, `HEAD~1`…).
+    ///
+    /// # Errors
+    /// [`PortError::NotFound`] if the path doesn't exist at that revision;
+    /// [`PortError::Adapter`] on a git failure (e.g. an unknown revision).
+    fn show(&self, path: &str, revision: &str) -> Result<String, PortError>;
 }
 
 /// A change to a note detected on disk.

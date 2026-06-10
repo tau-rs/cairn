@@ -36,6 +36,13 @@ pub enum Command {
         /// Commit message.
         message: String,
     },
+    /// Restore a note to a past revision (writes that version as current).
+    RestoreNote {
+        /// Relative note path.
+        path: String,
+        /// A git revspec to restore from.
+        revision: String,
+    },
     /// Invoke a command exposed by a loaded plugin.
     InvokePluginCommand {
         /// Plugin id.
@@ -80,6 +87,18 @@ pub enum Query {
     },
     /// List loaded plugins and their commands.
     ListPlugins,
+    /// A note's commit history (newest first).
+    NoteHistory {
+        /// Relative note path.
+        path: String,
+    },
+    /// A note's contents at a past revision.
+    NoteAt {
+        /// Relative note path.
+        path: String,
+        /// A git revspec (short/full hash, `HEAD~1`…).
+        revision: String,
+    },
 }
 
 /// A push event emitted by the engine.
@@ -198,6 +217,20 @@ pub struct SearchResult {
     pub highlights: Vec<(u32, u32)>,
 }
 
+/// One commit in a note's history (response element of `NoteHistory`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Revision {
+    /// Short commit id.
+    pub id: String,
+    /// Commit summary (first line).
+    pub message: String,
+    /// Commit time, seconds since the Unix epoch.
+    pub timestamp_secs: i64,
+    /// Author name.
+    pub author: String,
+}
+
 /// Result of a successful query.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -239,6 +272,11 @@ pub enum QueryResponse {
     Plugins {
         /// One per loaded plugin.
         plugins: Vec<PluginSummary>,
+    },
+    /// A note's commit history (response to `NoteHistory`).
+    History {
+        /// One per commit, newest first.
+        revisions: Vec<Revision>,
     },
 }
 
