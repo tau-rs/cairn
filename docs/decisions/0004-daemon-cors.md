@@ -103,10 +103,13 @@ via `#[serde(default)]` without breaking existing files or code.
 - **UI must opt in.** A browser UI on an origin not in the allowlist is blocked
   by the browser; developers must either add their dev-server origin to
   `cairn.toml` or pass `--cors-origin`.
-- **WebSocket `/events` needs no CORS config.** Browsers connect cross-origin to
-  WebSocket endpoints without a preflight; the CORS layer on that route is
-  harmless but irrelevant. UI code does not need to configure anything for the
-  event stream.
+- **WebSocket `/events` validates `Origin` directly.** Browsers connect
+  cross-origin to WebSocket endpoints without a preflight, so the CORS layer
+  does **not** protect that route. The daemon therefore checks the `Origin`
+  header against the same allowlist inside `events_handler` and rejects
+  (HTTP 403) a missing or non-allowlisted origin before upgrading (audit S2).
+  The UI's origin must be allowlisted (via `cairn.toml` or `--cors-origin`) for
+  the event stream just as for HTTP.
 - **Auth/TLS/credentials deferred.** No credentials (`withCredentials`) support
   today; adding it would require a non-`*` `Allow-Origin` (already satisfied)
   and `allow_credentials(true)` in the layer — a small additive change.
