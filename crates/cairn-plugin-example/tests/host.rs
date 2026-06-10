@@ -1,5 +1,6 @@
 use cairn_infra::ProcessPluginHost;
-use cairn_ports::{PluginCallbacks, PluginHost, PortError};
+use cairn_domain::{Note, NotePath};
+use cairn_ports::{PluginCallbacks, PluginHost, PortError, SearchHit};
 use std::collections::HashMap;
 
 /// A test double for host-callbacks: serves notes from an in-memory map.
@@ -10,6 +11,42 @@ impl PluginCallbacks for MapCallbacks {
             .get(path)
             .cloned()
             .ok_or_else(|| PortError::NotFound(format!("note {path}")))
+    }
+
+    fn write_note(&mut self, path: &str, contents: &str) -> Result<(), PortError> {
+        self.0.insert(path.to_string(), contents.to_string());
+        Ok(())
+    }
+
+    fn search(&mut self, query: &str) -> Result<Vec<SearchHit>, PortError> {
+        // Substring match over values. Hit order is unspecified (HashMap order);
+        // tests must assert only on counts, not ordering.
+        let mut hits = Vec::new();
+        for (path, contents) in &self.0 {
+            if contents.contains(query) {
+                hits.push(SearchHit {
+                    path: NotePath::new(path).map_err(|e| PortError::Adapter(e.to_string()))?,
+                    score: 1.0,
+                    snippet: contents.clone(),
+                    highlights: Vec::new(),
+                });
+            }
+        }
+        Ok(hits)
+    }
+
+    fn list_notes(&mut self) -> Result<Vec<Note>, PortError> {
+        let mut notes: Vec<Note> = self
+            .0
+            .iter()
+            .map(|(path, contents)| {
+                NotePath::new(path)
+                    .map(|np| Note::parse(np, contents))
+                    .map_err(|e| PortError::Adapter(e.to_string()))
+            })
+            .collect::<Result<_, _>>()?;
+        notes.sort_by(|a, b| a.path.as_str().cmp(b.path.as_str()));
+        Ok(notes)
     }
 }
 

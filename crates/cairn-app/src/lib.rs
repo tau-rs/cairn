@@ -485,13 +485,14 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
         plugin: &str,
         command: &str,
         args: &serde_json::Value,
+        sink: &mut dyn EventSink,
     ) -> Result<serde_json::Value, PortError> {
         // Move the real host into a local so `self.plugins` no longer aliases it;
         // the callbacks handler can then borrow the rest of `self` (the store) to
         // service host-callbacks the plugin sends mid-invoke.
         let mut host = std::mem::replace(&mut self.plugins, Box::new(NoopPluginHost));
         let result = {
-            let mut cb = EngineCallbacks { engine: self };
+            let mut cb = EngineCallbacks { engine: self, sink };
             host.invoke(plugin, command, args, &mut cb)
             // cb is dropped here, releasing the &mut self borrow
         };
@@ -504,6 +505,7 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
 /// of a single `invoke_plugin_command`, while `self.plugins` is a `NoopPluginHost`.
 struct EngineCallbacks<'a, S, I, V> {
     engine: &'a mut Engine<S, I, V>,
+    sink: &'a mut dyn EventSink,
 }
 
 impl<S: VaultStore, I: SearchIndex, V: Vcs> PluginCallbacks for EngineCallbacks<'_, S, I, V> {
@@ -511,6 +513,22 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> PluginCallbacks for EngineCallbacks<
         let np = NotePath::new(path)
             .map_err(|e| PortError::NotFound(format!("invalid note path {path}: {e}")))?;
         self.engine.read_note(&np)
+    }
+
+    fn write_note(&mut self, path: &str, contents: &str) -> Result<(), PortError> {
+        let np = NotePath::new(path)
+            .map_err(|e| PortError::NotFound(format!("invalid note path {path}: {e}")))?;
+        // Routes through the engine write path: persists, updates the note cache,
+        // and emits NoteChanged/Reindexed through the sink.
+        self.engine.write_note(&np, contents, self.sink)
+    }
+
+    fn search(&mut self, query: &str) -> Result<Vec<SearchHit>, PortError> {
+        self.engine.search(query)
+    }
+
+    fn list_notes(&mut self) -> Result<Vec<Note>, PortError> {
+        self.engine.list_notes()
     }
 }
 
@@ -943,8 +961,9 @@ mod tests {
         eng.write_note(&NotePath::new("a.md").unwrap(), "hello body", &mut events)
             .unwrap();
         eng.set_plugin_host(Box::new(CallbackEcho));
+        let mut sink: Vec<Event> = Vec::new();
         let out = eng
-            .invoke_plugin_command("cb", "readit", &serde_json::json!({ "path": "a.md" }))
+            .invoke_plugin_command("cb", "readit", &serde_json::json!({ "path": "a.md" }), &mut sink)
             .unwrap();
         assert_eq!(out["contents"], "hello body");
     }
@@ -954,10 +973,51 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut eng = engine(tmp.path());
         assert!(eng.list_plugins().is_empty());
+        let mut sink: Vec<Event> = Vec::new();
         let err = eng
-            .invoke_plugin_command("nope", "x", &serde_json::Value::Null)
+            .invoke_plugin_command("nope", "x", &serde_json::Value::Null, &mut sink)
             .unwrap_err();
         assert!(matches!(err, PortError::NotFound(_)));
+    }
+
+    /// A stub host whose invoke writes a note via the callbacks handler —
+    /// exercises sink threading through invoke_plugin_command.
+    struct CallbackWriter;
+    impl PluginHost for CallbackWriter {
+        fn plugins(&self) -> Vec<PluginInfo> {
+            vec![PluginInfo { id: "w".into(), name: "w".into(), version: "0".into(), commands: Vec::new() }]
+        }
+        fn invoke(
+            &mut self,
+            _plugin: &str,
+            _command: &str,
+            args: &serde_json::Value,
+            callbacks: &mut dyn cairn_ports::PluginCallbacks,
+        ) -> Result<serde_json::Value, PortError> {
+            let path = args["path"].as_str().unwrap_or_default();
+            let contents = args["contents"].as_str().unwrap_or_default();
+            callbacks.write_note(path, contents)?;
+            Ok(serde_json::json!({ "written": true }))
+        }
+    }
+
+    #[test]
+    fn write_callback_emits_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        eng.set_plugin_host(Box::new(CallbackWriter));
+        let mut sink: Vec<Event> = Vec::new();
+        let out = eng
+            .invoke_plugin_command(
+                "w",
+                "write",
+                &serde_json::json!({ "path": "x.md", "contents": "body text" }),
+                &mut sink,
+            )
+            .unwrap();
+        assert_eq!(out, serde_json::json!({ "written": true }));
+        assert!(sink.contains(&Event::NoteChanged(NotePath::new("x.md").unwrap())));
+        assert_eq!(eng.read_note(&NotePath::new("x.md").unwrap()).unwrap(), "body text");
     }
 
     #[test]

@@ -348,6 +348,7 @@ dependencies = [
 name = "cairn-plugin-example"
 version = "0.0.0"
 dependencies = [
+ "cairn-domain",
  "cairn-infra",
  "cairn-plugin-protocol",
  "cairn-ports",
