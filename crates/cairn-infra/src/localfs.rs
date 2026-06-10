@@ -21,6 +21,21 @@ pub fn ensure_cairn_dir(root: &Path) -> Result<PathBuf, PortError> {
     Ok(dir)
 }
 
+/// Whether `rel` (a relative path under the vault root) is safe to resolve:
+/// non-empty, not absolute, and with no `..` or dot-leading segment. Defense
+/// in depth behind [`NotePath::new`] — a crafted path that bypassed domain
+/// validation still cannot escape the root or name a control directory
+/// (`.cairn`, `.git`) or dotfile. Splits on both separators so a stray
+/// backslash cannot smuggle a segment past the check.
+fn is_safe_rel(rel: &str) -> bool {
+    !rel.is_empty()
+        && !rel.starts_with('/')
+        && !rel.starts_with('\\')
+        && rel
+            .split(['/', '\\'])
+            .all(|seg| seg != ".." && !seg.starts_with('.'))
+}
+
 /// Stores notes as files under `root`.
 #[derive(Debug, Clone)]
 pub struct LocalFsStore {
@@ -40,6 +55,18 @@ impl LocalFsStore {
 
     fn full(&self, path: &NotePath) -> PathBuf {
         self.root.join(path.as_str())
+    }
+
+    /// Resolve `path` under the root, refusing anything [`is_safe_rel`]
+    /// rejects. Used by every mutating operation; read-only paths use `full`.
+    fn safe_full(&self, path: &NotePath) -> Result<PathBuf, PortError> {
+        if !is_safe_rel(path.as_str()) {
+            return Err(PortError::Adapter(format!(
+                "unsafe note path: {}",
+                path.as_str()
+            )));
+        }
+        Ok(self.full(path))
     }
 
     fn collect_md(&self, dir: &Path, out: &mut Vec<NotePath>) -> Result<(), PortError> {
@@ -67,7 +94,11 @@ impl LocalFsStore {
                 let rel = rel.to_str().ok_or_else(|| {
                     PortError::Adapter(format!("non-UTF-8 path: {}", rel.display()))
                 })?;
-                out.push(NotePath::new(rel).map_err(|e| PortError::Adapter(e.to_string()))?);
+                // A dotfile `.md` (e.g. `.draft.md`) is not a valid note path;
+                // skip it rather than failing the entire listing.
+                if let Ok(np) = NotePath::new(rel) {
+                    out.push(np);
+                }
             }
         }
         Ok(())
@@ -81,7 +112,7 @@ impl VaultStore for LocalFsStore {
     }
 
     fn write(&mut self, path: &NotePath, contents: &str) -> Result<(), PortError> {
-        let full = self.full(path);
+        let full = self.safe_full(path)?;
         if let Some(parent) = full.parent() {
             fs::create_dir_all(parent).map_err(|e| PortError::Adapter(e.to_string()))?;
         }
@@ -89,7 +120,7 @@ impl VaultStore for LocalFsStore {
     }
 
     fn delete(&mut self, path: &NotePath) -> Result<(), PortError> {
-        fs::remove_file(self.full(path)).map_err(|e| {
+        fs::remove_file(self.safe_full(path)?).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 PortError::NotFound(path.as_str().to_string())
             } else {
@@ -99,8 +130,8 @@ impl VaultStore for LocalFsStore {
     }
 
     fn rename(&mut self, from: &NotePath, to: &NotePath) -> Result<(), PortError> {
-        let src = self.full(from);
-        let dst = self.full(to);
+        let src = self.safe_full(from)?;
+        let dst = self.safe_full(to)?;
         if !src.exists() {
             return Err(PortError::NotFound(from.as_str().to_string()));
         }
@@ -160,6 +191,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn is_safe_rel_rejects_control_and_escaping_paths() {
+        // The RCE vectors (S1) — even if a caller bypasses NotePath::new.
+        assert!(!is_safe_rel(".cairn/plugins/evil/manifest.toml"));
+        assert!(!is_safe_rel(".git/config"));
+        assert!(!is_safe_rel("notes/.git/config"));
+        assert!(!is_safe_rel("a/../../etc/passwd"));
+        assert!(!is_safe_rel("../escape"));
+        assert!(!is_safe_rel("/absolute"));
+        assert!(!is_safe_rel(""));
+        // Backslash separators are treated as separators too.
+        assert!(!is_safe_rel(r".cairn\x"));
+        assert!(!is_safe_rel(r"a\..\..\x"));
+        // Ordinary note paths pass.
+        assert!(is_safe_rel("dir/a.md"));
+        assert!(is_safe_rel("a.md"));
+    }
+
+    #[test]
     fn meta_roundtrips_and_creates_gitignored_cairn_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let store = LocalFsStore::open(tmp.path()).unwrap();
@@ -187,6 +236,21 @@ mod tests {
         store.write(&a, "hello world!!").unwrap();
         let s2 = store.stamp(&a).unwrap();
         assert_ne!(s1, s2);
+    }
+
+    #[test]
+    fn list_skips_dotfile_md_without_failing() {
+        // A stray dotfile `.md` on disk (not creatable via NotePath::new) must
+        // not abort listing the whole vault — it is simply not a note.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = LocalFsStore::open(tmp.path()).unwrap();
+        let good = NotePath::new("notes/a.md").unwrap();
+        store.write(&good, "hi").unwrap();
+
+        std::fs::create_dir_all(tmp.path().join("notes")).unwrap();
+        std::fs::write(tmp.path().join("notes/.draft.md"), "secret").unwrap();
+
+        assert_eq!(store.list().unwrap(), vec![good]);
     }
 
     #[test]

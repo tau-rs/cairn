@@ -10,18 +10,25 @@ impl NotePath {
     /// or parent-escaping paths.
     ///
     /// # Errors
-    /// Returns [`NotePathError`] if the path is absolute, contains a `..`
-    /// segment, or is empty.
+    /// Returns [`NotePathError`] if the path is empty, absolute, contains a
+    /// `..` segment, or contains a dot-leading segment (e.g. `.git`,
+    /// `.cairn`, any dotfile) — the last guards against writes escaping into
+    /// control directories.
     pub fn new(raw: &str) -> Result<Self, NotePathError> {
         let norm = raw.replace('\\', "/");
+        if norm.is_empty() {
+            return Err(NotePathError::Empty);
+        }
         if norm.starts_with('/') {
             return Err(NotePathError::Absolute);
         }
-        if norm.split('/').any(|seg| seg == "..") {
-            return Err(NotePathError::Escapes);
-        }
-        if norm.is_empty() {
-            return Err(NotePathError::Empty);
+        for seg in norm.split('/') {
+            if seg == ".." {
+                return Err(NotePathError::Escapes);
+            }
+            if seg.starts_with('.') {
+                return Err(NotePathError::Hidden);
+            }
         }
         Ok(Self(norm))
     }
@@ -50,6 +57,10 @@ pub enum NotePathError {
     /// Path tried to escape the cairn with `..`.
     #[error("note path must not contain ..")]
     Escapes,
+    /// A path segment began with `.` (e.g. `.git`, `.cairn`, a dotfile).
+    /// These are never notes and could escape into control directories.
+    #[error("note path must not contain dot-leading segments")]
+    Hidden,
     /// Path was empty.
     #[error("note path must not be empty")]
     Empty,
@@ -200,6 +211,31 @@ mod tests {
         assert_eq!(NotePath::new("/etc/passwd"), Err(NotePathError::Absolute));
         assert_eq!(NotePath::new("../secret"), Err(NotePathError::Escapes));
         assert_eq!(NotePath::new(""), Err(NotePathError::Empty));
+    }
+
+    #[test]
+    fn rejects_dot_leading_segments() {
+        // The RCE vectors from the security audit (S1): a note write must not
+        // be able to plant a plugin manifest or a `.git/config`.
+        assert_eq!(
+            NotePath::new(".cairn/plugins/evil/manifest.toml"),
+            Err(NotePathError::Hidden)
+        );
+        assert_eq!(NotePath::new(".git/config"), Err(NotePathError::Hidden));
+        // A hidden segment anywhere in the path, not just the first.
+        assert_eq!(
+            NotePath::new("notes/.git/config"),
+            Err(NotePathError::Hidden)
+        );
+        assert_eq!(NotePath::new("a/.hidden.md"), Err(NotePathError::Hidden));
+        // A lone "." (current-dir) segment.
+        assert_eq!(NotePath::new("./a.md"), Err(NotePathError::Hidden));
+        // Backslash-normalized variant still caught.
+        assert_eq!(NotePath::new(r".cairn\x"), Err(NotePathError::Hidden));
+        // ".." stays mapped to the pre-existing Escapes error.
+        assert_eq!(NotePath::new("a/../b"), Err(NotePathError::Escapes));
+        // Ordinary notes still accepted.
+        assert_eq!(NotePath::new("dir/a.md").unwrap().as_str(), "dir/a.md");
     }
 
     #[test]
