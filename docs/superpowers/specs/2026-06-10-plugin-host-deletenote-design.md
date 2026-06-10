@@ -64,10 +64,14 @@ fn required_cap(method: &str) -> Option<&'static str> {
 }
 ```
 
-The example `tests/host.rs` manifests reference `CAP_FS_READ`/`CAP_FS_WRITE` (via
-`format!`) instead of bare `"fs:read"`/`"fs:write"` strings, so a future cap rename
-is a single edit. (Doc comments that mention `fs:read`/`fs:write` in prose are left
-as prose.)
+(Doc comments that mention `fs:read`/`fs:write` in prose are left as prose.)
+
+> **Implementation note:** the example `tests/host.rs` manifests keep **bare**
+> capability literals (`"fs:write"`), not the consts — a manifest fixture should
+> show the actual wire string a plugin author writes, and referencing the const
+> would require adding `cairn-plugin-protocol` as a dev-dependency for marginal
+> benefit. The const cleanup is applied where it matters: the authoritative
+> `required_cap` gate. (See the plan's "Plan-level refinement vs spec".)
 
 ### 2. `host/deleteNote` — protocol (`cairn-plugin-protocol`)
 
