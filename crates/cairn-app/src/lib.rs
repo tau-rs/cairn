@@ -963,7 +963,12 @@ mod tests {
         eng.set_plugin_host(Box::new(CallbackEcho));
         let mut sink: Vec<Event> = Vec::new();
         let out = eng
-            .invoke_plugin_command("cb", "readit", &serde_json::json!({ "path": "a.md" }), &mut sink)
+            .invoke_plugin_command(
+                "cb",
+                "readit",
+                &serde_json::json!({ "path": "a.md" }),
+                &mut sink,
+            )
             .unwrap();
         assert_eq!(out["contents"], "hello body");
     }
@@ -985,7 +990,12 @@ mod tests {
     struct CallbackWriter;
     impl PluginHost for CallbackWriter {
         fn plugins(&self) -> Vec<PluginInfo> {
-            vec![PluginInfo { id: "w".into(), name: "w".into(), version: "0".into(), commands: Vec::new() }]
+            vec![PluginInfo {
+                id: "w".into(),
+                name: "w".into(),
+                version: "0".into(),
+                commands: Vec::new(),
+            }]
         }
         fn invoke(
             &mut self,
@@ -1017,7 +1027,10 @@ mod tests {
             .unwrap();
         assert_eq!(out, serde_json::json!({ "written": true }));
         assert!(sink.contains(&Event::NoteChanged(NotePath::new("x.md").unwrap())));
-        assert_eq!(eng.read_note(&NotePath::new("x.md").unwrap()).unwrap(), "body text");
+        assert_eq!(
+            eng.read_note(&NotePath::new("x.md").unwrap()).unwrap(),
+            "body text"
+        );
     }
 
     #[test]

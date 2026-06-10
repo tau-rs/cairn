@@ -183,7 +183,12 @@ fn write_note_via_callback() {
     let mut host = ProcessPluginHost::load(&tmp.path().join(".cairn").join("plugins")).unwrap();
     let mut cb = MapCallbacks(HashMap::new());
     let out = host
-        .invoke("example", "writeNote", &serde_json::json!({"path": "n.md", "contents": "hi there"}), &mut cb)
+        .invoke(
+            "example",
+            "writeNote",
+            &serde_json::json!({"path": "n.md", "contents": "hi there"}),
+            &mut cb,
+        )
         .unwrap();
     assert_eq!(out, serde_json::json!({"written": true}));
     assert_eq!(cb.0.get("n.md").map(String::as_str), Some("hi there"));
@@ -198,9 +203,17 @@ fn write_denied_without_fs_write() {
     let mut host = ProcessPluginHost::load(&tmp.path().join(".cairn").join("plugins")).unwrap();
     let mut cb = MapCallbacks(HashMap::new());
     let err = host
-        .invoke("example", "writeNote", &serde_json::json!({"path": "n.md", "contents": "x"}), &mut cb)
+        .invoke(
+            "example",
+            "writeNote",
+            &serde_json::json!({"path": "n.md", "contents": "x"}),
+            &mut cb,
+        )
         .unwrap_err();
-    assert!(matches!(err, PortError::Adapter(_)), "expected Adapter, got {err:?}");
+    assert!(
+        matches!(err, PortError::Adapter(_)),
+        "expected Adapter, got {err:?}"
+    );
     assert!(cb.0.is_empty(), "denied write must not mutate");
 }
 
@@ -233,7 +246,12 @@ fn find_via_callback() {
         ("b.md".to_string(), "lazy dog".to_string()),
     ]));
     let out = host
-        .invoke("example", "find", &serde_json::json!({"query": "quick"}), &mut cb)
+        .invoke(
+            "example",
+            "find",
+            &serde_json::json!({"query": "quick"}),
+            &mut cb,
+        )
         .unwrap();
     assert_eq!(out, serde_json::json!({"hits": 1}));
 }
@@ -247,7 +265,15 @@ fn search_denied_without_fs_read() {
     let mut host = ProcessPluginHost::load(&tmp.path().join(".cairn").join("plugins")).unwrap();
     let mut cb = MapCallbacks(HashMap::from([("a.md".to_string(), "x".to_string())]));
     let err = host
-        .invoke("example", "find", &serde_json::json!({"query": "x"}), &mut cb)
+        .invoke(
+            "example",
+            "find",
+            &serde_json::json!({"query": "x"}),
+            &mut cb,
+        )
         .unwrap_err();
-    assert!(matches!(err, PortError::Adapter(_)), "expected Adapter, got {err:?}");
+    assert!(
+        matches!(err, PortError::Adapter(_)),
+        "expected Adapter, got {err:?}"
+    );
 }

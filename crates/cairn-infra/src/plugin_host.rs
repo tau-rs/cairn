@@ -152,17 +152,25 @@ impl LoadedPlugin {
                         }
                     }
                 }
-                METHOD_WRITE_NOTE => match serde_json::from_value::<WriteNoteParams>(cb.params.clone()) {
-                    Ok(p) => match callbacks.write_note(&p.path, &p.contents) {
-                        Ok(()) => resp.result = Some(serde_json::json!({})),
+                METHOD_WRITE_NOTE => {
+                    match serde_json::from_value::<WriteNoteParams>(cb.params.clone()) {
+                        Ok(p) => match callbacks.write_note(&p.path, &p.contents) {
+                            Ok(()) => resp.result = Some(serde_json::json!({})),
+                            Err(e) => {
+                                resp.error = Some(RpcError {
+                                    code: CALLBACK_FAILED,
+                                    message: e.to_string(),
+                                });
+                            }
+                        },
                         Err(e) => {
-                            resp.error = Some(RpcError { code: CALLBACK_FAILED, message: e.to_string() });
+                            resp.error = Some(RpcError {
+                                code: CALLBACK_FAILED,
+                                message: e.to_string(),
+                            });
                         }
-                    },
-                    Err(e) => {
-                        resp.error = Some(RpcError { code: CALLBACK_FAILED, message: e.to_string() });
                     }
-                },
+                }
                 METHOD_SEARCH => match serde_json::from_value::<SearchParams>(cb.params.clone()) {
                     Ok(p) => match callbacks.search(&p.query) {
                         Ok(hits) => {
@@ -179,11 +187,17 @@ impl LoadedPlugin {
                             resp.result = serde_json::to_value(dto).ok();
                         }
                         Err(e) => {
-                            resp.error = Some(RpcError { code: CALLBACK_FAILED, message: e.to_string() });
+                            resp.error = Some(RpcError {
+                                code: CALLBACK_FAILED,
+                                message: e.to_string(),
+                            });
                         }
                     },
                     Err(e) => {
-                        resp.error = Some(RpcError { code: CALLBACK_FAILED, message: e.to_string() });
+                        resp.error = Some(RpcError {
+                            code: CALLBACK_FAILED,
+                            message: e.to_string(),
+                        });
                     }
                 },
                 METHOD_LIST_NOTES => match callbacks.list_notes() {
@@ -200,7 +214,10 @@ impl LoadedPlugin {
                         resp.result = serde_json::to_value(dto).ok();
                     }
                     Err(e) => {
-                        resp.error = Some(RpcError { code: CALLBACK_FAILED, message: e.to_string() });
+                        resp.error = Some(RpcError {
+                            code: CALLBACK_FAILED,
+                            message: e.to_string(),
+                        });
                     }
                 },
                 _ => {

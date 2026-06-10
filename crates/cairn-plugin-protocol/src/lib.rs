@@ -308,23 +308,40 @@ mod tests {
 
     #[test]
     fn slice3b_dtos_roundtrip() {
-        let wp = WriteNoteParams { path: "a.md".into(), contents: "body".into() };
+        let wp = WriteNoteParams {
+            path: "a.md".into(),
+            contents: "body".into(),
+        };
         let v = serde_json::to_value(&wp).unwrap();
         assert_eq!(serde_json::from_value::<WriteNoteParams>(v).unwrap(), wp);
 
-        let sp = SearchParams { query: "hello".into() };
-        assert_eq!(serde_json::from_value::<SearchParams>(serde_json::to_value(&sp).unwrap()).unwrap(), sp);
+        let sp = SearchParams {
+            query: "hello".into(),
+        };
+        assert_eq!(
+            serde_json::from_value::<SearchParams>(serde_json::to_value(&sp).unwrap()).unwrap(),
+            sp
+        );
 
         let sr = SearchResultDto {
-            hits: vec![SearchHitDto { path: "a.md".into(), score: 1.5, snippet: "hi".into() }],
+            hits: vec![SearchHitDto {
+                path: "a.md".into(),
+                score: 1.5,
+                snippet: "hi".into(),
+            }],
         };
-        let back: SearchResultDto = serde_json::from_value(serde_json::to_value(&sr).unwrap()).unwrap();
+        let back: SearchResultDto =
+            serde_json::from_value(serde_json::to_value(&sr).unwrap()).unwrap();
         assert_eq!(back, sr); // full equality also asserts the f32 score + snippet survive
 
         let ln = ListNotesResult {
-            notes: vec![NoteSummaryDto { path: "a.md".into(), title: "A".into() }],
+            notes: vec![NoteSummaryDto {
+                path: "a.md".into(),
+                title: "A".into(),
+            }],
         };
-        let back: ListNotesResult = serde_json::from_value(serde_json::to_value(&ln).unwrap()).unwrap();
+        let back: ListNotesResult =
+            serde_json::from_value(serde_json::to_value(&ln).unwrap()).unwrap();
         assert_eq!(back.notes, ln.notes);
     }
 }
