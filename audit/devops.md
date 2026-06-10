@@ -259,6 +259,14 @@ Then `lefthook.yml` and `ci.yml` both call the **same** `just` verbs, so the
 two cannot diverge. Today `lefthook.yml:18-37` and `ci.yml` duplicate the raw
 cargo invocations — converging them onto `just` is the point of D5.
 
+**Git hooks stay lightweight.** Pre-commit runs ONLY the fast `just` verbs
+(fmt, lint, fast staged tests) — seconds, never blocking. NO heavy or
+container-based checks belong in git hooks. Heavy correctness work runs in the
+T2 `v*`-tag heavy CI tier and T3 schedules, never on `git commit` / `git push`.
+A pre-push hook, if present, runs at most a fast `just ci` subset. Rationale:
+pushes must stay fast; a slow pre-push gate just relocates CI latency onto the
+developer and gets bypassed with `--no-verify` anyway.
+
 ---
 
 ## 4. Implementation checklist (ordered)
@@ -286,7 +294,10 @@ A future session can execute these top-to-bottom. Priority in brackets.
       (no xtask in cairn). Mirror the exact flags already in `ci.yml`.
 - [ ] **[Medium, D5]** Rewrite `lefthook.yml` pre-commit/pre-push commands to
       call `just fmt` / `just lint` / `just test` / `just ci` instead of raw
-      cargo, so local and CI share one definition.
+      cargo, so local and CI share one definition. Keep pre-commit lightweight
+      (fast `just` verbs only — fmt, lint, fast staged tests); no
+      heavy/container checks in hooks. A pre-push hook runs at most a fast
+      `just ci` subset; heavy gates stay in the T2/T3 CI tiers.
 - [ ] **[Medium, D5]** Change `ci.yml` `run:` steps to `run: just <verb>` (keep
       the matrix/setup-rust scaffolding) so CI invokes the same verbs.
 
