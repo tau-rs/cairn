@@ -175,6 +175,53 @@ fn search_prints_path_and_snippet() {
 }
 
 #[test]
+fn history_show_restore_subcommands() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    cairn(dir).arg("init").assert().success();
+
+    cairn(dir).args(["write", "a.md", "v1"]).assert().success();
+    cairn(dir).args(["commit", "v1"]).assert().success();
+    cairn(dir).args(["write", "a.md", "v2"]).assert().success();
+    cairn(dir).args(["commit", "v2"]).assert().success();
+
+    // `history` lists revisions newest-first as `<7-char-id>  <message>`.
+    let history = cairn(dir).args(["history", "a.md"]).assert().success();
+    let stdout = String::from_utf8(history.get_output().stdout.clone()).unwrap();
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 2);
+    assert!(
+        lines[0].contains("v2"),
+        "newest line should be v2: {stdout}"
+    );
+    assert!(
+        lines[1].contains("v1"),
+        "oldest line should be v1: {stdout}"
+    );
+
+    // The older commit's short id is the first token of the last line.
+    let old_id = lines[1].split_whitespace().next().unwrap();
+
+    // `show` prints the note's contents at that past revision.
+    cairn(dir)
+        .args(["show", "a.md", old_id])
+        .assert()
+        .success()
+        .stdout("v1");
+
+    // `restore` writes that past version back as current, so `read` sees it.
+    cairn(dir)
+        .args(["restore", "a.md", old_id])
+        .assert()
+        .success();
+    cairn(dir)
+        .args(["read", "a.md"])
+        .assert()
+        .success()
+        .stdout("v1");
+}
+
+#[test]
 fn tags_and_tagged_subcommands() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();

@@ -269,11 +269,11 @@ fn run() -> Result<(), String> {
             }
         }
         Command::Show { path, revision } => {
-            if let QueryResponse::Note { contents } =
-                dispatch_query(&engine, &WireQuery::NoteAt { path, revision })
-                    .map_err(|e| e.to_string())?
+            match dispatch_query(&engine, &WireQuery::NoteAt { path, revision })
+                .map_err(|e| e.to_string())?
             {
-                print!("{contents}");
+                QueryResponse::Note { contents } => print!("{contents}"),
+                _ => unreachable!("NoteAt returns Note"),
             }
         }
         Command::Restore { path, revision } => {
