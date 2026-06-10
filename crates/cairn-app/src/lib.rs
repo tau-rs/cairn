@@ -513,7 +513,8 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
 }
 
 /// Bridges plugin host-callbacks to engine operations. Held only for the duration
-/// of a single `invoke_plugin_command`, while `self.plugins` is a `NoopPluginHost`.
+/// of a single `invoke_plugin_command` or `dispatch_plugin_event`, while
+/// `self.plugins` is a `NoopPluginHost`.
 struct EngineCallbacks<'a, S, I, V> {
     engine: &'a mut Engine<S, I, V>,
     sink: &'a mut dyn EventSink,
