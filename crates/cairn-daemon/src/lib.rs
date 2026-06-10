@@ -33,6 +33,9 @@ pub type CairnEngine = Engine<LocalFsStore, TantivyIndex, GitVcs>;
 pub struct AppState {
     engine: Arc<Mutex<CairnEngine>>,
     events: broadcast::Sender<WireEvent>,
+    /// Origins permitted to open the `/events` WebSocket. Same allowlist the
+    /// CORS layer enforces; empty denies all (deny-by-default).
+    allowed_origins: Arc<[String]>,
 }
 
 /// An `EventSink` that republishes engine events as wire events.
@@ -77,7 +80,16 @@ impl AppState {
         Self {
             engine: Arc::new(Mutex::new(engine)),
             events,
+            allowed_origins: Arc::from([]),
         }
+    }
+
+    /// Set the origins permitted to open the `/events` WebSocket. Reuse the
+    /// daemon's CORS allowlist so HTTP and WS share one origin policy.
+    #[must_use]
+    pub fn with_allowed_origins(mut self, origins: Vec<String>) -> Self {
+        self.allowed_origins = Arc::from(origins.into_boxed_slice());
+        self
     }
 
     /// Run a command synchronously, publishing produced events.
