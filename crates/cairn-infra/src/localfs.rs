@@ -94,7 +94,11 @@ impl LocalFsStore {
                 let rel = rel.to_str().ok_or_else(|| {
                     PortError::Adapter(format!("non-UTF-8 path: {}", rel.display()))
                 })?;
-                out.push(NotePath::new(rel).map_err(|e| PortError::Adapter(e.to_string()))?);
+                // A dotfile `.md` (e.g. `.draft.md`) is not a valid note path;
+                // skip it rather than failing the entire listing.
+                if let Ok(np) = NotePath::new(rel) {
+                    out.push(np);
+                }
             }
         }
         Ok(())
@@ -232,6 +236,21 @@ mod tests {
         store.write(&a, "hello world!!").unwrap();
         let s2 = store.stamp(&a).unwrap();
         assert_ne!(s1, s2);
+    }
+
+    #[test]
+    fn list_skips_dotfile_md_without_failing() {
+        // A stray dotfile `.md` on disk (not creatable via NotePath::new) must
+        // not abort listing the whole vault — it is simply not a note.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = LocalFsStore::open(tmp.path()).unwrap();
+        let good = NotePath::new("notes/a.md").unwrap();
+        store.write(&good, "hi").unwrap();
+
+        std::fs::create_dir_all(tmp.path().join("notes")).unwrap();
+        std::fs::write(tmp.path().join("notes/.draft.md"), "secret").unwrap();
+
+        assert_eq!(store.list().unwrap(), vec![good]);
     }
 
     #[test]
