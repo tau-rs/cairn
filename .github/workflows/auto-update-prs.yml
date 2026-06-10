@@ -1,0 +1,105 @@
+name: Auto-update PR branches
+
+# When a commit lands on main, walks every open non-draft PR and
+# calls "Update branch" on any that are BEHIND base. GitHub's
+# update-branch operation merges main into the PR branch via a
+# merge commit; on a clean merge it succeeds (and triggers one
+# fresh CI run on the updated PR). On conflict it returns an error
+# which this workflow swallows — manual resolution is required.
+#
+# Why this exists
+# ---------------
+# Dependabot and concurrent Claude sessions routinely push to main
+# while PRs are open. Branch protection requires the ci-summary check
+# to be strict/up-to-date, so every PR that falls behind must be
+# updated before it can merge — manual `gh pr update-branch` calls
+# add friction. This workflow removes the friction.
+#
+# Triggers
+# --------
+# - push to main: the moment main advances, update everyone.
+# - workflow_dispatch: manual run for ad-hoc catch-up.
+# - schedule (every 30 min): catch-net in case a push trigger
+#   didn't fire (e.g. workflow service hiccup). Cheap — just lists
+#   PRs and exits quickly when nothing is behind.
+#
+# Skips
+# -----
+# - Draft PRs: WIP, not ready to merge.
+# - Closed PRs: obvious.
+# - PRs with DIRTY mergeStateStatus: conflict, can't auto-resolve.
+# - Same-repo branches only: fork PRs use the fork's branch which
+#   GITHUB_TOKEN can't push to anyway. gh CLI handles this; we
+#   swallow the resulting error.
+#
+# Security
+# --------
+# This workflow only reads PR metadata and triggers GitHub's own
+# "Update branch" operation via the API. No user-controlled fields
+# flow into shell commands. PR numbers come from the API response
+# (integers, no injection surface). Repository name comes from
+# the `github.repository` context (owner-controlled).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+  schedule:
+    - cron: '*/30 * * * *'
+
+concurrency:
+  group: auto-update-prs
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  update:
+    name: update behind PRs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update each behind PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          # mergeStateStatus is computed asynchronously by GitHub
+          # after a push lands. Wait briefly so the BEHIND state is
+          # accurate when we query.
+          if [[ "$EVENT" == "push" ]]; then
+            sleep 45
+          fi
+
+          mapfile -t prs < <(
+            gh pr list --repo "$REPO" --state open --limit 100 \
+              --json number,mergeStateStatus,isDraft \
+              --jq '.[] | select(.isDraft == false and .mergeStateStatus == "BEHIND") | .number'
+          )
+
+          if [[ ${#prs[@]} -eq 0 ]]; then
+            echo "No behind PRs to update."
+            exit 0
+          fi
+
+          echo "Will attempt to update ${#prs[@]} PR(s): ${prs[*]}"
+          updated=0
+          skipped=0
+          for pr in "${prs[@]}"; do
+            echo "::group::PR #$pr"
+            if gh pr update-branch "$pr" --repo "$REPO" 2>&1; then
+              updated=$((updated + 1))
+              echo "Updated."
+            else
+              skipped=$((skipped + 1))
+              echo "Skipped (conflict, fork-branch perms, or race)."
+            fi
+            echo "::endgroup::"
+          done
+
+          echo ""
+          echo "Done. updated=$updated skipped=$skipped"
