@@ -1,6 +1,32 @@
 //! cairn plugin SDK: write a plugin as command declarations + typed handlers;
 //! the SDK owns the JSON-RPC/NDJSON stdio loop and the host-callback round-trip.
 //! (`unsafe_code` is forbidden workspace-wide via `[lints] workspace = true`.)
+//!
+//! # Example
+//!
+//! ```no_run
+//! use cairn_plugin_sdk::{Host, Plugin, PluginError};
+//! use serde::Deserialize;
+//! use serde_json::{json, Value};
+//!
+//! #[derive(Deserialize)]
+//! struct NoteLenArgs {
+//!     path: String,
+//! }
+//!
+//! let mut plugin = Plugin::new("example", env!("CARGO_PKG_VERSION"));
+//!
+//! // Raw JSON when you want it:
+//! plugin.command("echo", "Echo", |args: Value, _host: &mut Host| Ok(args));
+//!
+//! // Typed args + a host-callback when you want safety:
+//! plugin.command("noteLen", "Note length", |a: NoteLenArgs, host: &mut Host| {
+//!     let contents = host.read_note(&a.path)?;
+//!     Ok::<Value, PluginError>(json!({ "len": contents.len() }))
+//! });
+//!
+//! plugin.run(); // owns the stdio loop; returns only on stdin EOF
+//! ```
 
 use std::io::{BufRead, Write};
 
