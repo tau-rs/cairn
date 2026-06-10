@@ -67,5 +67,11 @@ fn main() {
         Ok(())
     });
 
+    // Test fixture: never responds, so the host's read timeout can fire.
+    plugin.command("hang", "Hang", |_args: Value, _host: &mut Host| {
+        std::thread::sleep(std::time::Duration::from_secs(86_400));
+        Ok(json!(null))
+    });
+
     plugin.run();
 }
