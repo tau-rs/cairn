@@ -1,0 +1,147 @@
+name: Auto-rerun flaky failures
+
+# Detects "Claude review" workflow runs whose ONLY failed jobs match a
+# known-flaky pattern, and auto-reruns the failed jobs up to a bounded
+# attempt count.
+#
+# SCOPE — deliberately narrow (see ADR-0009)
+# ------------------------------------------
+# This scans the "Claude review" workflow ONLY, never "CI". Cairn's
+# .config/nextest.toml sets `retries = 0` in CI on purpose ("a flake is
+# real signal — surface it, don't hide it"), so test/clippy/fmt failures
+# must NEVER be auto-rerun. The only auto-rerun target is the Claude
+# review bot, whose transient failures (API rate-limit / hiccup) are an
+# external-service issue, not a code-signal flake. Pinning the scan to
+# the "Claude review" workflow makes "never rerun a test job" a
+# structural guarantee, not a pattern-list discipline.
+#
+# Note: `review PR` is NOT a required check (branch protection requires
+# only `ci-summary`). The payoff here is obtaining the AI review that hit
+# a rate-limit and clearing the spurious red ✗ — not unblocking a merge.
+#
+# Why cron and not `workflow_run`?
+# `workflow_run` events fire reliably only for runs on the default
+# branch's history, not for feature-branch PR pushes (documented GitHub
+# Actions quirk). A 10-min cron scan covers all branches uniformly.
+
+on:
+  schedule:
+    # Every 10 minutes. Cron expression starts at the minute granularity.
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      max_attempts:
+        description: "Max workflow run attempts before giving up (default 3)"
+        type: string
+        required: false
+        default: "3"
+      window_minutes:
+        description: "Look-back window in minutes (default 90)"
+        type: string
+        required: false
+        default: "90"
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: auto-rerun-flaky
+  cancel-in-progress: false
+
+jobs:
+  scan-and-rerun:
+    name: Scan recent Claude review runs and rerun if flaky
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Find failed Claude review runs in the look-back window
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          MAX_ATTEMPTS: ${{ inputs.max_attempts || '3' }}
+          WINDOW_MIN: ${{ inputs.window_minutes || '90' }}
+        run: |
+          set -euo pipefail
+
+          # Known-flaky job names. A workflow run is only eligible for
+          # auto-rerun if EVERY failed job in the run matches one of
+          # these patterns (fixed-string substring match). Be
+          # conservative — adding a non-flaky pattern here would mask
+          # real failures by auto-retrying them. Cairn keeps this to the
+          # Claude review bot ONLY (see the header + ADR-0009).
+          flaky_patterns=(
+            "review PR"   # Claude review bot transient (rate limit, API hiccup)
+          )
+
+          # ISO-8601 cutoff: now - WINDOW_MIN
+          cutoff=$(date -u -d "$WINDOW_MIN minutes ago" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || \
+                   date -u -v-"${WINDOW_MIN}"M +"%Y-%m-%dT%H:%M:%SZ")
+          echo "Scanning Claude review runs since $cutoff (max_attempts=$MAX_ATTEMPTS)"
+
+          # Find recent "Claude review" workflow_runs with conclusion=failure.
+          mapfile -t failed_run_ids < <(
+            gh api "repos/$REPO/actions/runs?status=failure&per_page=30" \
+              --jq --arg cutoff "$cutoff" \
+              '.workflow_runs[] | select(.name == "Claude review" and .created_at > $cutoff) | .id'
+          )
+
+          if [ "${#failed_run_ids[@]}" -eq 0 ]; then
+            echo "No failed Claude review runs in window — nothing to do."
+            exit 0
+          fi
+
+          echo "Failed Claude review runs in window: ${failed_run_ids[*]}"
+
+          for run_id in "${failed_run_ids[@]}"; do
+            echo "::group::Evaluating run $run_id"
+
+            run_info=$(gh api "repos/$REPO/actions/runs/$run_id" \
+              --jq '{attempt: .run_attempt, head_sha, head_branch, event}')
+            attempt=$(echo "$run_info" | jq -r '.attempt')
+            sha=$(echo "$run_info" | jq -r '.head_sha')
+            branch=$(echo "$run_info" | jq -r '.head_branch')
+
+            echo "attempt=$attempt sha=${sha:0:7} branch=$branch"
+
+            if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
+              echo "Already at attempt $attempt (>= max $MAX_ATTEMPTS) — skipping."
+              echo "::endgroup::"
+              continue
+            fi
+
+            mapfile -t failed_jobs < <(
+              gh api "repos/$REPO/actions/runs/$run_id/jobs?filter=latest" \
+                --jq '.jobs[] | select(.conclusion == "failure") | .name'
+            )
+
+            if [ "${#failed_jobs[@]}" -eq 0 ]; then
+              echo "No failed jobs (workflow likely succeeded on most recent attempt) — skipping."
+              echo "::endgroup::"
+              continue
+            fi
+
+            echo "Failed jobs: ${failed_jobs[*]}"
+
+            all_flaky=true
+            for job in "${failed_jobs[@]}"; do
+              matched=false
+              for pattern in "${flaky_patterns[@]}"; do
+                case "$job" in
+                  *"$pattern"*) matched=true; break ;;
+                esac
+              done
+              if [ "$matched" = "false" ]; then
+                echo "Job '$job' is NOT in flaky list — will not rerun."
+                all_flaky=false
+                break
+              fi
+            done
+
+            if [ "$all_flaky" = "true" ]; then
+              echo "All failed jobs are flaky — rerunning failed jobs (attempt $((attempt + 1)) of $MAX_ATTEMPTS)"
+              gh api -X POST "repos/$REPO/actions/runs/$run_id/rerun-failed-jobs" \
+                || echo "::warning::rerun API call failed (likely workflow no longer in rerunnable state)"
+            fi
+            echo "::endgroup::"
+          done
