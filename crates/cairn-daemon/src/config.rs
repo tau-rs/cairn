@@ -14,6 +14,20 @@ pub struct Config {
     /// On-disk index settings.
     #[serde(default)]
     pub index: IndexConfig,
+    /// Plugin host settings.
+    #[serde(default)]
+    pub plugins: PluginsConfig,
+}
+
+/// Plugin host settings.
+#[derive(Debug, Default, Deserialize)]
+pub struct PluginsConfig {
+    /// Per-message plugin read timeout, in seconds. Unset → the host default
+    /// (`cairn_infra::DEFAULT_PLUGIN_TIMEOUT`, 30s). A configured `0` is invalid
+    /// (it would kill every plugin immediately) and is ignored with a warning by
+    /// the daemon.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
 }
 
 /// On-disk index persistence settings.
@@ -130,5 +144,26 @@ mod tests {
     fn index_persist_can_be_disabled() {
         let c: Config = toml::from_str("[index]\npersist = false").unwrap();
         assert!(!c.index.persist);
+    }
+
+    #[test]
+    fn plugins_timeout_parses() {
+        let c: Config = toml::from_str("[plugins]\ntimeout_secs = 60").unwrap();
+        assert_eq!(c.plugins.timeout_secs, Some(60));
+    }
+
+    #[test]
+    fn plugins_timeout_defaults_none() {
+        assert_eq!(
+            toml::from_str::<Config>("").unwrap().plugins.timeout_secs,
+            None
+        );
+        assert_eq!(
+            toml::from_str::<Config>("[plugins]\n")
+                .unwrap()
+                .plugins
+                .timeout_secs,
+            None
+        );
     }
 }
