@@ -43,6 +43,16 @@ at the callback boundary (the host gates each `host/*` method on a manifest-decl
 namespaced capability string). Scope is one read-only callback, `host/readNote`
 (requires `fs:read`); the re-entrancy (engine `&mut self` vs the borrowed host) is
 resolved by `mem::replace`-ing the host out of the engine for the invoke's duration.
-Deferred to **slice 3b:** write callbacks (`host/writeNote`) + event emission, plus
-`search`/`listNotes` and the `net`/`agent` capabilities. See
-`docs/superpowers/specs/2026-06-09-plugin-host-slice3a-design.md`.
+See `docs/superpowers/specs/2026-06-09-plugin-host-slice3a-design.md`.
+
+**Slice 3b (done):** three more callbacks — `host/writeNote` (`fs:write`), `host/search`
+and `host/listNotes` (`fs:read`). The write is the event-emitting one: the `EventSink`
+is threaded through the callback boundary (`EngineCallbacks` gains a sink field;
+`Engine::invoke_plugin_command` gains a `sink` param — a one-line ripple in
+`dispatch_command`, the `PluginHost` trait signature unchanged), so a plugin's write
+routes through `Engine::write_note` and emits live `NoteChanged`/`Reindexed` (the
+daemon forwards these to the UI over WS). The protocol crate owns its own minimal
+wire DTOs (`SearchHitDto`/`NoteSummaryDto`, contract-decoupled). Deferred to a later
+slice: `host/deleteNote`, the `net`/`agent` capabilities, shared `CAP_*` constants,
+and a full-stack real-subprocess-over-real-engine integration test. See
+`docs/superpowers/specs/2026-06-10-plugin-host-slice3b-design.md`.
