@@ -21,11 +21,15 @@ pub const METHOD_SEARCH: &str = "host/search";
 pub const METHOD_LIST_NOTES: &str = "host/listNotes";
 /// Plugin -> host: delete a note. Requires the `fs:write` capability.
 pub const METHOD_DELETE_NOTE: &str = "host/deleteNote";
+/// Host -> plugin: a cairn change event. Delivered to plugins declaring `events`.
+pub const METHOD_CAIRN_EVENT: &str = "cairn/event";
 
 /// Capability: read the cairn (read/search/list note content + metadata).
 pub const CAP_FS_READ: &str = "fs:read";
 /// Capability: mutate the cairn (create/overwrite/delete notes).
 pub const CAP_FS_WRITE: &str = "fs:write";
+/// Capability: receive pushed cairn events.
+pub const CAP_EVENTS: &str = "events";
 
 /// JSON-RPC error code: the host refused a callback (capability not declared, or
 /// unknown host method).
@@ -112,6 +116,21 @@ pub struct WriteNoteParams {
 /// Params of the `host/deleteNote` callback. Success result is an empty object `{}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeleteNoteParams {
+    pub path: String,
+}
+
+/// The kind of a cairn change pushed to plugins.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CairnEventKind {
+    NoteChanged,
+    NoteDeleted,
+}
+
+/// Params of the `cairn/event` request (host -> plugin). Ack result is `{}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CairnEvent {
+    pub kind: CairnEventKind,
     pub path: String,
 }
 
@@ -365,5 +384,22 @@ mod tests {
         };
         let v = serde_json::to_value(&dp).unwrap();
         assert_eq!(serde_json::from_value::<DeleteNoteParams>(v).unwrap(), dp);
+    }
+
+    #[test]
+    fn cairn_event_roundtrips() {
+        let ev = CairnEvent {
+            kind: CairnEventKind::NoteChanged,
+            path: "a.md".into(),
+        };
+        let v = serde_json::to_value(&ev).unwrap();
+        assert_eq!(v["kind"], "noteChanged"); // camelCase rename
+        assert_eq!(serde_json::from_value::<CairnEvent>(v).unwrap(), ev);
+
+        let del = CairnEvent {
+            kind: CairnEventKind::NoteDeleted,
+            path: "b.md".into(),
+        };
+        assert_eq!(serde_json::to_value(&del).unwrap()["kind"], "noteDeleted");
     }
 }
