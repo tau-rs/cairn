@@ -523,6 +523,14 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> PluginCallbacks for EngineCallbacks<
         self.engine.write_note(&np, contents, self.sink)
     }
 
+    fn delete_note(&mut self, path: &str) -> Result<(), PortError> {
+        let np = NotePath::new(path)
+            .map_err(|e| PortError::NotFound(format!("invalid note path {path}: {e}")))?;
+        // Routes through the engine delete path: removes the note + caches and
+        // emits NoteDeleted through the sink.
+        self.engine.delete_note(&np, self.sink)
+    }
+
     fn search(&mut self, query: &str) -> Result<Vec<SearchHit>, PortError> {
         self.engine.search(query)
     }
@@ -983,6 +991,53 @@ mod tests {
             .invoke_plugin_command("nope", "x", &serde_json::Value::Null, &mut sink)
             .unwrap_err();
         assert!(matches!(err, PortError::NotFound(_)));
+    }
+
+    /// A stub host whose invoke deletes a note via the callbacks handler —
+    /// exercises delete event emission through invoke_plugin_command.
+    struct CallbackDeleter;
+    impl PluginHost for CallbackDeleter {
+        fn plugins(&self) -> Vec<PluginInfo> {
+            vec![PluginInfo {
+                id: "d".into(),
+                name: "d".into(),
+                version: "0".into(),
+                commands: Vec::new(),
+            }]
+        }
+        fn invoke(
+            &mut self,
+            _plugin: &str,
+            _command: &str,
+            args: &serde_json::Value,
+            callbacks: &mut dyn cairn_ports::PluginCallbacks,
+        ) -> Result<serde_json::Value, PortError> {
+            let path = args["path"].as_str().unwrap_or_default();
+            callbacks.delete_note(path)?;
+            Ok(serde_json::json!({ "deleted": true }))
+        }
+    }
+
+    #[test]
+    fn delete_callback_emits_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut events: Vec<Event> = Vec::new();
+        eng.write_note(&NotePath::new("x.md").unwrap(), "body", &mut events)
+            .unwrap();
+        events.clear();
+        eng.set_plugin_host(Box::new(CallbackDeleter));
+        let out = eng
+            .invoke_plugin_command(
+                "d",
+                "del",
+                &serde_json::json!({ "path": "x.md" }),
+                &mut events,
+            )
+            .unwrap();
+        assert_eq!(out, serde_json::json!({ "deleted": true }));
+        assert!(events.contains(&Event::NoteDeleted(NotePath::new("x.md").unwrap())));
+        assert!(eng.read_note(&NotePath::new("x.md").unwrap()).is_err());
     }
 
     /// A stub host whose invoke writes a note via the callbacks handler —

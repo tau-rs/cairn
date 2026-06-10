@@ -1,7 +1,7 @@
 //! Example cairn plugin built on `cairn-plugin-sdk`: declares commands + typed
 //! handlers; the SDK owns the JSON-RPC/NDJSON loop and the host-callbacks.
-//! `echo` returns its args; `noteLen`/`writeNote`/`noteCount`/`find` call back to
-//! the host.
+//! `echo` returns its args; `noteLen`/`writeNote`/`noteCount`/`find`/`deleteNote`
+//! call back to the host.
 
 use cairn_plugin_sdk::{Host, Plugin};
 use serde::Deserialize;
@@ -51,6 +51,15 @@ fn main() {
         let hits = host.search(&a.query)?;
         Ok(json!({ "hits": hits.len() }))
     });
+
+    plugin.command(
+        "deleteNote",
+        "Delete note",
+        |a: PathArgs, host: &mut Host| {
+            host.delete_note(&a.path)?;
+            Ok(json!({ "deleted": true }))
+        },
+    );
 
     plugin.run();
 }

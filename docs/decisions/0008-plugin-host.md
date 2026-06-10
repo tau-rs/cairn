@@ -57,15 +57,6 @@ namespaced capability string). Scope is one read-only callback, `host/readNote`
 resolved by `mem::replace`-ing the host out of the engine for the invoke's duration.
 See `docs/superpowers/specs/2026-06-09-plugin-host-slice3a-design.md`.
 
-**Slice 3a (done):** bidirectional RPC — a plugin command can call back to the host
-mid-invoke (the host's invoke is now a full-duplex dispatch loop over an `Incoming`
-message: a callback request or the invoke response). Capabilities are now *enforced*
-at the callback boundary (the host gates each `host/*` method on a manifest-declared,
-namespaced capability string). Scope is one read-only callback, `host/readNote`
-(requires `fs:read`); the re-entrancy (engine `&mut self` vs the borrowed host) is
-resolved by `mem::replace`-ing the host out of the engine for the invoke's duration.
-See `docs/superpowers/specs/2026-06-09-plugin-host-slice3a-design.md`.
-
 **Slice 3b (done):** three more callbacks — `host/writeNote` (`fs:write`), `host/search`
 and `host/listNotes` (`fs:read`). The write is the event-emitting one: the `EventSink`
 is threaded through the callback boundary (`EngineCallbacks` gains a sink field;
@@ -77,3 +68,10 @@ wire DTOs (`SearchHitDto`/`NoteSummaryDto`, contract-decoupled). Deferred to a l
 slice: `host/deleteNote`, the `net`/`agent` capabilities, shared `CAP_*` constants,
 and a full-stack real-subprocess-over-real-engine integration test. See
 `docs/superpowers/specs/2026-06-10-plugin-host-slice3b-design.md`.
+
+**Slice 3c (done):** completes the mutation surface with `host/deleteNote`
+(`fs:write`, emits `NoteDeleted`, mirrors `writeNote`), and replaces `required_cap`'s
+four capability string literals with shared `CAP_FS_READ`/`CAP_FS_WRITE` constants in
+`cairn-plugin-protocol`. Still deferred: the `net`/`agent` capabilities and the
+full-stack real-subprocess-over-real-engine integration test. See
+`docs/superpowers/specs/2026-06-10-plugin-host-deletenote-design.md`.

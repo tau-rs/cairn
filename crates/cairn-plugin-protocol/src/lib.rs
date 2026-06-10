@@ -19,6 +19,13 @@ pub const METHOD_WRITE_NOTE: &str = "host/writeNote";
 pub const METHOD_SEARCH: &str = "host/search";
 /// Plugin -> host: list all notes (path + title). Requires the `fs:read` capability.
 pub const METHOD_LIST_NOTES: &str = "host/listNotes";
+/// Plugin -> host: delete a note. Requires the `fs:write` capability.
+pub const METHOD_DELETE_NOTE: &str = "host/deleteNote";
+
+/// Capability: read the cairn (read/search/list note content + metadata).
+pub const CAP_FS_READ: &str = "fs:read";
+/// Capability: mutate the cairn (create/overwrite/delete notes).
+pub const CAP_FS_WRITE: &str = "fs:write";
 
 /// JSON-RPC error code: the host refused a callback (capability not declared, or
 /// unknown host method).
@@ -100,6 +107,12 @@ pub struct ReadNoteResult {
 pub struct WriteNoteParams {
     pub path: String,
     pub contents: String,
+}
+
+/// Params of the `host/deleteNote` callback. Success result is an empty object `{}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeleteNoteParams {
+    pub path: String,
 }
 
 /// Params of the `host/search` callback.
@@ -343,5 +356,14 @@ mod tests {
         let back: ListNotesResult =
             serde_json::from_value(serde_json::to_value(&ln).unwrap()).unwrap();
         assert_eq!(back.notes, ln.notes);
+    }
+
+    #[test]
+    fn delete_note_params_roundtrips() {
+        let dp = DeleteNoteParams {
+            path: "a.md".into(),
+        };
+        let v = serde_json::to_value(&dp).unwrap();
+        assert_eq!(serde_json::from_value::<DeleteNoteParams>(v).unwrap(), dp);
     }
 }

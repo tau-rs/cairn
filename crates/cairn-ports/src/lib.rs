@@ -234,6 +234,14 @@ pub trait PluginCallbacks {
     /// # Errors
     /// [`PortError`] on a storage failure.
     fn list_notes(&mut self) -> Result<Vec<Note>, PortError>;
+
+    /// Delete a note. Gated on the `fs:write` capability. Emits a delete event
+    /// through the host's sink.
+    ///
+    /// # Errors
+    /// [`PortError::NotFound`] if the path is invalid or the note does not exist;
+    /// [`PortError::Adapter`] on a storage failure.
+    fn delete_note(&mut self, path: &str) -> Result<(), PortError>;
 }
 
 /// Hosts out-of-process plugins. Seam: [`NoopPluginHost`].
