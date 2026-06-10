@@ -3,7 +3,7 @@
 //! `echo` returns its args; `noteLen`/`writeNote`/`noteCount`/`find`/`deleteNote`
 //! call back to the host.
 
-use cairn_plugin_sdk::{Host, Plugin};
+use cairn_plugin_sdk::{CairnEvent, Host, Plugin};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -60,6 +60,12 @@ fn main() {
             Ok(json!({ "deleted": true }))
         },
     );
+
+    // On any cairn change, record the changed path into a marker note.
+    plugin.on_event(|ev: CairnEvent, host: &mut Host| {
+        host.write_note("seen.md", &ev.path)?;
+        Ok(())
+    });
 
     plugin.run();
 }

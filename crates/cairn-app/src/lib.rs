@@ -3,8 +3,8 @@
 
 use cairn_domain::{rewrite_link_target, Graph, Note, NotePath};
 use cairn_ports::{
-    FileStamp, FsChange, NoopPluginHost, PluginCallbacks, PluginHost, PluginInfo, PortError,
-    SearchHit, SearchIndex, VaultStore, Vcs,
+    FileStamp, FsChange, NoopPluginHost, PluginCallbacks, PluginEvent, PluginHost, PluginInfo,
+    PortError, SearchHit, SearchIndex, VaultStore, Vcs,
 };
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -499,10 +499,22 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
         self.plugins = host;
         result
     }
+
+    /// Deliver a cairn event to subscribed plugins (best-effort). Event-handler
+    /// callbacks route through the engine, and any events they emit go to `sink`.
+    pub fn dispatch_plugin_event(&mut self, event: &PluginEvent, sink: &mut dyn EventSink) {
+        let mut host = std::mem::replace(&mut self.plugins, Box::new(NoopPluginHost));
+        {
+            let mut cb = EngineCallbacks { engine: self, sink };
+            host.dispatch_event(event, &mut cb);
+        }
+        self.plugins = host;
+    }
 }
 
 /// Bridges plugin host-callbacks to engine operations. Held only for the duration
-/// of a single `invoke_plugin_command`, while `self.plugins` is a `NoopPluginHost`.
+/// of a single `invoke_plugin_command` or `dispatch_plugin_event`, while
+/// `self.plugins` is a `NoopPluginHost`.
 struct EngineCallbacks<'a, S, I, V> {
     engine: &'a mut Engine<S, I, V>,
     sink: &'a mut dyn EventSink,
@@ -1138,5 +1150,47 @@ mod tests {
             .unwrap()
             .iter()
             .any(|h| h.path.as_str() == "c.md"));
+    }
+
+    /// A stub host whose dispatch_event writes a marker note via the callbacks —
+    /// exercises Engine::dispatch_plugin_event + handler callbacks.
+    struct EventWriter;
+    impl PluginHost for EventWriter {
+        fn plugins(&self) -> Vec<PluginInfo> {
+            Vec::new()
+        }
+        fn invoke(
+            &mut self,
+            plugin: &str,
+            _command: &str,
+            _args: &serde_json::Value,
+            _callbacks: &mut dyn cairn_ports::PluginCallbacks,
+        ) -> Result<serde_json::Value, PortError> {
+            Err(PortError::NotFound(format!("plugin {plugin}")))
+        }
+        fn dispatch_event(
+            &mut self,
+            _event: &cairn_ports::PluginEvent,
+            callbacks: &mut dyn cairn_ports::PluginCallbacks,
+        ) {
+            let _ = callbacks.write_note("seen.md", "seen");
+        }
+    }
+
+    #[test]
+    fn dispatch_event_runs_handler_with_callback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        eng.set_plugin_host(Box::new(EventWriter));
+        let mut events: Vec<Event> = Vec::new();
+        eng.dispatch_plugin_event(
+            &cairn_ports::PluginEvent::NoteChanged(NotePath::new("x.md").unwrap()),
+            &mut events,
+        );
+        assert_eq!(
+            eng.read_note(&NotePath::new("seen.md").unwrap()).unwrap(),
+            "seen"
+        );
+        assert!(events.contains(&Event::NoteChanged(NotePath::new("seen.md").unwrap())));
     }
 }

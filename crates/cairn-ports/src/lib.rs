@@ -244,6 +244,15 @@ pub trait PluginCallbacks {
     fn delete_note(&mut self, path: &str) -> Result<(), PortError>;
 }
 
+/// A cairn change the host may push to subscribed plugins.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PluginEvent {
+    /// A note was created or updated.
+    NoteChanged(NotePath),
+    /// A note was deleted.
+    NoteDeleted(NotePath),
+}
+
 /// Hosts out-of-process plugins. Seam: [`NoopPluginHost`].
 pub trait PluginHost: Send {
     /// The loaded plugins and their declared commands.
@@ -261,6 +270,11 @@ pub trait PluginHost: Send {
         args: &serde_json::Value,
         callbacks: &mut dyn PluginCallbacks,
     ) -> Result<serde_json::Value, PortError>;
+
+    /// Deliver a cairn event to every loaded plugin that declared the `events`
+    /// capability, servicing any host-callbacks each makes while handling it.
+    /// Best-effort. Default: no-op (a host that doesn't support events ignores them).
+    fn dispatch_event(&mut self, _event: &PluginEvent, _callbacks: &mut dyn PluginCallbacks) {}
 }
 
 /// No-plugins seam — the engine's default host.

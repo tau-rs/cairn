@@ -5,14 +5,29 @@ use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use cairn_plugin_protocol::{
-    read_message, write_message, CommandDecl, DeleteNoteParams, Incoming, InitializeParams,
-    InitializeResult, InvokeParams, ListNotesResult, Manifest, NoteSummaryDto, ReadNoteParams,
-    ReadNoteResult, Request, Response, RpcError, SearchHitDto, SearchParams, SearchResultDto,
-    WriteNoteParams, CALLBACK_DENIED, CALLBACK_FAILED, CAP_FS_READ, CAP_FS_WRITE, JSONRPC_VERSION,
-    METHOD_DELETE_NOTE, METHOD_INITIALIZE, METHOD_INVOKE, METHOD_LIST_NOTES, METHOD_READ_NOTE,
-    METHOD_SEARCH, METHOD_WRITE_NOTE,
+    read_message, write_message, CairnEvent, CairnEventKind, CommandDecl, DeleteNoteParams,
+    Incoming, InitializeParams, InitializeResult, InvokeParams, ListNotesResult, Manifest,
+    NoteSummaryDto, ReadNoteParams, ReadNoteResult, Request, Response, RpcError, SearchHitDto,
+    SearchParams, SearchResultDto, WriteNoteParams, CALLBACK_DENIED, CALLBACK_FAILED, CAP_EVENTS,
+    CAP_FS_READ, CAP_FS_WRITE, JSONRPC_VERSION, METHOD_CAIRN_EVENT, METHOD_DELETE_NOTE,
+    METHOD_INITIALIZE, METHOD_INVOKE, METHOD_LIST_NOTES, METHOD_READ_NOTE, METHOD_SEARCH,
+    METHOD_WRITE_NOTE,
 };
-use cairn_ports::{PluginCallbacks, PluginCommand, PluginHost, PluginInfo, PortError};
+use cairn_ports::{PluginCallbacks, PluginCommand, PluginEvent, PluginHost, PluginInfo, PortError};
+
+/// Map a ports event to its wire form for delivery to plugins.
+fn to_cairn_event(event: &PluginEvent) -> CairnEvent {
+    match event {
+        PluginEvent::NoteChanged(p) => CairnEvent {
+            kind: CairnEventKind::NoteChanged,
+            path: p.as_str().to_string(),
+        },
+        PluginEvent::NoteDeleted(p) => CairnEvent {
+            kind: CairnEventKind::NoteDeleted,
+            path: p.as_str().to_string(),
+        },
+    }
+}
 
 fn adapt<E: std::fmt::Display>(e: E) -> PortError {
     PortError::Adapter(e.to_string())
@@ -68,17 +83,20 @@ impl LoadedPlugin {
 
     /// Invoke a command, servicing any host-callbacks the plugin sends until it
     /// returns the response to our invoke request.
-    fn invoke_command(
+    /// Send one request and run the dispatch loop, servicing host-callbacks until
+    /// the matching-id response arrives. Shared by invoke and event delivery.
+    fn call_with_callbacks(
         &mut self,
+        method: &str,
         params: serde_json::Value,
         callbacks: &mut dyn PluginCallbacks,
     ) -> Result<serde_json::Value, PortError> {
         self.next_id += 1;
-        let invoke_id = self.next_id;
+        let req_id = self.next_id;
         let req = Request {
             jsonrpc: JSONRPC_VERSION.to_string(),
-            id: invoke_id,
-            method: METHOD_INVOKE.to_string(),
+            id: req_id,
+            method: method.to_string(),
             params,
         };
         write_message(&mut self.stdin, &req).map_err(adapt)?;
@@ -88,7 +106,7 @@ impl LoadedPlugin {
                 .ok_or_else(|| PortError::Adapter("plugin closed its output".into()))?;
             match msg {
                 Incoming::Response(resp) => {
-                    if resp.id != invoke_id {
+                    if resp.id != req_id {
                         continue; // stray id; one-in-flight invariant, ignore
                     }
                     if let Some(err) = resp.error {
@@ -104,6 +122,26 @@ impl LoadedPlugin {
                 }
             }
         }
+    }
+
+    /// Invoke a command, servicing any host-callbacks until the plugin responds.
+    fn invoke_command(
+        &mut self,
+        params: serde_json::Value,
+        callbacks: &mut dyn PluginCallbacks,
+    ) -> Result<serde_json::Value, PortError> {
+        self.call_with_callbacks(METHOD_INVOKE, params, callbacks)
+    }
+
+    /// Deliver one cairn event, servicing any host-callbacks the handler makes.
+    fn deliver_event(
+        &mut self,
+        event: &CairnEvent,
+        callbacks: &mut dyn PluginCallbacks,
+    ) -> Result<(), PortError> {
+        let params = serde_json::to_value(event).map_err(adapt)?;
+        self.call_with_callbacks(METHOD_CAIRN_EVENT, params, callbacks)?;
+        Ok(())
     }
 
     /// Build the response to one host-callback request, gating on capability.
@@ -371,6 +409,17 @@ impl PluginHost for ProcessPluginHost {
         })
         .map_err(adapt)?;
         p.invoke_command(params, callbacks)
+    }
+
+    fn dispatch_event(&mut self, event: &PluginEvent, callbacks: &mut dyn PluginCallbacks) {
+        let cairn_event = to_cairn_event(event);
+        for p in self.loaded.iter_mut() {
+            if p.capabilities.iter().any(|c| c == CAP_EVENTS) {
+                if let Err(e) = p.deliver_event(&cairn_event, callbacks) {
+                    eprintln!("plugin {}: event delivery failed: {e}", p.info.id);
+                }
+            }
+        }
     }
 }
 

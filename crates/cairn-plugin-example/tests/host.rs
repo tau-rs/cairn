@@ -326,3 +326,34 @@ fn search_denied_without_fs_read() {
         "expected Adapter, got {err:?}"
     );
 }
+
+#[test]
+fn event_delivered_and_handler_writes() {
+    let bin = env!("CARGO_BIN_EXE_cairn-plugin-example");
+    let tmp = tempfile::tempdir().unwrap();
+    let pdir = tmp.path().join(".cairn").join("plugins").join("example");
+    write_manifest(&pdir, bin, "\"events\", \"fs:write\"");
+    let mut host = ProcessPluginHost::load(&tmp.path().join(".cairn").join("plugins")).unwrap();
+    let mut cb = MapCallbacks(HashMap::new());
+    host.dispatch_event(
+        &cairn_ports::PluginEvent::NoteChanged(NotePath::new("x.md").unwrap()),
+        &mut cb,
+    );
+    // The example's on_event handler wrote seen.md = the changed path, via host.write_note.
+    assert_eq!(cb.0.get("seen.md").map(String::as_str), Some("x.md"));
+}
+
+#[test]
+fn event_skipped_without_events_cap() {
+    let bin = env!("CARGO_BIN_EXE_cairn-plugin-example");
+    let tmp = tempfile::tempdir().unwrap();
+    let pdir = tmp.path().join(".cairn").join("plugins").join("example");
+    write_manifest(&pdir, bin, "\"fs:write\""); // fs:write but NOT events
+    let mut host = ProcessPluginHost::load(&tmp.path().join(".cairn").join("plugins")).unwrap();
+    let mut cb = MapCallbacks(HashMap::new());
+    host.dispatch_event(
+        &cairn_ports::PluginEvent::NoteChanged(NotePath::new("x.md").unwrap()),
+        &mut cb,
+    );
+    assert!(cb.0.is_empty(), "no events cap -> no delivery");
+}

@@ -33,12 +33,13 @@ use std::io::{BufRead, Write};
 use cairn_plugin_protocol::{
     read_message, write_message, CommandDecl, DeleteNoteParams, InitializeResult, InvokeParams,
     ListNotesResult, ReadNoteParams, ReadNoteResult, Request, Response, RpcError, SearchParams,
-    SearchResultDto, WriteNoteParams, JSONRPC_VERSION, METHOD_DELETE_NOTE, METHOD_INITIALIZE,
-    METHOD_INVOKE, METHOD_LIST_NOTES, METHOD_READ_NOTE, METHOD_SEARCH, METHOD_WRITE_NOTE,
+    SearchResultDto, WriteNoteParams, JSONRPC_VERSION, METHOD_CAIRN_EVENT, METHOD_DELETE_NOTE,
+    METHOD_INITIALIZE, METHOD_INVOKE, METHOD_LIST_NOTES, METHOD_READ_NOTE, METHOD_SEARCH,
+    METHOD_WRITE_NOTE,
 };
 use serde_json::Value;
 
-pub use cairn_plugin_protocol::{NoteSummaryDto, SearchHitDto};
+pub use cairn_plugin_protocol::{CairnEvent, NoteSummaryDto, SearchHitDto};
 
 /// An error from a command handler or a host-callback. Maps to a JSON-RPC error
 /// object on the wire.
@@ -187,6 +188,10 @@ impl Host<'_> {
 /// Type alias for the erased command handler stored in [`RegisteredCommand`].
 type ErasedHandler = Box<dyn FnMut(Value, &mut Host<'_>) -> Result<Value, PluginError>>;
 
+/// The erased event handler stored on the `Plugin`. Returns `()` (events are
+/// acked, not result-bearing).
+type ErasedEventHandler = Box<dyn FnMut(CairnEvent, &mut Host<'_>) -> Result<(), PluginError>>;
+
 /// A registered command: id, title, and a type-erased handler. The handler is
 /// higher-ranked over the `Host` borrow so one stored closure accepts a Host of
 /// any lifetime.
@@ -202,6 +207,7 @@ pub struct Plugin {
     name: String,
     version: String,
     commands: Vec<RegisteredCommand>,
+    event_handler: Option<ErasedEventHandler>,
 }
 
 impl Plugin {
@@ -211,7 +217,17 @@ impl Plugin {
             name: name.into(),
             version: version.into(),
             commands: Vec::new(),
+            event_handler: None,
         }
+    }
+
+    /// Register a handler for pushed cairn events (`cairn/event`). The handler
+    /// gets capability-gated `Host` access to react (read/write the cairn).
+    pub fn on_event<F>(&mut self, handler: F)
+    where
+        F: FnMut(CairnEvent, &mut Host<'_>) -> Result<(), PluginError> + 'static,
+    {
+        self.event_handler = Some(Box::new(handler));
     }
 
     /// Register a typed command. `A` is deserialized from the invoke args; `O` is
@@ -316,6 +332,34 @@ impl Plugin {
                         });
                     }
                 },
+                Err(e) => {
+                    resp.error = Some(RpcError {
+                        code: -32602,
+                        message: e.to_string(),
+                    });
+                }
+            },
+            METHOD_CAIRN_EVENT => match serde_json::from_value::<CairnEvent>(req.params.clone()) {
+                Ok(ev) => {
+                    if let Some(handler) = self.event_handler.as_mut() {
+                        let mut host = Host {
+                            reader,
+                            stdout,
+                            next_cb_id,
+                        };
+                        match handler(ev, &mut host) {
+                            Ok(()) => resp.result = Some(serde_json::json!({})),
+                            Err(e) => {
+                                resp.error = Some(RpcError {
+                                    code: e.code,
+                                    message: e.message,
+                                })
+                            }
+                        }
+                    } else {
+                        resp.result = Some(serde_json::json!({})); // no handler: ack
+                    }
+                }
                 Err(e) => {
                     resp.error = Some(RpcError {
                         code: -32602,
@@ -523,5 +567,31 @@ mod run_tests {
             ),
         );
         assert_eq!(out[0].error.clone().unwrap().code, -32602);
+    }
+
+    #[test]
+    fn on_event_acks_and_handles() {
+        use cairn_plugin_protocol::{CairnEvent, CairnEventKind, METHOD_CAIRN_EVENT};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let ran = Arc::new(AtomicBool::new(false));
+        let ran2 = ran.clone();
+        let mut plugin = Plugin::new("ex", "0.1.0");
+        plugin.on_event(move |ev: CairnEvent, _host| {
+            assert_eq!(ev.path, "x.md");
+            ran2.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+        let ev = CairnEvent {
+            kind: CairnEventKind::NoteChanged,
+            path: "x.md".into(),
+        };
+        let out = drive(
+            plugin,
+            &request_line(1, METHOD_CAIRN_EVENT, serde_json::to_value(ev).unwrap()),
+        );
+        assert!(ran.load(Ordering::SeqCst), "handler should have run");
+        assert_eq!(out[0].result.clone().unwrap(), serde_json::json!({}));
     }
 }

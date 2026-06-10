@@ -31,10 +31,9 @@ can't touch the cairn).
 The full out-of-process path is proven end-to-end (an example plugin spawned via the
 host, handshake, command invoke). The daemon loads plugins on startup
 (absent/broken → graceful). Plugins exit on stdin EOF; `Drop` also kills them (no
-orphans). Deferred to later slices: vault events (4), content processors / port
-backends (5), OS sandbox (6), git-URL distribution (7); UI plugins are the UI
-session's. JSON-RPC id correlation is unchecked (safe under one-in-flight; revisit if
-concurrency is added).
+orphans). Deferred to later slices: content processors / port backends (5), OS
+sandbox (6), git-URL distribution (7); UI plugins are the UI session's. JSON-RPC id
+correlation is unchecked (safe under one-in-flight; revisit if concurrency is added).
 
 **Slice 2 (SDK, done):** a `cairn-plugin-sdk` crate so a plugin author writes only
 command declarations + typed handlers; the SDK owns the stdio loop, `initialize`
@@ -75,3 +74,17 @@ four capability string literals with shared `CAP_FS_READ`/`CAP_FS_WRITE` constan
 `cairn-plugin-protocol`. Still deferred: the `net`/`agent` capabilities and the
 full-stack real-subprocess-over-real-engine integration test. See
 `docs/superpowers/specs/2026-06-10-plugin-host-deletenote-design.md`.
+
+**Slice 4 (done):** cairn events — the host pushes `NoteChanged`/`NoteDeleted` to
+plugins declaring the new `events` capability, *inverting* the direction (host →
+plugin). Delivered as a `cairn/event` **request** reusing the same dispatch loop as
+`invokeCommand` (factored into `LoadedPlugin::call_with_callbacks`), so an event
+handler can make capability-gated host-callbacks (react by reading/writing the
+cairn). Ports gain a wire-agnostic `PluginEvent` + a default-no-op
+`PluginHost::dispatch_event`; the engine's `dispatch_plugin_event` uses the same
+`mem::replace` re-entrancy as invoke; the daemon forwards collected note events to
+plugins **after** each command/watch-change (under the Mutex, so no plugin is
+mid-invoke), broadcast-to-WS unchanged and non-recursive. SDK adds `Plugin::on_event`.
+Synchronous (a hanging handler blocks the daemon — the standing no-timeout
+limitation); async/decoupled delivery and per-kind subscriptions are future work. See
+`docs/superpowers/specs/2026-06-10-plugin-cairn-events-design.md`.
