@@ -195,6 +195,11 @@ async fn query_handler(State(state): State<AppState>, Json(query): Json<Query>) 
 /// True if `origin` (the request's `Origin` header value) is present and in the
 /// allowlist. Browsers always send `Origin` on a WS handshake; a missing or
 /// non-UTF-8 header is treated as disallowed (deny-by-default, mirroring CORS).
+///
+/// Matches by exact string equality against the same allowlist the CORS layer
+/// uses. Browsers serialize `Origin` canonically (lowercase scheme/host, explicit
+/// port, no path), so this agrees with tower-http's parsed comparison for every
+/// well-formed origin; it can only ever be equal-or-stricter, never looser.
 fn ws_origin_allowed(allowed: &[String], origin: Option<&axum::http::HeaderValue>) -> bool {
     match origin.and_then(|o| o.to_str().ok()) {
         Some(value) => allowed.iter().any(|a| a == value),
