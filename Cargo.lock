@@ -338,6 +338,7 @@ dependencies = [
  "git2",
  "notify",
  "notify-debouncer-full",
+ "serde",
  "serde_json",
  "tantivy",
  "tempfile",
