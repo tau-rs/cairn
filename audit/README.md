@@ -29,6 +29,7 @@ capability-gated host callbacks).
 - Security: 1 Critical, 2 High, 3 Medium, 1 Low (`security.md`)
 - Design: 1 Medium, 10 Low (`design.md`)
 - Diagnostics: 3 Medium, 2 Low (`diagnostics.md`)
+- DevOps & CI/CD: see `audit/devops.md` — 9 recommendations (3 High, 3 Medium, 3 Low) toward the unified tiered pipeline.
 
 ## Top 5 issues
 
