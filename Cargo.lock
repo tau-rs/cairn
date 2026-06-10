@@ -350,8 +350,9 @@ version = "0.0.0"
 dependencies = [
  "cairn-domain",
  "cairn-infra",
- "cairn-plugin-protocol",
+ "cairn-plugin-sdk",
  "cairn-ports",
+ "serde",
  "serde_json",
  "tempfile",
 ]
