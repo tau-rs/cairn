@@ -1,7 +1,19 @@
-use cairn_infra::ProcessPluginHost;
 use cairn_domain::{Note, NotePath};
+use cairn_infra::ProcessPluginHost;
 use cairn_ports::{PluginCallbacks, PluginHost, PortError, SearchHit};
 use std::collections::HashMap;
+
+fn write_manifest(pdir: &std::path::Path, bin: &str, caps: &str) {
+    std::fs::create_dir_all(pdir).unwrap();
+    std::fs::write(
+        pdir.join("manifest.toml"),
+        format!(
+            "id=\"example\"\nname=\"Example\"\nversion=\"0.1.0\"\n\
+             [engine]\ncommand='{bin}'\ncapabilities=[{caps}]\n"
+        ),
+    )
+    .unwrap();
+}
 
 /// A test double for host-callbacks: serves notes from an in-memory map.
 struct MapCallbacks(HashMap<String, String>);
@@ -160,4 +172,82 @@ fn note_len_denied_without_capability() {
         matches!(err, PortError::Adapter(_)),
         "expected Adapter, got {err:?}"
     );
+}
+
+#[test]
+fn write_note_via_callback() {
+    let bin = env!("CARGO_BIN_EXE_cairn-plugin-example");
+    let tmp = tempfile::tempdir().unwrap();
+    let pdir = tmp.path().join(".cairn").join("plugins").join("example");
+    write_manifest(&pdir, bin, "\"fs:write\"");
+    let mut host = ProcessPluginHost::load(&tmp.path().join(".cairn").join("plugins")).unwrap();
+    let mut cb = MapCallbacks(HashMap::new());
+    let out = host
+        .invoke("example", "writeNote", &serde_json::json!({"path": "n.md", "contents": "hi there"}), &mut cb)
+        .unwrap();
+    assert_eq!(out, serde_json::json!({"written": true}));
+    assert_eq!(cb.0.get("n.md").map(String::as_str), Some("hi there"));
+}
+
+#[test]
+fn write_denied_without_fs_write() {
+    let bin = env!("CARGO_BIN_EXE_cairn-plugin-example");
+    let tmp = tempfile::tempdir().unwrap();
+    let pdir = tmp.path().join(".cairn").join("plugins").join("example");
+    write_manifest(&pdir, bin, "\"fs:read\""); // read but NOT write
+    let mut host = ProcessPluginHost::load(&tmp.path().join(".cairn").join("plugins")).unwrap();
+    let mut cb = MapCallbacks(HashMap::new());
+    let err = host
+        .invoke("example", "writeNote", &serde_json::json!({"path": "n.md", "contents": "x"}), &mut cb)
+        .unwrap_err();
+    assert!(matches!(err, PortError::Adapter(_)), "expected Adapter, got {err:?}");
+    assert!(cb.0.is_empty(), "denied write must not mutate");
+}
+
+#[test]
+fn note_count_via_callback() {
+    let bin = env!("CARGO_BIN_EXE_cairn-plugin-example");
+    let tmp = tempfile::tempdir().unwrap();
+    let pdir = tmp.path().join(".cairn").join("plugins").join("example");
+    write_manifest(&pdir, bin, "\"fs:read\"");
+    let mut host = ProcessPluginHost::load(&tmp.path().join(".cairn").join("plugins")).unwrap();
+    let mut cb = MapCallbacks(HashMap::from([
+        ("a.md".to_string(), "alpha".to_string()),
+        ("b.md".to_string(), "beta".to_string()),
+    ]));
+    let out = host
+        .invoke("example", "noteCount", &serde_json::Value::Null, &mut cb)
+        .unwrap();
+    assert_eq!(out, serde_json::json!({"count": 2}));
+}
+
+#[test]
+fn find_via_callback() {
+    let bin = env!("CARGO_BIN_EXE_cairn-plugin-example");
+    let tmp = tempfile::tempdir().unwrap();
+    let pdir = tmp.path().join(".cairn").join("plugins").join("example");
+    write_manifest(&pdir, bin, "\"fs:read\"");
+    let mut host = ProcessPluginHost::load(&tmp.path().join(".cairn").join("plugins")).unwrap();
+    let mut cb = MapCallbacks(HashMap::from([
+        ("a.md".to_string(), "the quick fox".to_string()),
+        ("b.md".to_string(), "lazy dog".to_string()),
+    ]));
+    let out = host
+        .invoke("example", "find", &serde_json::json!({"query": "quick"}), &mut cb)
+        .unwrap();
+    assert_eq!(out, serde_json::json!({"hits": 1}));
+}
+
+#[test]
+fn search_denied_without_fs_read() {
+    let bin = env!("CARGO_BIN_EXE_cairn-plugin-example");
+    let tmp = tempfile::tempdir().unwrap();
+    let pdir = tmp.path().join(".cairn").join("plugins").join("example");
+    write_manifest(&pdir, bin, ""); // no capabilities
+    let mut host = ProcessPluginHost::load(&tmp.path().join(".cairn").join("plugins")).unwrap();
+    let mut cb = MapCallbacks(HashMap::from([("a.md".to_string(), "x".to_string())]));
+    let err = host
+        .invoke("example", "find", &serde_json::json!({"query": "x"}), &mut cb)
+        .unwrap_err();
+    assert!(matches!(err, PortError::Adapter(_)), "expected Adapter, got {err:?}");
 }
