@@ -107,8 +107,6 @@ async fn run() -> Result<(), String> {
         Err(e) => eprintln!("warning: plugin host disabled: {e}"),
     }
 
-    let state = AppState::new(engine);
-
     // CORS allowlist: settings file (or default <cairn>/cairn.toml) ∪ --cors-origin.
     let cors_origins = cairn_daemon::merge_cors_origins(config.cors.origins, &cli.cors_origin);
     if cors_origins.is_empty() {
@@ -120,6 +118,9 @@ async fn run() -> Result<(), String> {
         println!("CORS: allowing {}", cors_origins.join(", "));
     }
 
+    // The same allowlist gates the /events WS upgrade (browsers bypass CORS on
+    // WebSocket handshakes; see events_handler).
+    let state = AppState::new(engine).with_allowed_origins(cors_origins.clone());
     let app = build_router(state.clone()).layer(cors_layer(&cors_origins));
 
     if !cli.no_watch {
