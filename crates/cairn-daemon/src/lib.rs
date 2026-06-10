@@ -44,6 +44,29 @@ impl EventSink for BroadcastSink {
     }
 }
 
+/// An `EventSink` that broadcasts engine events to the WS channel AND collects
+/// them, so the daemon can forward note events to plugins after the operation.
+struct EventTap {
+    tx: broadcast::Sender<WireEvent>,
+    collected: Vec<AppEvent>,
+}
+impl EventSink for EventTap {
+    fn emit(&mut self, event: AppEvent) {
+        self.collected.push(event.clone());
+        let _ = self.tx.send(app_event_to_wire(event));
+    }
+}
+
+/// Map an engine event to the plugin-facing event, or `None` if plugins don't
+/// receive it (only note mutations are forwarded).
+fn to_plugin_event(event: &AppEvent) -> Option<cairn_ports::PluginEvent> {
+    match event {
+        AppEvent::NoteChanged(p) => Some(cairn_ports::PluginEvent::NoteChanged(p.clone())),
+        AppEvent::NoteDeleted(p) => Some(cairn_ports::PluginEvent::NoteDeleted(p.clone())),
+        AppEvent::Committed(_) | AppEvent::Reindexed(_) => None,
+    }
+}
+
 impl AppState {
     /// Build state from an engine.
     #[must_use]
@@ -68,8 +91,22 @@ impl AppState {
     /// Returns [`ServiceError`] on invalid input or engine failure.
     pub fn run_command_blocking(&self, command: &Command) -> Result<CommandResponse, ServiceError> {
         let mut guard = self.engine.lock().expect("engine mutex poisoned");
-        let mut sink = BroadcastSink(self.events.clone());
-        dispatch_command(&mut guard, command, &mut sink)
+        let mut tap = EventTap {
+            tx: self.events.clone(),
+            collected: Vec::new(),
+        };
+        let result = dispatch_command(&mut guard, command, &mut tap);
+        let collected = tap.collected;
+        if result.is_ok() {
+            // Forward note events to plugins after the command completes (no plugin
+            // is mid-invoke). Handler-generated events use a broadcast-only sink, so
+            // they reach WS but are not re-forwarded to plugins (non-recursive).
+            for pe in collected.iter().filter_map(to_plugin_event) {
+                let mut fwd = BroadcastSink(self.events.clone());
+                guard.dispatch_plugin_event(&pe, &mut fwd);
+            }
+        }
+        result
     }
 
     /// Run a query synchronously.
@@ -90,9 +127,18 @@ impl AppState {
     /// propagated, so the watch loop keeps running.
     pub fn apply_change_blocking(&self, change: &cairn_ports::FsChange) {
         let mut guard = self.engine.lock().expect("engine mutex poisoned");
-        let mut sink = BroadcastSink(self.events.clone());
-        if let Err(e) = guard.apply_change(change, &mut sink) {
+        let mut tap = EventTap {
+            tx: self.events.clone(),
+            collected: Vec::new(),
+        };
+        if let Err(e) = guard.apply_change(change, &mut tap) {
             eprintln!("watch: apply_change failed: {e}");
+            return;
+        }
+        let collected = tap.collected;
+        for pe in collected.iter().filter_map(to_plugin_event) {
+            let mut fwd = BroadcastSink(self.events.clone());
+            guard.dispatch_plugin_event(&pe, &mut fwd);
         }
     }
 }
