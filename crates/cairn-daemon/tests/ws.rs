@@ -48,7 +48,8 @@ async fn write_command_pushes_event_over_websocket() {
         TantivyIndex::in_memory().unwrap(),
         GitVcs::open_or_init(tmp.path()).unwrap(),
     );
-    let state = AppState::new(engine).with_allowed_origins(vec!["http://localhost:5173".to_string()]);
+    let state =
+        AppState::new(engine).with_allowed_origins(vec!["http://localhost:5173".to_string()]);
     let app = build_router(state.clone());
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -59,9 +60,10 @@ async fn write_command_pushes_event_over_websocket() {
     });
 
     // Connect the WS first so the broadcast subscription exists.
-    let (mut ws, _resp) = tokio_tungstenite::connect_async(ws_request(addr, Some("http://localhost:5173")))
-        .await
-        .unwrap();
+    let (mut ws, _resp) =
+        tokio_tungstenite::connect_async(ws_request(addr, Some("http://localhost:5173")))
+            .await
+            .unwrap();
     // Give the server task a moment to register the subscriber.
     tokio::time::sleep(Duration::from_millis(150)).await;
 
@@ -122,8 +124,9 @@ async fn missing_origin_is_rejected() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn permitted_origin_upgrades() {
     let addr = serve_with_origins(vec!["http://localhost:5173".to_string()]).await;
-    let (_ws, resp) = tokio_tungstenite::connect_async(ws_request(addr, Some("http://localhost:5173")))
-        .await
-        .expect("permitted origin must upgrade");
+    let (_ws, resp) =
+        tokio_tungstenite::connect_async(ws_request(addr, Some("http://localhost:5173")))
+            .await
+            .expect("permitted origin must upgrade");
     assert_eq!(resp.status(), StatusCode::SWITCHING_PROTOCOLS);
 }
