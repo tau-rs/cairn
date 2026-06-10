@@ -1,17 +1,19 @@
 //! `PluginHost` backed by child processes speaking JSON-RPC/NDJSON over stdio.
 
-use std::io::BufReader;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread::JoinHandle;
+use std::time::Duration;
 
 use cairn_plugin_protocol::{
-    read_message, write_message, CairnEvent, CairnEventKind, CommandDecl, DeleteNoteParams,
-    Incoming, InitializeParams, InitializeResult, InvokeParams, ListNotesResult, Manifest,
-    NoteSummaryDto, ReadNoteParams, ReadNoteResult, Request, Response, RpcError, SearchHitDto,
-    SearchParams, SearchResultDto, WriteNoteParams, CALLBACK_DENIED, CALLBACK_FAILED, CAP_EVENTS,
-    CAP_FS_READ, CAP_FS_WRITE, JSONRPC_VERSION, METHOD_CAIRN_EVENT, METHOD_DELETE_NOTE,
-    METHOD_INITIALIZE, METHOD_INVOKE, METHOD_LIST_NOTES, METHOD_READ_NOTE, METHOD_SEARCH,
-    METHOD_WRITE_NOTE,
+    write_message, CairnEvent, CairnEventKind, CommandDecl, DeleteNoteParams, Incoming,
+    InitializeParams, InitializeResult, InvokeParams, ListNotesResult, Manifest, NoteSummaryDto,
+    ReadNoteParams, ReadNoteResult, Request, Response, RpcError, SearchHitDto, SearchParams,
+    SearchResultDto, WriteNoteParams, CALLBACK_DENIED, CALLBACK_FAILED, CAP_EVENTS, CAP_FS_READ,
+    CAP_FS_WRITE, JSONRPC_VERSION, METHOD_CAIRN_EVENT, METHOD_DELETE_NOTE, METHOD_INITIALIZE,
+    METHOD_INVOKE, METHOD_LIST_NOTES, METHOD_READ_NOTE, METHOD_SEARCH, METHOD_WRITE_NOTE,
 };
 use cairn_ports::{PluginCallbacks, PluginCommand, PluginEvent, PluginHost, PluginInfo, PortError};
 
@@ -33,6 +35,10 @@ fn adapt<E: std::fmt::Display>(e: E) -> PortError {
     PortError::Adapter(e.to_string())
 }
 
+/// Default per-message timeout for plugin reads: a plugin silent longer than this
+/// is treated as hung and killed.
+pub const DEFAULT_PLUGIN_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// The capability a host-callback method requires, or `None` if the method is
 /// unknown to the host.
 fn required_cap(method: &str) -> Option<&'static str> {
@@ -49,7 +55,11 @@ fn required_cap(method: &str) -> Option<&'static str> {
 struct LoadedPlugin {
     child: Child,
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    /// Lines from the plugin's stdout, fed by a background reader thread so reads
+    /// can be bounded by `timeout` (std pipe reads can't be interrupted directly).
+    rx: Receiver<std::io::Result<String>>,
+    reader: Option<JoinHandle<()>>,
+    timeout: Duration,
     info: PluginInfo,
     next_id: u64,
     /// Capabilities the manifest declared; gates host-callbacks.
@@ -57,6 +67,24 @@ struct LoadedPlugin {
 }
 
 impl LoadedPlugin {
+    /// Receive + parse the next message, killing the plugin if it stalls past the
+    /// timeout. `Ok(None)` on a clean EOF (the reader thread ended).
+    fn recv_message<T: serde::de::DeserializeOwned>(&mut self) -> Result<Option<T>, PortError> {
+        match self.rx.recv_timeout(self.timeout) {
+            Ok(Ok(line)) => serde_json::from_str(&line).map(Some).map_err(adapt),
+            Ok(Err(e)) => Err(adapt(e)),
+            Err(RecvTimeoutError::Timeout) => {
+                let _ = self.child.kill();
+                let _ = self.child.wait(); // reap now so a long-lived host doesn't accrue zombies
+                Err(PortError::Adapter(format!(
+                    "plugin {} timed out after {:?}",
+                    self.info.id, self.timeout
+                )))
+            }
+            Err(RecvTimeoutError::Disconnected) => Ok(None),
+        }
+    }
+
     /// Send one request and read its response.
     fn call(
         &mut self,
@@ -71,8 +99,8 @@ impl LoadedPlugin {
             params,
         };
         write_message(&mut self.stdin, &req).map_err(adapt)?;
-        let resp: Response = read_message(&mut self.stdout)
-            .map_err(adapt)?
+        let resp: Response = self
+            .recv_message()?
             .ok_or_else(|| PortError::Adapter("plugin closed its output".into()))?;
         if let Some(err) = resp.error {
             return Err(PortError::Adapter(format!("plugin error: {}", err.message)));
@@ -101,8 +129,8 @@ impl LoadedPlugin {
         };
         write_message(&mut self.stdin, &req).map_err(adapt)?;
         loop {
-            let msg: Incoming = read_message(&mut self.stdout)
-                .map_err(adapt)?
+            let msg: Incoming = self
+                .recv_message()?
                 .ok_or_else(|| PortError::Adapter("plugin closed its output".into()))?;
             match msg {
                 Incoming::Response(resp) => {
@@ -293,8 +321,14 @@ impl LoadedPlugin {
 
 impl Drop for LoadedPlugin {
     fn drop(&mut self) {
+        // Kill first so the reader thread's read_line hits EOF and exits, then join.
+        // (A plugin that leaks the stdout pipe to a surviving grandchild would delay
+        // EOF — and thus this join — until that grandchild also closes it.)
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if let Some(h) = self.reader.take() {
+            let _ = h.join();
+        }
     }
 }
 
@@ -305,13 +339,20 @@ pub struct ProcessPluginHost {
 }
 
 impl ProcessPluginHost {
-    /// Load every `<dir>/<id>/manifest.toml`: spawn the binary, handshake, and
-    /// keep the process. A missing dir loads nothing; a plugin that fails to
-    /// spawn/handshake is skipped (logged), not fatal.
+    /// Load every `<dir>/<id>/manifest.toml` with the default read timeout.
     ///
     /// # Errors
     /// [`PortError::Adapter`] only on an unexpected IO error reading the dir.
     pub fn load(dir: &Path) -> Result<Self, PortError> {
+        Self::load_with_timeout(dir, DEFAULT_PLUGIN_TIMEOUT)
+    }
+
+    /// Like [`Self::load`] but with an explicit per-message read `timeout` (used by
+    /// tests, and the seam for future config).
+    ///
+    /// # Errors
+    /// [`PortError::Adapter`] only on an unexpected IO error reading the dir.
+    pub fn load_with_timeout(dir: &Path, timeout: Duration) -> Result<Self, PortError> {
         let mut loaded = Vec::new();
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
@@ -323,7 +364,7 @@ impl ProcessPluginHost {
                 Ok(e) if e.path().is_dir() => e.path(),
                 _ => continue,
             };
-            match Self::spawn_plugin(&plugin_dir) {
+            match Self::spawn_plugin(&plugin_dir, timeout) {
                 Ok(p) => loaded.push(p),
                 Err(e) => eprintln!("plugin: skipping {}: {e}", plugin_dir.display()),
             }
@@ -331,7 +372,7 @@ impl ProcessPluginHost {
         Ok(Self { loaded })
     }
 
-    fn spawn_plugin(plugin_dir: &Path) -> Result<LoadedPlugin, PortError> {
+    fn spawn_plugin(plugin_dir: &Path, timeout: Duration) -> Result<LoadedPlugin, PortError> {
         let raw = std::fs::read_to_string(plugin_dir.join("manifest.toml")).map_err(adapt)?;
         let manifest: Manifest = toml::from_str(&raw).map_err(adapt)?;
 
@@ -351,12 +392,36 @@ impl ProcessPluginHost {
             .spawn()
             .map_err(adapt)?;
         let stdin = child.stdin.take().ok_or_else(|| adapt("no stdin"))?;
-        let stdout = BufReader::new(child.stdout.take().ok_or_else(|| adapt("no stdout"))?);
+        let child_stdout = child.stdout.take().ok_or_else(|| adapt("no stdout"))?;
+        let (tx, rx) = mpsc::channel::<std::io::Result<String>>();
+        let reader = std::thread::spawn(move || {
+            let mut stdout = BufReader::new(child_stdout);
+            loop {
+                let mut line = String::new();
+                match stdout.read_line(&mut line) {
+                    Ok(0) => break, // EOF: drop tx -> channel disconnects
+                    Ok(_) => {
+                        if line.trim().is_empty() {
+                            continue; // skip blank lines (matches old read_message)
+                        }
+                        if tx.send(Ok(line)).is_err() {
+                            break; // consumer (LoadedPlugin) was dropped
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(e));
+                        break;
+                    }
+                }
+            }
+        });
 
         let mut plugin = LoadedPlugin {
             child,
             stdin,
-            stdout,
+            rx,
+            reader: Some(reader),
+            timeout,
             info: PluginInfo {
                 id: manifest.id.clone(),
                 name: manifest.name.clone(),

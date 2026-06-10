@@ -357,3 +357,44 @@ fn event_skipped_without_events_cap() {
     );
     assert!(cb.0.is_empty(), "no events cap -> no delivery");
 }
+
+#[test]
+fn invoke_times_out_and_kills_plugin() {
+    use std::time::{Duration, Instant};
+    let bin = env!("CARGO_BIN_EXE_cairn-plugin-example");
+    let tmp = tempfile::tempdir().unwrap();
+    let pdir = tmp.path().join(".cairn").join("plugins").join("example");
+    write_manifest(&pdir, bin, ""); // no caps needed; `hang` makes no callbacks
+    let mut host = ProcessPluginHost::load_with_timeout(
+        &tmp.path().join(".cairn").join("plugins"),
+        Duration::from_millis(2_000),
+    )
+    .unwrap();
+    let mut cb = MapCallbacks(HashMap::new());
+
+    let start = Instant::now();
+    let err = host
+        .invoke("example", "hang", &serde_json::Value::Null, &mut cb)
+        .unwrap_err();
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "hang should time out quickly"
+    );
+    assert!(
+        matches!(&err, PortError::Adapter(m) if m.contains("timed out")),
+        "expected a timeout Adapter, got {err:?}"
+    );
+
+    // The plugin was killed, so a follow-up invoke fails fast (no re-hang).
+    let err2 = host
+        .invoke("example", "echo", &serde_json::json!({"x": 1}), &mut cb)
+        .unwrap_err();
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "follow-up should not hang"
+    );
+    assert!(
+        matches!(err2, PortError::Adapter(_)),
+        "expected Adapter, got {err2:?}"
+    );
+}
