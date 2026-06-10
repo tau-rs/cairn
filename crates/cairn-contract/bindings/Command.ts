@@ -28,7 +28,15 @@ to: string, } | { "type": "commit",
 /**
  * Commit message.
  */
-message: string, } | { "type": "invoke_plugin_command", 
+message: string, } | { "type": "restore_note", 
+/**
+ * Relative note path.
+ */
+path: string, 
+/**
+ * A git revspec to restore from.
+ */
+revision: string, } | { "type": "invoke_plugin_command", 
 /**
  * Plugin id.
  */

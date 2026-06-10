@@ -19,4 +19,16 @@ path: string, } | { "type": "list_notes" } | { "type": "get_graph" } | { "type":
 /**
  * The tag to filter by.
  */
-tag: string, } | { "type": "list_plugins" };
+tag: string, } | { "type": "list_plugins" } | { "type": "note_history", 
+/**
+ * Relative note path.
+ */
+path: string, } | { "type": "note_at", 
+/**
+ * Relative note path.
+ */
+path: string, 
+/**
+ * A git revspec (short/full hash, `HEAD~1`…).
+ */
+revision: string, };

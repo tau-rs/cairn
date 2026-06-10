@@ -4,7 +4,7 @@
 use cairn_app::{Engine, Event as AppEvent, EventSink};
 use cairn_contract::{
     Command, CommandResponse, ContractError, Event as WireEvent, GraphEdge, NoteSummary,
-    PluginCommandSummary, PluginSummary, Query, QueryResponse, SearchResult, TagCount,
+    PluginCommandSummary, PluginSummary, Query, QueryResponse, Revision, SearchResult, TagCount,
 };
 use cairn_domain::NotePath;
 use cairn_ports::{FsChange, PortError, SearchIndex, VaultStore, Vcs, WatchHandle};
@@ -112,6 +112,11 @@ pub fn dispatch_command<S: VaultStore, I: SearchIndex, V: Vcs>(
             let commit = engine.commit(message, sink)?;
             Ok(CommandResponse::Committed { commit })
         }
+        Command::RestoreNote { path, revision } => {
+            let p = parse_path(path)?;
+            engine.restore_note(&p, revision, sink)?;
+            Ok(CommandResponse::Done)
+        }
         Command::InvokePluginCommand {
             plugin,
             command,
@@ -137,6 +142,25 @@ pub fn dispatch_query<S: VaultStore, I: SearchIndex, V: Vcs>(
         Query::GetNote { path } => {
             let p = parse_path(path)?;
             let contents = engine.read_note(&p)?;
+            Ok(QueryResponse::Note { contents })
+        }
+        Query::NoteHistory { path } => {
+            let p = parse_path(path)?;
+            let revisions = engine
+                .note_history(&p)?
+                .into_iter()
+                .map(|r| Revision {
+                    id: r.id,
+                    message: r.message,
+                    timestamp_secs: r.timestamp_secs,
+                    author: r.author,
+                })
+                .collect();
+            Ok(QueryResponse::History { revisions })
+        }
+        Query::NoteAt { path, revision } => {
+            let p = parse_path(path)?;
+            let contents = engine.note_at(&p, revision)?;
             Ok(QueryResponse::Note { contents })
         }
         Query::Search { query } => {
@@ -575,6 +599,98 @@ mod tests {
                 FsChange::Removed(NotePath::new("b.md").unwrap()),
             ]
         );
+    }
+
+    #[test]
+    fn history_show_restore_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut sink: Vec<AppEvent> = Vec::new();
+        dispatch_command(
+            &mut eng,
+            &Command::WriteNote {
+                path: "a.md".into(),
+                contents: "v1".into(),
+            },
+            &mut sink,
+        )
+        .unwrap();
+        dispatch_command(
+            &mut eng,
+            &Command::Commit {
+                message: "v1".into(),
+            },
+            &mut sink,
+        )
+        .unwrap();
+        dispatch_command(
+            &mut eng,
+            &Command::WriteNote {
+                path: "a.md".into(),
+                contents: "v2".into(),
+            },
+            &mut sink,
+        )
+        .unwrap();
+        dispatch_command(
+            &mut eng,
+            &Command::Commit {
+                message: "v2".into(),
+            },
+            &mut sink,
+        )
+        .unwrap();
+
+        let revisions = match dispatch_query(
+            &eng,
+            &Query::NoteHistory {
+                path: "a.md".into(),
+            },
+        )
+        .unwrap()
+        {
+            QueryResponse::History { revisions } => revisions,
+            other => panic!("expected History, got {other:?}"),
+        };
+        assert_eq!(revisions.len(), 2);
+        let v1 = revisions[1].id.clone();
+
+        // NoteAt returns the content at that revision (reuses the Note response).
+        match dispatch_query(
+            &eng,
+            &Query::NoteAt {
+                path: "a.md".into(),
+                revision: v1.clone(),
+            },
+        )
+        .unwrap()
+        {
+            QueryResponse::Note { contents } => assert_eq!(contents, "v1"),
+            other => panic!("expected Note, got {other:?}"),
+        }
+
+        // RestoreNote writes v1 back.
+        let mut sink2: Vec<AppEvent> = Vec::new();
+        dispatch_command(
+            &mut eng,
+            &Command::RestoreNote {
+                path: "a.md".into(),
+                revision: v1,
+            },
+            &mut sink2,
+        )
+        .unwrap();
+        match dispatch_query(
+            &eng,
+            &Query::GetNote {
+                path: "a.md".into(),
+            },
+        )
+        .unwrap()
+        {
+            QueryResponse::Note { contents } => assert_eq!(contents, "v1"),
+            other => panic!("expected Note, got {other:?}"),
+        }
     }
 
     #[test]
