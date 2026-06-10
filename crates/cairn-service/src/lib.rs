@@ -117,7 +117,7 @@ pub fn dispatch_command<S: VaultStore, I: SearchIndex, V: Vcs>(
             command,
             args,
         } => {
-            let result = engine.invoke_plugin_command(plugin, command, args)?;
+            let result = engine.invoke_plugin_command(plugin, command, args, sink)?;
             Ok(CommandResponse::PluginResult { result })
         }
     }
