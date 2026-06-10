@@ -5,9 +5,10 @@
 use std::io::{BufRead, Write};
 
 use cairn_plugin_protocol::{
-    read_message, write_message, ListNotesResult, ReadNoteParams, ReadNoteResult, Request,
-    Response, RpcError, SearchParams, SearchResultDto, WriteNoteParams, JSONRPC_VERSION,
-    METHOD_LIST_NOTES, METHOD_READ_NOTE, METHOD_SEARCH, METHOD_WRITE_NOTE,
+    read_message, write_message, CommandDecl, InitializeResult, InvokeParams, ListNotesResult,
+    ReadNoteParams, ReadNoteResult, Request, Response, RpcError, SearchParams, SearchResultDto,
+    WriteNoteParams, JSONRPC_VERSION, METHOD_INITIALIZE, METHOD_INVOKE, METHOD_LIST_NOTES,
+    METHOD_READ_NOTE, METHOD_SEARCH, METHOD_WRITE_NOTE,
 };
 use serde_json::Value;
 
@@ -144,6 +145,156 @@ impl Host<'_> {
     }
 }
 
+/// Type alias for the erased command handler stored in [`RegisteredCommand`].
+type ErasedHandler = Box<dyn FnMut(Value, &mut Host<'_>) -> Result<Value, PluginError>>;
+
+/// A registered command: id, title, and a type-erased handler. The handler is
+/// higher-ranked over the `Host` borrow so one stored closure accepts a Host of
+/// any lifetime.
+struct RegisteredCommand {
+    id: String,
+    title: String,
+    handler: ErasedHandler,
+}
+
+/// A plugin: a name/version and a set of typed commands. Build it, then
+/// [`Plugin::run`].
+pub struct Plugin {
+    name: String,
+    version: String,
+    commands: Vec<RegisteredCommand>,
+}
+
+impl Plugin {
+    /// Create an empty plugin.
+    pub fn new(name: impl Into<String>, version: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            version: version.into(),
+            commands: Vec::new(),
+        }
+    }
+
+    /// Register a typed command. `A` is deserialized from the invoke args; `O` is
+    /// serialized into the result. Malformed args fail the invoke with JSON-RPC
+    /// code -32602.
+    pub fn command<A, O, F>(
+        &mut self,
+        id: impl Into<String>,
+        title: impl Into<String>,
+        mut handler: F,
+    ) where
+        A: serde::de::DeserializeOwned,
+        O: serde::Serialize,
+        F: FnMut(A, &mut Host<'_>) -> Result<O, PluginError> + 'static,
+    {
+        let boxed: ErasedHandler = Box::new(move |raw: Value, host: &mut Host<'_>| {
+            let args: A = serde_json::from_value(raw).map_err(|e| PluginError {
+                code: -32602,
+                message: e.to_string(),
+            })?;
+            let out: O = handler(args, host)?;
+            Ok(serde_json::to_value(out)?)
+        });
+        self.commands.push(RegisteredCommand {
+            id: id.into(),
+            title: title.into(),
+            handler: boxed,
+        });
+    }
+
+    /// Run the stdio loop until stdin EOF, using real stdin/stdout.
+    pub fn run(self) {
+        let stdin = std::io::stdin();
+        let mut reader = std::io::BufReader::new(stdin.lock());
+        let mut stdout = std::io::stdout();
+        self.run_io(&mut reader, &mut stdout);
+    }
+
+    /// The loop, parameterized over IO for testing. Reads a `Request`, dispatches,
+    /// writes a `Response`, until EOF or a read/write error.
+    fn run_io(mut self, mut reader: &mut dyn BufRead, mut stdout: &mut dyn Write) {
+        let mut next_cb_id: u64 = 1000;
+        while let Ok(Some(req)) = read_message::<_, Request>(&mut reader) {
+            let resp = self.handle(&req, &mut reader, &mut stdout, &mut next_cb_id);
+            if write_message(&mut stdout, &resp).is_err() {
+                break;
+            }
+        }
+    }
+
+    fn handle(
+        &mut self,
+        req: &Request,
+        reader: &mut dyn BufRead,
+        stdout: &mut dyn Write,
+        next_cb_id: &mut u64,
+    ) -> Response {
+        let mut resp = Response {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id: req.id,
+            result: None,
+            error: None,
+        };
+        match req.method.as_str() {
+            METHOD_INITIALIZE => {
+                let init = InitializeResult {
+                    name: self.name.clone(),
+                    version: self.version.clone(),
+                    commands: self
+                        .commands
+                        .iter()
+                        .map(|c| CommandDecl {
+                            id: c.id.clone(),
+                            title: c.title.clone(),
+                        })
+                        .collect(),
+                };
+                resp.result = Some(serde_json::to_value(init).unwrap_or(Value::Null));
+            }
+            METHOD_INVOKE => match serde_json::from_value::<InvokeParams>(req.params.clone()) {
+                Ok(p) => match self.commands.iter_mut().find(|c| c.id == p.command) {
+                    Some(cmd) => {
+                        let mut host = Host {
+                            reader,
+                            stdout,
+                            next_cb_id,
+                        };
+                        match (cmd.handler)(p.args, &mut host) {
+                            Ok(value) => resp.result = Some(value),
+                            Err(e) => {
+                                resp.error = Some(RpcError {
+                                    code: e.code,
+                                    message: e.message,
+                                })
+                            }
+                        }
+                    }
+                    None => {
+                        resp.error = Some(RpcError {
+                            code: -32601,
+                            message: format!("unknown command {}", p.command),
+                        });
+                    }
+                },
+                Err(e) => {
+                    resp.error = Some(RpcError {
+                        code: -32602,
+                        message: e.to_string(),
+                    });
+                }
+            },
+            other => {
+                resp.error = Some(RpcError {
+                    code: -32601,
+                    message: format!("unknown method {other}"),
+                });
+            }
+        }
+        resp
+    }
+}
+
 #[cfg(test)]
 mod host_tests {
     use super::*;
@@ -211,5 +362,98 @@ mod host_tests {
         let err = host.read_note("note.md").unwrap_err();
         assert_eq!(err.code, -32001);
         assert!(err.message.contains("fs:read"));
+    }
+}
+
+#[cfg(test)]
+mod run_tests {
+    use super::*;
+    use cairn_plugin_protocol::{InitializeResult, METHOD_INITIALIZE, METHOD_INVOKE};
+    use std::io::Cursor;
+
+    fn request_line(id: u64, method: &str, params: Value) -> Vec<u8> {
+        let mut buf = Vec::new();
+        write_message(
+            &mut buf,
+            &Request {
+                jsonrpc: JSONRPC_VERSION.to_string(),
+                id,
+                method: method.to_string(),
+                params,
+            },
+        )
+        .unwrap();
+        buf
+    }
+
+    fn drive(plugin: Plugin, input: &[u8]) -> Vec<Response> {
+        let mut reader = Cursor::new(input.to_vec());
+        let mut out: Vec<u8> = Vec::new();
+        plugin.run_io(&mut reader, &mut out);
+        out.split(|&b| b == b'\n')
+            .filter(|l| !l.is_empty())
+            .map(|l| serde_json::from_slice::<Response>(l).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn initialize_lists_commands_in_order() {
+        let mut plugin = Plugin::new("ex", "0.1.0");
+        plugin.command("a", "A", |v: Value, _h| Ok(v));
+        plugin.command("b", "B", |v: Value, _h| Ok(v));
+        let out = drive(plugin, &request_line(1, METHOD_INITIALIZE, Value::Null));
+        let init: InitializeResult =
+            serde_json::from_value(out[0].result.clone().unwrap()).unwrap();
+        assert_eq!(init.name, "ex");
+        assert_eq!(init.version, "0.1.0");
+        assert_eq!(
+            init.commands
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+    }
+
+    #[test]
+    fn echo_roundtrips_and_unknown_command_is_minus_32601() {
+        let mut plugin = Plugin::new("ex", "0.1.0");
+        plugin.command("echo", "Echo", |v: Value, _h| Ok(v));
+        let mut input = request_line(
+            1,
+            METHOD_INVOKE,
+            serde_json::json!({ "command": "echo", "args": { "x": 1 } }),
+        );
+        input.extend(request_line(
+            2,
+            METHOD_INVOKE,
+            serde_json::json!({ "command": "nope", "args": null }),
+        ));
+        let out = drive(plugin, &input);
+        assert_eq!(
+            out[0].result.clone().unwrap(),
+            serde_json::json!({ "x": 1 })
+        );
+        assert_eq!(out[1].error.clone().unwrap().code, -32601);
+    }
+
+    #[test]
+    fn bad_args_is_minus_32602() {
+        #[derive(serde::Deserialize)]
+        struct Args {
+            path: String,
+        }
+        let mut plugin = Plugin::new("ex", "0.1.0");
+        // Reads `a.path` so the field isn't dead; on missing `path`, deserialize fails.
+        plugin.command("needs", "Needs", |a: Args, _h| Ok(Value::String(a.path)));
+        let out = drive(
+            plugin,
+            &request_line(
+                1,
+                METHOD_INVOKE,
+                serde_json::json!({ "command": "needs", "args": {} }),
+            ),
+        );
+        assert_eq!(out[0].error.clone().unwrap().code, -32602);
     }
 }
