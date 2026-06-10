@@ -12,7 +12,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         State,
     },
-    http::StatusCode,
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -192,7 +192,26 @@ async fn query_handler(State(state): State<AppState>, Json(query): Json<Query>) 
     service_response(result)
 }
 
-async fn events_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
+/// True if `origin` (the request's `Origin` header value) is present and in the
+/// allowlist. Browsers always send `Origin` on a WS handshake; a missing or
+/// non-UTF-8 header is treated as disallowed (deny-by-default, mirroring CORS).
+fn ws_origin_allowed(allowed: &[String], origin: Option<&axum::http::HeaderValue>) -> bool {
+    match origin.and_then(|o| o.to_str().ok()) {
+        Some(value) => allowed.iter().any(|a| a == value),
+        None => false,
+    }
+}
+
+async fn events_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    // Browsers do not apply CORS to WebSocket upgrades, so validate Origin here
+    // against the same allowlist (audit S2). Reject before upgrading.
+    if !ws_origin_allowed(&state.allowed_origins, headers.get(header::ORIGIN)) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     let rx = state.events.subscribe();
     ws.on_upgrade(move |socket| forward_events(socket, rx))
 }
