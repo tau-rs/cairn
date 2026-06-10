@@ -223,7 +223,10 @@ mod tests {
         );
         assert_eq!(NotePath::new(".git/config"), Err(NotePathError::Hidden));
         // A hidden segment anywhere in the path, not just the first.
-        assert_eq!(NotePath::new("notes/.git/config"), Err(NotePathError::Hidden));
+        assert_eq!(
+            NotePath::new("notes/.git/config"),
+            Err(NotePathError::Hidden)
+        );
         assert_eq!(NotePath::new("a/.hidden.md"), Err(NotePathError::Hidden));
         // A lone "." (current-dir) segment.
         assert_eq!(NotePath::new("./a.md"), Err(NotePathError::Hidden));
