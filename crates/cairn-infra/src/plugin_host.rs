@@ -6,9 +6,10 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use cairn_plugin_protocol::{
     read_message, write_message, CommandDecl, Incoming, InitializeParams, InitializeResult,
-    InvokeParams, Manifest, ReadNoteParams, ReadNoteResult, Request, Response, RpcError,
+    InvokeParams, ListNotesResult, Manifest, NoteSummaryDto, ReadNoteParams, ReadNoteResult,
+    Request, Response, RpcError, SearchHitDto, SearchParams, SearchResultDto, WriteNoteParams,
     CALLBACK_DENIED, CALLBACK_FAILED, JSONRPC_VERSION, METHOD_INITIALIZE, METHOD_INVOKE,
-    METHOD_READ_NOTE,
+    METHOD_LIST_NOTES, METHOD_READ_NOTE, METHOD_SEARCH, METHOD_WRITE_NOTE,
 };
 use cairn_ports::{PluginCallbacks, PluginCommand, PluginHost, PluginInfo, PortError};
 
@@ -21,6 +22,9 @@ fn adapt<E: std::fmt::Display>(e: E) -> PortError {
 fn required_cap(method: &str) -> Option<&'static str> {
     match method {
         METHOD_READ_NOTE => Some("fs:read"),
+        METHOD_WRITE_NOTE => Some("fs:write"),
+        METHOD_SEARCH => Some("fs:read"),
+        METHOD_LIST_NOTES => Some("fs:read"),
         _ => None,
     }
 }
@@ -148,6 +152,74 @@ impl LoadedPlugin {
                         }
                     }
                 }
+                METHOD_WRITE_NOTE => {
+                    match serde_json::from_value::<WriteNoteParams>(cb.params.clone()) {
+                        Ok(p) => match callbacks.write_note(&p.path, &p.contents) {
+                            Ok(()) => resp.result = Some(serde_json::json!({})),
+                            Err(e) => {
+                                resp.error = Some(RpcError {
+                                    code: CALLBACK_FAILED,
+                                    message: e.to_string(),
+                                });
+                            }
+                        },
+                        Err(e) => {
+                            resp.error = Some(RpcError {
+                                code: CALLBACK_FAILED,
+                                message: e.to_string(),
+                            });
+                        }
+                    }
+                }
+                METHOD_SEARCH => match serde_json::from_value::<SearchParams>(cb.params.clone()) {
+                    Ok(p) => match callbacks.search(&p.query) {
+                        Ok(hits) => {
+                            let dto = SearchResultDto {
+                                hits: hits
+                                    .into_iter()
+                                    .map(|h| SearchHitDto {
+                                        path: h.path.as_str().to_string(),
+                                        score: h.score,
+                                        snippet: h.snippet,
+                                    })
+                                    .collect(),
+                            };
+                            resp.result = serde_json::to_value(dto).ok();
+                        }
+                        Err(e) => {
+                            resp.error = Some(RpcError {
+                                code: CALLBACK_FAILED,
+                                message: e.to_string(),
+                            });
+                        }
+                    },
+                    Err(e) => {
+                        resp.error = Some(RpcError {
+                            code: CALLBACK_FAILED,
+                            message: e.to_string(),
+                        });
+                    }
+                },
+                METHOD_LIST_NOTES => match callbacks.list_notes() {
+                    Ok(notes) => {
+                        let dto = ListNotesResult {
+                            notes: notes
+                                .into_iter()
+                                .map(|n| NoteSummaryDto {
+                                    path: n.path.as_str().to_string(),
+                                    title: n.display_title(),
+                                })
+                                .collect(),
+                        };
+                        resp.result = serde_json::to_value(dto).ok();
+                    }
+                    Err(e) => {
+                        resp.error = Some(RpcError {
+                            code: CALLBACK_FAILED,
+                            message: e.to_string(),
+                        });
+                    }
+                },
                 _ => {
                     resp.error = Some(RpcError {
                         code: CALLBACK_DENIED,

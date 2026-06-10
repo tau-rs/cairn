@@ -31,10 +31,22 @@ can't touch the cairn).
 The full out-of-process path is proven end-to-end (an example plugin spawned via the
 host, handshake, command invoke). The daemon loads plugins on startup
 (absent/broken → graceful). Plugins exit on stdin EOF; `Drop` also kills them (no
-orphans). Deferred to later slices: plugin SDK (slice 2), vault events (4), content
-processors / port backends (5), OS sandbox (6), git-URL distribution (7); UI plugins
-are the UI session's. JSON-RPC id correlation is unchecked (safe under one-in-flight;
-revisit if concurrency is added).
+orphans). Deferred to later slices: vault events (4), content processors / port
+backends (5), OS sandbox (6), git-URL distribution (7); UI plugins are the UI
+session's. JSON-RPC id correlation is unchecked (safe under one-in-flight; revisit if
+concurrency is added).
+
+**Slice 2 (SDK, done):** a `cairn-plugin-sdk` crate so a plugin author writes only
+command declarations + typed handlers; the SDK owns the stdio loop, `initialize`
+handshake, `invokeCommand` dispatch, and the host-callback round-trip.
+`Plugin::command<A, O>()` registers typed handlers (`A: DeserializeOwned`,
+`O: Serialize`) erased into uniform `Value→Value` closures; a non-generic `Host`
+(borrows `&mut dyn BufRead`/`&mut dyn Write`) exposes typed `read_note`/`write_note`/
+`search`/`list_notes`; `PluginError` carries a JSON-RPC code+message and impls
+`std::error::Error`. Depends only on `cairn-plugin-protocol` (+ serde); the example
+plugin was rewritten onto it (266→56 lines) with `tests/host.rs` passing unchanged as
+the byte-for-byte wire cross-check. The manifest stays hand-authored (the SDK is
+runtime-only). See `docs/superpowers/specs/2026-06-10-plugin-sdk-design.md`.
 
 **Slice 3a (done):** bidirectional RPC — a plugin command can call back to the host
 mid-invoke (the host's invoke is now a full-duplex dispatch loop over an `Incoming`
@@ -43,6 +55,25 @@ at the callback boundary (the host gates each `host/*` method on a manifest-decl
 namespaced capability string). Scope is one read-only callback, `host/readNote`
 (requires `fs:read`); the re-entrancy (engine `&mut self` vs the borrowed host) is
 resolved by `mem::replace`-ing the host out of the engine for the invoke's duration.
-Deferred to **slice 3b:** write callbacks (`host/writeNote`) + event emission, plus
-`search`/`listNotes` and the `net`/`agent` capabilities. See
-`docs/superpowers/specs/2026-06-09-plugin-host-slice3a-design.md`.
+See `docs/superpowers/specs/2026-06-09-plugin-host-slice3a-design.md`.
+
+**Slice 3a (done):** bidirectional RPC — a plugin command can call back to the host
+mid-invoke (the host's invoke is now a full-duplex dispatch loop over an `Incoming`
+message: a callback request or the invoke response). Capabilities are now *enforced*
+at the callback boundary (the host gates each `host/*` method on a manifest-declared,
+namespaced capability string). Scope is one read-only callback, `host/readNote`
+(requires `fs:read`); the re-entrancy (engine `&mut self` vs the borrowed host) is
+resolved by `mem::replace`-ing the host out of the engine for the invoke's duration.
+See `docs/superpowers/specs/2026-06-09-plugin-host-slice3a-design.md`.
+
+**Slice 3b (done):** three more callbacks — `host/writeNote` (`fs:write`), `host/search`
+and `host/listNotes` (`fs:read`). The write is the event-emitting one: the `EventSink`
+is threaded through the callback boundary (`EngineCallbacks` gains a sink field;
+`Engine::invoke_plugin_command` gains a `sink` param — a one-line ripple in
+`dispatch_command`, the `PluginHost` trait signature unchanged), so a plugin's write
+routes through `Engine::write_note` and emits live `NoteChanged`/`Reindexed` (the
+daemon forwards these to the UI over WS). The protocol crate owns its own minimal
+wire DTOs (`SearchHitDto`/`NoteSummaryDto`, contract-decoupled). Deferred to a later
+slice: `host/deleteNote`, the `net`/`agent` capabilities, shared `CAP_*` constants,
+and a full-stack real-subprocess-over-real-engine integration test. See
+`docs/superpowers/specs/2026-06-10-plugin-host-slice3b-design.md`.

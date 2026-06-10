@@ -348,9 +348,11 @@ dependencies = [
 name = "cairn-plugin-example"
 version = "0.0.0"
 dependencies = [
+ "cairn-domain",
  "cairn-infra",
- "cairn-plugin-protocol",
+ "cairn-plugin-sdk",
  "cairn-ports",
+ "serde",
  "serde_json",
  "tempfile",
 ]
@@ -362,6 +364,15 @@ dependencies = [
  "serde",
  "serde_json",
  "toml",
+]
+
+[[package]]
+name = "cairn-plugin-sdk"
+version = "0.0.0"
+dependencies = [
+ "cairn-plugin-protocol",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

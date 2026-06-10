@@ -215,6 +215,25 @@ pub trait PluginCallbacks {
     /// [`PortError::NotFound`] if the note does not exist; [`PortError::Adapter`]
     /// on a storage failure.
     fn read_note(&mut self, path: &str) -> Result<String, PortError>;
+
+    /// Create or overwrite a note. Gated on the `fs:write` capability. Emits
+    /// change events through the host's sink.
+    ///
+    /// # Errors
+    /// [`PortError`] on an invalid path or a storage failure.
+    fn write_note(&mut self, path: &str, contents: &str) -> Result<(), PortError>;
+
+    /// Ranked full-text search. Gated on the `fs:read` capability.
+    ///
+    /// # Errors
+    /// [`PortError`] on an index failure.
+    fn search(&mut self, query: &str) -> Result<Vec<SearchHit>, PortError>;
+
+    /// List all notes (for path + title). Gated on the `fs:read` capability.
+    ///
+    /// # Errors
+    /// [`PortError`] on a storage failure.
+    fn list_notes(&mut self) -> Result<Vec<Note>, PortError>;
 }
 
 /// Hosts out-of-process plugins. Seam: [`NoopPluginHost`].

@@ -6,10 +6,12 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-cairn-plugin-protocol = { path = "../cairn-plugin-protocol" }
+cairn-plugin-sdk = { path = "../cairn-plugin-sdk" }
+serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+cairn-domain = { path = "../cairn-domain" }
 cairn-infra = { path = "../cairn-infra" }
 cairn-ports = { path = "../cairn-ports" }
 tempfile = { workspace = true }

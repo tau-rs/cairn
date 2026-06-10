@@ -13,6 +13,12 @@ pub const METHOD_INVOKE: &str = "invokeCommand";
 
 /// Plugin -> host: read a note's raw contents. Requires the `fs:read` capability.
 pub const METHOD_READ_NOTE: &str = "host/readNote";
+/// Plugin -> host: create/overwrite a note. Requires the `fs:write` capability.
+pub const METHOD_WRITE_NOTE: &str = "host/writeNote";
+/// Plugin -> host: ranked full-text search. Requires the `fs:read` capability.
+pub const METHOD_SEARCH: &str = "host/search";
+/// Plugin -> host: list all notes (path + title). Requires the `fs:read` capability.
+pub const METHOD_LIST_NOTES: &str = "host/listNotes";
 
 /// JSON-RPC error code: the host refused a callback (capability not declared, or
 /// unknown host method).
@@ -87,6 +93,47 @@ pub struct ReadNoteParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReadNoteResult {
     pub contents: String,
+}
+
+/// Params of the `host/writeNote` callback. Success result is an empty object `{}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WriteNoteParams {
+    pub path: String,
+    pub contents: String,
+}
+
+/// Params of the `host/search` callback.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchParams {
+    pub query: String,
+}
+
+/// One ranked search hit (host -> plugin). Plugin-protocol-local; intentionally
+/// omits the contract's UI-only highlight ranges.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SearchHitDto {
+    pub path: String,
+    pub score: f32,
+    pub snippet: String,
+}
+
+/// Result of the `host/search` callback.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SearchResultDto {
+    pub hits: Vec<SearchHitDto>,
+}
+
+/// One note summary (host -> plugin): path + display title.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoteSummaryDto {
+    pub path: String,
+    pub title: String,
+}
+
+/// Result of the `host/listNotes` callback.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListNotesResult {
+    pub notes: Vec<NoteSummaryDto>,
 }
 
 /// A message the host reads from a plugin *during* an invoke: either a callback
@@ -257,5 +304,44 @@ mod tests {
                 .contents,
             "body"
         );
+    }
+
+    #[test]
+    fn slice3b_dtos_roundtrip() {
+        let wp = WriteNoteParams {
+            path: "a.md".into(),
+            contents: "body".into(),
+        };
+        let v = serde_json::to_value(&wp).unwrap();
+        assert_eq!(serde_json::from_value::<WriteNoteParams>(v).unwrap(), wp);
+
+        let sp = SearchParams {
+            query: "hello".into(),
+        };
+        assert_eq!(
+            serde_json::from_value::<SearchParams>(serde_json::to_value(&sp).unwrap()).unwrap(),
+            sp
+        );
+
+        let sr = SearchResultDto {
+            hits: vec![SearchHitDto {
+                path: "a.md".into(),
+                score: 1.5,
+                snippet: "hi".into(),
+            }],
+        };
+        let back: SearchResultDto =
+            serde_json::from_value(serde_json::to_value(&sr).unwrap()).unwrap();
+        assert_eq!(back, sr); // full equality also asserts the f32 score + snippet survive
+
+        let ln = ListNotesResult {
+            notes: vec![NoteSummaryDto {
+                path: "a.md".into(),
+                title: "A".into(),
+            }],
+        };
+        let back: ListNotesResult =
+            serde_json::from_value(serde_json::to_value(&ln).unwrap()).unwrap();
+        assert_eq!(back.notes, ln.notes);
     }
 }
