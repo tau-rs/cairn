@@ -12,7 +12,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         State,
     },
-    http::StatusCode,
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -33,6 +33,9 @@ pub type CairnEngine = Engine<LocalFsStore, TantivyIndex, GitVcs>;
 pub struct AppState {
     engine: Arc<Mutex<CairnEngine>>,
     events: broadcast::Sender<WireEvent>,
+    /// Origins permitted to open the `/events` WebSocket. Same allowlist the
+    /// CORS layer enforces; empty denies all (deny-by-default).
+    allowed_origins: Arc<[String]>,
 }
 
 /// An `EventSink` that republishes engine events as wire events.
@@ -77,7 +80,16 @@ impl AppState {
         Self {
             engine: Arc::new(Mutex::new(engine)),
             events,
+            allowed_origins: Arc::from([]),
         }
+    }
+
+    /// Set the origins permitted to open the `/events` WebSocket. Reuse the
+    /// daemon's CORS allowlist so HTTP and WS share one origin policy.
+    #[must_use]
+    pub fn with_allowed_origins(mut self, origins: Vec<String>) -> Self {
+        self.allowed_origins = Arc::from(origins.into_boxed_slice());
+        self
     }
 
     /// Run a command synchronously, publishing produced events.
@@ -180,7 +192,31 @@ async fn query_handler(State(state): State<AppState>, Json(query): Json<Query>) 
     service_response(result)
 }
 
-async fn events_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
+/// True if `origin` (the request's `Origin` header value) is present and in the
+/// allowlist. Browsers always send `Origin` on a WS handshake; a missing or
+/// non-UTF-8 header is treated as disallowed (deny-by-default, mirroring CORS).
+///
+/// Matches by exact string equality against the same allowlist the CORS layer
+/// uses. Browsers serialize `Origin` canonically (lowercase scheme/host, explicit
+/// port, no path), so this agrees with tower-http's parsed comparison for every
+/// well-formed origin; it can only ever be equal-or-stricter, never looser.
+fn ws_origin_allowed(allowed: &[String], origin: Option<&axum::http::HeaderValue>) -> bool {
+    match origin.and_then(|o| o.to_str().ok()) {
+        Some(value) => allowed.iter().any(|a| a == value),
+        None => false,
+    }
+}
+
+async fn events_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    // Browsers do not apply CORS to WebSocket upgrades, so validate Origin here
+    // against the same allowlist (audit S2). Reject before upgrading.
+    if !ws_origin_allowed(&state.allowed_origins, headers.get(header::ORIGIN)) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     let rx = state.events.subscribe();
     ws.on_upgrade(move |socket| forward_events(socket, rx))
 }

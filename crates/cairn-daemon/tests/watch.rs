@@ -5,6 +5,7 @@ use cairn_infra::{GitVcs, LocalFsStore, TantivyIndex};
 use cairn_ports::FsChange;
 use futures_util::StreamExt;
 use std::time::Duration;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn external_change_pushes_event_then_dedups() {
@@ -14,7 +15,8 @@ async fn external_change_pushes_event_then_dedups() {
         TantivyIndex::in_memory().unwrap(),
         GitVcs::open_or_init(tmp.path()).unwrap(),
     );
-    let state = AppState::new(engine);
+    let state =
+        AppState::new(engine).with_allowed_origins(vec!["http://localhost:5173".to_string()]);
     let app = build_router(state.clone());
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -23,9 +25,11 @@ async fn external_change_pushes_event_then_dedups() {
         let _ = axum::serve(listener, app).await;
     });
 
-    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/events"))
-        .await
-        .unwrap();
+    // /events now requires an allowlisted Origin (audit S2); send a permitted one.
+    let mut req = format!("ws://{addr}/events").into_client_request().unwrap();
+    req.headers_mut()
+        .insert("origin", "http://localhost:5173".parse().unwrap());
+    let (mut ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     // Simulate an external edit: write the file on disk, then notify the engine.
