@@ -2,6 +2,7 @@
 import type { GraphEdge } from "./GraphEdge";
 import type { NoteSummary } from "./NoteSummary";
 import type { PluginSummary } from "./PluginSummary";
+import type { Revision } from "./Revision";
 import type { SearchResult } from "./SearchResult";
 import type { TagCount } from "./TagCount";
 
@@ -40,4 +41,8 @@ tags: Array<TagCount>, } | { "type": "plugins",
 /**
  * One per loaded plugin.
  */
-plugins: Array<PluginSummary>, };
+plugins: Array<PluginSummary>, } | { "type": "history", 
+/**
+ * One per commit, newest first.
+ */
+revisions: Array<Revision>, };
