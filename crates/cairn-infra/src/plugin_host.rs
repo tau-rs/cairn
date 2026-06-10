@@ -5,11 +5,12 @@ use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use cairn_plugin_protocol::{
-    read_message, write_message, CommandDecl, Incoming, InitializeParams, InitializeResult,
-    InvokeParams, ListNotesResult, Manifest, NoteSummaryDto, ReadNoteParams, ReadNoteResult,
-    Request, Response, RpcError, SearchHitDto, SearchParams, SearchResultDto, WriteNoteParams,
-    CALLBACK_DENIED, CALLBACK_FAILED, JSONRPC_VERSION, METHOD_INITIALIZE, METHOD_INVOKE,
-    METHOD_LIST_NOTES, METHOD_READ_NOTE, METHOD_SEARCH, METHOD_WRITE_NOTE,
+    read_message, write_message, CommandDecl, DeleteNoteParams, Incoming, InitializeParams,
+    InitializeResult, InvokeParams, ListNotesResult, Manifest, NoteSummaryDto, ReadNoteParams,
+    ReadNoteResult, Request, Response, RpcError, SearchHitDto, SearchParams, SearchResultDto,
+    WriteNoteParams, CALLBACK_DENIED, CALLBACK_FAILED, CAP_FS_READ, CAP_FS_WRITE, JSONRPC_VERSION,
+    METHOD_DELETE_NOTE, METHOD_INITIALIZE, METHOD_INVOKE, METHOD_LIST_NOTES, METHOD_READ_NOTE,
+    METHOD_SEARCH, METHOD_WRITE_NOTE,
 };
 use cairn_ports::{PluginCallbacks, PluginCommand, PluginHost, PluginInfo, PortError};
 
@@ -21,10 +22,11 @@ fn adapt<E: std::fmt::Display>(e: E) -> PortError {
 /// unknown to the host.
 fn required_cap(method: &str) -> Option<&'static str> {
     match method {
-        METHOD_READ_NOTE => Some("fs:read"),
-        METHOD_WRITE_NOTE => Some("fs:write"),
-        METHOD_SEARCH => Some("fs:read"),
-        METHOD_LIST_NOTES => Some("fs:read"),
+        METHOD_READ_NOTE => Some(CAP_FS_READ),
+        METHOD_WRITE_NOTE => Some(CAP_FS_WRITE),
+        METHOD_DELETE_NOTE => Some(CAP_FS_WRITE),
+        METHOD_SEARCH => Some(CAP_FS_READ),
+        METHOD_LIST_NOTES => Some(CAP_FS_READ),
         _ => None,
     }
 }
@@ -155,6 +157,25 @@ impl LoadedPlugin {
                 METHOD_WRITE_NOTE => {
                     match serde_json::from_value::<WriteNoteParams>(cb.params.clone()) {
                         Ok(p) => match callbacks.write_note(&p.path, &p.contents) {
+                            Ok(()) => resp.result = Some(serde_json::json!({})),
+                            Err(e) => {
+                                resp.error = Some(RpcError {
+                                    code: CALLBACK_FAILED,
+                                    message: e.to_string(),
+                                });
+                            }
+                        },
+                        Err(e) => {
+                            resp.error = Some(RpcError {
+                                code: CALLBACK_FAILED,
+                                message: e.to_string(),
+                            });
+                        }
+                    }
+                }
+                METHOD_DELETE_NOTE => {
+                    match serde_json::from_value::<DeleteNoteParams>(cb.params.clone()) {
+                        Ok(p) => match callbacks.delete_note(&p.path) {
                             Ok(()) => resp.result = Some(serde_json::json!({})),
                             Err(e) => {
                                 resp.error = Some(RpcError {

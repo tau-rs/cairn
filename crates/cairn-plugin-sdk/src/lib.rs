@@ -31,10 +31,10 @@
 use std::io::{BufRead, Write};
 
 use cairn_plugin_protocol::{
-    read_message, write_message, CommandDecl, InitializeResult, InvokeParams, ListNotesResult,
-    ReadNoteParams, ReadNoteResult, Request, Response, RpcError, SearchParams, SearchResultDto,
-    WriteNoteParams, JSONRPC_VERSION, METHOD_INITIALIZE, METHOD_INVOKE, METHOD_LIST_NOTES,
-    METHOD_READ_NOTE, METHOD_SEARCH, METHOD_WRITE_NOTE,
+    read_message, write_message, CommandDecl, DeleteNoteParams, InitializeResult, InvokeParams,
+    ListNotesResult, ReadNoteParams, ReadNoteResult, Request, Response, RpcError, SearchParams,
+    SearchResultDto, WriteNoteParams, JSONRPC_VERSION, METHOD_DELETE_NOTE, METHOD_INITIALIZE,
+    METHOD_INVOKE, METHOD_LIST_NOTES, METHOD_READ_NOTE, METHOD_SEARCH, METHOD_WRITE_NOTE,
 };
 use serde_json::Value;
 
@@ -144,6 +144,19 @@ impl Host<'_> {
         })?;
         // host/writeNote returns an empty `{}` body on success; nothing to extract.
         self.call(METHOD_WRITE_NOTE, params)?;
+        Ok(())
+    }
+
+    /// Delete a note (`host/deleteNote`, requires `fs:write`).
+    ///
+    /// # Errors
+    /// [`PluginError`] if the host denies/fails the callback.
+    pub fn delete_note(&mut self, path: &str) -> Result<(), PluginError> {
+        let params = serde_json::to_value(DeleteNoteParams {
+            path: path.to_string(),
+        })?;
+        // host/deleteNote returns an empty `{}` body on success; nothing to extract.
+        self.call(METHOD_DELETE_NOTE, params)?;
         Ok(())
     }
 
@@ -361,6 +374,35 @@ mod host_tests {
         let written: Request = serde_json::from_slice(first_line).unwrap();
         assert_eq!(written.method, METHOD_READ_NOTE);
         assert_eq!(written.params["path"], "note.md");
+    }
+
+    #[test]
+    fn delete_note_sends_request() {
+        let mut response_bytes = Vec::new();
+        let resp = Response {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id: 1001,
+            result: Some(serde_json::json!({})),
+            error: None,
+        };
+        write_message(&mut response_bytes, &resp).unwrap();
+
+        let mut reader = Cursor::new(response_bytes);
+        let mut out: Vec<u8> = Vec::new();
+        let mut cb_id = 1000u64;
+        {
+            let mut host = Host {
+                reader: &mut reader,
+                stdout: &mut out,
+                next_cb_id: &mut cb_id,
+            };
+            host.delete_note("gone.md").unwrap();
+        }
+        assert_eq!(cb_id, 1001); // the callback-id counter was incremented
+        let first_line = out.split(|&b| b == b'\n').next().unwrap();
+        let written: Request = serde_json::from_slice(first_line).unwrap();
+        assert_eq!(written.method, METHOD_DELETE_NOTE);
+        assert_eq!(written.params["path"], "gone.md");
     }
 
     #[test]

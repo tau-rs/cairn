@@ -263,6 +263,49 @@ fn find_via_callback() {
 }
 
 #[test]
+fn delete_note_via_callback() {
+    let bin = env!("CARGO_BIN_EXE_cairn-plugin-example");
+    let tmp = tempfile::tempdir().unwrap();
+    let pdir = tmp.path().join(".cairn").join("plugins").join("example");
+    write_manifest(&pdir, bin, "\"fs:write\"");
+    let mut host = ProcessPluginHost::load(&tmp.path().join(".cairn").join("plugins")).unwrap();
+    let mut cb = MapCallbacks(HashMap::from([("n.md".to_string(), "body".to_string())]));
+    let out = host
+        .invoke(
+            "example",
+            "deleteNote",
+            &serde_json::json!({"path": "n.md"}),
+            &mut cb,
+        )
+        .unwrap();
+    assert_eq!(out, serde_json::json!({"deleted": true}));
+    assert!(!cb.0.contains_key("n.md"), "the note should be removed");
+}
+
+#[test]
+fn delete_denied_without_fs_write() {
+    let bin = env!("CARGO_BIN_EXE_cairn-plugin-example");
+    let tmp = tempfile::tempdir().unwrap();
+    let pdir = tmp.path().join(".cairn").join("plugins").join("example");
+    write_manifest(&pdir, bin, "\"fs:read\""); // read but NOT write
+    let mut host = ProcessPluginHost::load(&tmp.path().join(".cairn").join("plugins")).unwrap();
+    let mut cb = MapCallbacks(HashMap::from([("n.md".to_string(), "body".to_string())]));
+    let err = host
+        .invoke(
+            "example",
+            "deleteNote",
+            &serde_json::json!({"path": "n.md"}),
+            &mut cb,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, PortError::Adapter(_)),
+        "expected Adapter, got {err:?}"
+    );
+    assert!(cb.0.contains_key("n.md"), "denied delete must not mutate");
+}
+
+#[test]
 fn search_denied_without_fs_read() {
     let bin = env!("CARGO_BIN_EXE_cairn-plugin-example");
     let tmp = tempfile::tempdir().unwrap();

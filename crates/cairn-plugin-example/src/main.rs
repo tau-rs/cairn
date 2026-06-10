@@ -52,5 +52,14 @@ fn main() {
         Ok(json!({ "hits": hits.len() }))
     });
 
+    plugin.command(
+        "deleteNote",
+        "Delete note",
+        |a: PathArgs, host: &mut Host| {
+            host.delete_note(&a.path)?;
+            Ok(json!({ "deleted": true }))
+        },
+    );
+
     plugin.run();
 }
