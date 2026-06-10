@@ -107,6 +107,25 @@ enum Command {
         /// The tag to filter by.
         tag: String,
     },
+    /// Show a note's commit history (newest first).
+    History {
+        /// Relative note path.
+        path: String,
+    },
+    /// Print a note's contents at a past revision.
+    Show {
+        /// Relative note path.
+        path: String,
+        /// A git revspec (short/full hash, `HEAD~1`…).
+        revision: String,
+    },
+    /// Restore a note to a past revision (writes that version as current).
+    Restore {
+        /// Relative note path.
+        path: String,
+        /// A git revspec to restore from.
+        revision: String,
+    },
 }
 
 fn build_engine(root: &Path) -> Result<Engine<LocalFsStore, TantivyIndex, GitVcs>, String> {
@@ -238,6 +257,37 @@ fn run() -> Result<(), String> {
                     println!("{p}");
                 }
             }
+        }
+        Command::History { path } => {
+            if let QueryResponse::History { revisions } =
+                dispatch_query(&engine, &WireQuery::NoteHistory { path })
+                    .map_err(|e| e.to_string())?
+            {
+                for r in revisions {
+                    println!("{}  {}", r.id, r.message);
+                }
+            }
+        }
+        Command::Show { path, revision } => {
+            if let QueryResponse::Note { contents } =
+                dispatch_query(&engine, &WireQuery::NoteAt { path, revision })
+                    .map_err(|e| e.to_string())?
+            {
+                print!("{contents}");
+            }
+        }
+        Command::Restore { path, revision } => {
+            let resp = dispatch_command(
+                &mut engine,
+                &WireCommand::RestoreNote {
+                    path: path.clone(),
+                    revision: revision.clone(),
+                },
+                &mut events,
+            )
+            .map_err(|e| e.to_string())?;
+            debug_assert!(matches!(resp, CommandResponse::Done));
+            println!("restored {path} from {revision}");
         }
         Command::Watch { json } => {
             let handle = NotifyWatcher
