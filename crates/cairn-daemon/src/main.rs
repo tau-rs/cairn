@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Duration;
 
 use cairn_app::{Engine, Event};
 use cairn_daemon::{build_router, cors_layer, AppState, CairnEngine, Config};
@@ -84,9 +85,25 @@ async fn run() -> Result<(), String> {
         eng
     };
 
+    // Plugin read timeout: cairn.toml `[plugins] timeout_secs`, else the host default.
+    let plugin_timeout = match config.plugins.timeout_secs {
+        Some(0) => {
+            eprintln!(
+                "warning: [plugins] timeout_secs = 0 is invalid; using default {:?}",
+                cairn_infra::DEFAULT_PLUGIN_TIMEOUT
+            );
+            cairn_infra::DEFAULT_PLUGIN_TIMEOUT
+        }
+        Some(s) => Duration::from_secs(s),
+        None => cairn_infra::DEFAULT_PLUGIN_TIMEOUT,
+    };
     // Load engine plugins from <cairn>/.cairn/plugins (absent dir => none).
-    match cairn_infra::ProcessPluginHost::load(&cli.cairn.join(".cairn").join("plugins")) {
-        Ok(host) => engine.set_plugin_host(Box::new(host)),
+    let plugins_dir = cli.cairn.join(".cairn").join("plugins");
+    match cairn_infra::ProcessPluginHost::load_with_timeout(&plugins_dir, plugin_timeout) {
+        Ok(host) => {
+            engine.set_plugin_host(Box::new(host));
+            println!("plugins: read timeout {plugin_timeout:?}");
+        }
         Err(e) => eprintln!("warning: plugin host disabled: {e}"),
     }
 
