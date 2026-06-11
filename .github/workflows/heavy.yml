@@ -1,0 +1,305 @@
+name: heavy
+
+# T2 HEAVY tier — release-grade verification + supply-chain + GitHub Release.
+# Runs on v* tag pushes (the "heavy lifting on feature release") and on
+# manual workflow_dispatch (which exercises every job EXCEPT publishing a
+# release). The fast PR gate lives in ci.yml and is untouched by this file.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+# Don't cancel an in-flight release. A tag run that's writing artifacts or
+# the GitHub Release must finish.
+concurrency:
+  group: heavy-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+
+# Least privilege by default; only release-publish elevates to contents: write.
+permissions:
+  contents: read
+
+jobs:
+  os-matrix:
+    name: os-matrix / ${{ matrix.os == 'ubuntu-latest' && 'linux' || matrix.os == 'macos-latest' && 'macos' || 'windows' }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-rust
+        with:
+          shared-key: ${{ matrix.os }}
+          with-nextest: true
+          with-sccache: true
+          with-mold: true
+      - run: cargo nextest run --profile ci --workspace --all-targets
+      - run: cargo test --workspace --doc
+
+  msrv:
+    # Explicit MSRV build, distinct from ci.yml's --locked lock guard:
+    # install 1.88 and check against it directly.
+    name: msrv (1.88)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: "1.88"
+          shared-key: linux
+          with-mold: true
+      - run: cargo +1.88 check --workspace --all-targets --locked
+
+  feature-powerset:
+    # Check every combination of feature flags. Cairn currently declares no
+    # cargo features, so this reduces to a base check today; it gains value
+    # the moment feature seams are added (zero-cost insurance).
+    name: feature-powerset
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-rust
+        with:
+          shared-key: linux
+          with-mold: true
+      - uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          tool: cargo-hack
+      - run: cargo hack --feature-powerset --workspace check --all-targets
+
+  fuzz:
+    # Short, bounded smoke fuzz of the parse/validation surfaces flagged in
+    # security.md (NotePath, plugin manifest TOML). Long campaigns belong in
+    # the T3 nightly schedule (session 83); here we only prove targets build
+    # and survive a 60s run without crashing.
+    name: fuzz (smoke)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: nightly
+          shared-key: linux
+          with-mold: true
+      - name: Install cargo-fuzz
+        # Not available via taiki-e/install-action; build it with nightly
+        # (its deps require a newer rustc than the repo's pinned 1.88).
+        # Version-pinned for build reproducibility.
+        run: cargo +nightly install cargo-fuzz --version ^0.13 --locked
+      - name: Fuzz NotePath::new
+        run: cargo +nightly fuzz run note_path -- -max_total_time=60 -rss_limit_mb=2048
+        working-directory: fuzz
+      - name: Fuzz plugin manifest TOML
+        run: cargo +nightly fuzz run plugin_manifest -- -max_total_time=60 -rss_limit_mb=2048
+        working-directory: fuzz
+      - name: Upload any crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-artifacts-${{ github.sha }}
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  mutants:
+    # Mutation testing over the workspace. Advisory, NOT a release blocker:
+    # surviving mutants are a test-quality signal (cf. coverage.yml's
+    # "measurement not gating"). continue-on-error keeps a v* release from
+    # being held hostage by a single surviving mutant; results are uploaded.
+    name: mutants (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-rust
+        with:
+          shared-key: linux
+          with-nextest: true
+          with-mold: true
+      - uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          tool: cargo-mutants
+      - run: cargo mutants --workspace --no-shuffle --timeout 120 -j 2
+      - name: Upload mutants report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutants-${{ github.sha }}
+          path: mutants.out/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  coverage:
+    # Coverage on release. Mirrors coverage.yml's cargo-llvm-cov logic
+    # (self-contained per devops.md's no-workflow_call principle). Signal,
+    # never a gate.
+    name: coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: llvm-tools-preview
+          shared-key: linux
+          with-nextest: true
+          with-sccache: true
+          with-mold: true
+      - uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          tool: cargo-llvm-cov
+      - name: Generate lcov coverage
+        run: |
+          cargo llvm-cov nextest \
+            --workspace --no-fail-fast \
+            --lcov --output-path lcov.info \
+            --ignore-filename-regex '(tests/|/target/|/build\.rs$)'
+      - name: Upload lcov artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lcov-release-${{ github.sha }}
+          path: lcov.info
+          retention-days: 14
+
+  sbom:
+    # Supply-chain core (D4): CycloneDX SBOM for the workspace. Uploaded as a
+    # workflow artifact and (on tag) attached to the GitHub Release.
+    name: sbom (cyclonedx)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-rust
+        with:
+          shared-key: linux
+          with-mold: true
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --version ^0.5 --locked
+      - name: Generate SBOM
+        # --all = full transitive dependency tree (not just top-level).
+        # cargo-cyclonedx 0.5.x writes a <crate>.cdx.json next to every
+        # package Cargo.toml in the workspace.
+        run: cargo cyclonedx --all --format json
+      - name: Aggregate SBOMs into one artifact dir
+        shell: bash
+        run: |
+          mkdir -p sbom
+          # Collect each crate's <crate>.cdx.json under sbom/ preserving the
+          # crate path so the source of each component set is unambiguous.
+          find . -name '*.cdx.json' -not -path './sbom/*' -exec cp --parents {} sbom/ \;
+          ls -R sbom
+          # Fail loudly if cargo-cyclonedx produced nothing (e.g. an output
+          # filename change) rather than silently shipping a release with no SBOM.
+          test -n "$(find sbom -name '*.cdx.json' -print -quit)"
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom-${{ github.sha }}
+          path: sbom/
+          if-no-files-found: error
+          retention-days: 90
+
+  release-build:
+    # Build the shipping binaries (cairn, cairn-daemon) per OS and package
+    # them. Runs on dispatch too, so a manual run verifies the build/package
+    # path without publishing a release.
+    name: release-build / ${{ matrix.os == 'ubuntu-latest' && 'linux' || matrix.os == 'macos-latest' && 'macos' || 'windows' }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-rust
+        with:
+          shared-key: ${{ matrix.os }}
+          with-sccache: true
+          with-mold: true
+      - name: Build release binaries
+        run: cargo build --release --locked --bin cairn --bin cairn-daemon
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          os='${{ matrix.os == 'ubuntu-latest' && 'linux' || 'macos' }}'
+          # Derive the real arch from the runner: x86_64 on ubuntu-latest,
+          # arm64 on macos-latest (Apple Silicon) — never hardcode it, or the
+          # asset name lies about the binary it contains.
+          arch="$(uname -m)"
+          name="cairn-${os}-${arch}"
+          mkdir -p "dist/${name}"
+          cp target/release/cairn target/release/cairn-daemon "dist/${name}/"
+          cp README.md LICENSE-MIT LICENSE-APACHE "dist/${name}/"
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          name="cairn-windows-x86_64"
+          mkdir -p "dist/${name}"
+          cp target/release/cairn.exe target/release/cairn-daemon.exe "dist/${name}/"
+          cp README.md LICENSE-MIT LICENSE-APACHE "dist/${name}/"
+          (cd dist && 7z a "${name}.zip" "${name}" >/dev/null)
+      - name: Upload packaged binary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist-${{ matrix.os }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  release-publish:
+    # The ONLY job with contents: write, and the ONLY tag-gated job. Collects
+    # every packaged binary + the SBOM and creates the GitHub Release. Skipped
+    # on workflow_dispatch (no tag) so manual runs never publish.
+    name: release-publish
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [os-matrix, msrv, feature-powerset, sbom, release-build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          path: artifacts
+      - name: Stage release assets
+        shell: bash
+        # ref_name / sha via env, never interpolated into the shell, to avoid
+        # any ref-injection surface.
+        env:
+          SBOM_DIR: artifacts/sbom-${{ github.sha }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec cp {} release/ \;
+          # Bundle the SBOM set into a single archive for the release.
+          if [ -d "$SBOM_DIR" ]; then
+            tar -C "$SBOM_DIR" -czf "release/cairn-sbom-${REF_NAME}.tar.gz" .
+          fi
+          ls -l release
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          files: release/*
+          generate_release_notes: true
+          # Pre-1.0 / pre-release tags (containing a hyphen, e.g. v1.0.0-rc1)
+          # are marked as prereleases.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: true

@@ -1,0 +1,32 @@
+[package]
+name = "cairn-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Detached from the parent workspace so cargo-fuzz's nightly/sanitizer
+# build and libfuzzer-sys deps never touch the main `--locked` graph.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+cairn-domain = { path = "../crates/cairn-domain" }
+cairn-plugin-protocol = { path = "../crates/cairn-plugin-protocol" }
+toml = "1"
+
+[[bin]]
+name = "note_path"
+path = "fuzz_targets/note_path.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "plugin_manifest"
+path = "fuzz_targets/plugin_manifest.rs"
+test = false
+doc = false
+bench = false
