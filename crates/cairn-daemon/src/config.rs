@@ -28,6 +28,11 @@ pub struct PluginsConfig {
     /// the daemon.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Plugin directory names the user trusts to spawn. Absent/empty ⇒ no plugin
+    /// is spawned (default-deny). The name must match the plugin's directory
+    /// under `<cairn>/.cairn/plugins/`.
+    #[serde(default)]
+    pub trusted: Vec<String>,
 }
 
 /// On-disk index persistence settings.
@@ -153,6 +158,26 @@ mod tests {
         // 0 parses as Some(0) (the daemon then guards it); it isn't swallowed.
         let z: Config = toml::from_str("[plugins]\ntimeout_secs = 0").unwrap();
         assert_eq!(z.plugins.timeout_secs, Some(0));
+    }
+
+    #[test]
+    fn plugins_trusted_parses() {
+        let c: Config = toml::from_str("[plugins]\ntrusted = [\"a\", \"b\"]").unwrap();
+        assert_eq!(c.plugins.trusted, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn plugins_trusted_defaults_empty() {
+        assert!(toml::from_str::<Config>("")
+            .unwrap()
+            .plugins
+            .trusted
+            .is_empty());
+        assert!(toml::from_str::<Config>("[plugins]\n")
+            .unwrap()
+            .plugins
+            .trusted
+            .is_empty());
     }
 
     #[test]
