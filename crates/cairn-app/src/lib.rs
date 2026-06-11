@@ -1217,6 +1217,22 @@ mod tests {
     }
 
     #[test]
+    fn save_state_round_trips_through_parse_state() {
+        // save_state's serialized field names must match what parse_state reads:
+        // a serde rename of `schema_version`/`entries` would slip past the
+        // hand-built-JSON tests but break real persistence.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.md"), "alpha body").unwrap();
+        let mut eng = engine(tmp.path());
+        eng.reconcile(&mut Vec::new()).unwrap();
+
+        let store = LocalFsStore::open(tmp.path()).unwrap();
+        let raw = store.read_meta().unwrap().unwrap();
+        let restored = parse_state(&raw).expect("save_state output must parse back");
+        assert!(restored.contains_key(&NotePath::new("a.md").unwrap()));
+    }
+
+    #[test]
     fn parse_state_accepts_current_version() {
         let json = serde_json::json!({
             "schema_version": STATE_SCHEMA_VERSION,

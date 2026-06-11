@@ -144,8 +144,9 @@ impl Note {
     /// rebuilt rather than trusted.
     #[must_use]
     pub fn content_hash(&self) -> u64 {
-        // FNV-1a 64. Length-delimit the frontmatter so that, e.g.,
-        // (frontmatter "a", body "b") and (frontmatter "ab", body "") differ.
+        // FNV-1a 64. The explicit length prefix on the frontmatter keeps the
+        // (frontmatter, body) split unambiguous so that, e.g., (frontmatter
+        // "a", body "b") and (frontmatter "ab", body "") hash differently.
         const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
         const PRIME: u64 = 0x0000_0100_0000_01b3;
         let mut h = OFFSET;
