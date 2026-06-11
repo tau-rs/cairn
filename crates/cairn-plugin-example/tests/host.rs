@@ -1,5 +1,5 @@
 use cairn_domain::{Note, NotePath};
-use cairn_infra::ProcessPluginHost;
+use cairn_infra::{ProcessPluginHost, TrustedPlugins};
 use cairn_ports::{PluginCallbacks, PluginHost, PortError, SearchHit};
 use std::collections::HashMap;
 
@@ -13,6 +13,26 @@ fn write_manifest(pdir: &std::path::Path, bin: &str, caps: &str) {
         ),
     )
     .unwrap();
+}
+
+/// Load a host from `<tmp>/.cairn/plugins`, trusting the `example` plugin.
+fn load_example(tmp: &std::path::Path) -> ProcessPluginHost {
+    let dir = tmp.join(".cairn").join("plugins");
+    ProcessPluginHost::load(&dir, &TrustedPlugins::from_ids(["example".to_string()])).unwrap()
+}
+
+/// Like `load_example` but with an explicit per-message timeout.
+fn load_example_with_timeout(
+    tmp: &std::path::Path,
+    timeout: std::time::Duration,
+) -> ProcessPluginHost {
+    let dir = tmp.join(".cairn").join("plugins");
+    ProcessPluginHost::load_with_timeout(
+        &dir,
+        timeout,
+        &TrustedPlugins::from_ids(["example".to_string()]),
+    )
+    .unwrap()
 }
 
 /// A test double for host-callbacks: serves notes from an in-memory map.
@@ -83,7 +103,7 @@ fn host_loads_invokes_and_rejects_unknown() {
     )
     .unwrap();
 
-    let mut host = ProcessPluginHost::load(&tmp.path().join(".cairn").join("plugins")).unwrap();
+    let mut host = load_example(tmp.path());
     let mut cb = MapCallbacks(HashMap::new());
 
     let plugins = host.plugins();
@@ -127,7 +147,7 @@ fn note_len_reads_via_callback() {
     )
     .unwrap();
 
-    let mut host = ProcessPluginHost::load(&tmp.path().join(".cairn").join("plugins")).unwrap();
+    let mut host = load_example(tmp.path());
     let mut cb = MapCallbacks(HashMap::from([(
         "note.md".to_string(),
         "hello body".to_string(),
@@ -160,7 +180,7 @@ fn note_len_denied_without_capability() {
     )
     .unwrap();
 
-    let mut host = ProcessPluginHost::load(&tmp.path().join(".cairn").join("plugins")).unwrap();
+    let mut host = load_example(tmp.path());
     let mut cb = MapCallbacks(HashMap::from([(
         "note.md".to_string(),
         "hello body".to_string(),
@@ -186,7 +206,7 @@ fn write_note_via_callback() {
     let tmp = tempfile::tempdir().unwrap();
     let pdir = tmp.path().join(".cairn").join("plugins").join("example");
     write_manifest(&pdir, bin, "\"fs:write\"");
-    let mut host = ProcessPluginHost::load(&tmp.path().join(".cairn").join("plugins")).unwrap();
+    let mut host = load_example(tmp.path());
     let mut cb = MapCallbacks(HashMap::new());
     let out = host
         .invoke(
@@ -206,7 +226,7 @@ fn write_denied_without_fs_write() {
     let tmp = tempfile::tempdir().unwrap();
     let pdir = tmp.path().join(".cairn").join("plugins").join("example");
     write_manifest(&pdir, bin, "\"fs:read\""); // read but NOT write
-    let mut host = ProcessPluginHost::load(&tmp.path().join(".cairn").join("plugins")).unwrap();
+    let mut host = load_example(tmp.path());
     let mut cb = MapCallbacks(HashMap::new());
     let err = host
         .invoke(
@@ -229,7 +249,7 @@ fn note_count_via_callback() {
     let tmp = tempfile::tempdir().unwrap();
     let pdir = tmp.path().join(".cairn").join("plugins").join("example");
     write_manifest(&pdir, bin, "\"fs:read\"");
-    let mut host = ProcessPluginHost::load(&tmp.path().join(".cairn").join("plugins")).unwrap();
+    let mut host = load_example(tmp.path());
     let mut cb = MapCallbacks(HashMap::from([
         ("a.md".to_string(), "alpha".to_string()),
         ("b.md".to_string(), "beta".to_string()),
@@ -246,7 +266,7 @@ fn find_via_callback() {
     let tmp = tempfile::tempdir().unwrap();
     let pdir = tmp.path().join(".cairn").join("plugins").join("example");
     write_manifest(&pdir, bin, "\"fs:read\"");
-    let mut host = ProcessPluginHost::load(&tmp.path().join(".cairn").join("plugins")).unwrap();
+    let mut host = load_example(tmp.path());
     let mut cb = MapCallbacks(HashMap::from([
         ("a.md".to_string(), "the quick fox".to_string()),
         ("b.md".to_string(), "lazy dog".to_string()),
@@ -268,7 +288,7 @@ fn delete_note_via_callback() {
     let tmp = tempfile::tempdir().unwrap();
     let pdir = tmp.path().join(".cairn").join("plugins").join("example");
     write_manifest(&pdir, bin, "\"fs:write\"");
-    let mut host = ProcessPluginHost::load(&tmp.path().join(".cairn").join("plugins")).unwrap();
+    let mut host = load_example(tmp.path());
     let mut cb = MapCallbacks(HashMap::from([("n.md".to_string(), "body".to_string())]));
     let out = host
         .invoke(
@@ -288,7 +308,7 @@ fn delete_denied_without_fs_write() {
     let tmp = tempfile::tempdir().unwrap();
     let pdir = tmp.path().join(".cairn").join("plugins").join("example");
     write_manifest(&pdir, bin, "\"fs:read\""); // read but NOT write
-    let mut host = ProcessPluginHost::load(&tmp.path().join(".cairn").join("plugins")).unwrap();
+    let mut host = load_example(tmp.path());
     let mut cb = MapCallbacks(HashMap::from([("n.md".to_string(), "body".to_string())]));
     let err = host
         .invoke(
@@ -311,7 +331,7 @@ fn search_denied_without_fs_read() {
     let tmp = tempfile::tempdir().unwrap();
     let pdir = tmp.path().join(".cairn").join("plugins").join("example");
     write_manifest(&pdir, bin, ""); // no capabilities
-    let mut host = ProcessPluginHost::load(&tmp.path().join(".cairn").join("plugins")).unwrap();
+    let mut host = load_example(tmp.path());
     let mut cb = MapCallbacks(HashMap::from([("a.md".to_string(), "x".to_string())]));
     let err = host
         .invoke(
@@ -333,7 +353,7 @@ fn event_delivered_and_handler_writes() {
     let tmp = tempfile::tempdir().unwrap();
     let pdir = tmp.path().join(".cairn").join("plugins").join("example");
     write_manifest(&pdir, bin, "\"events\", \"fs:write\"");
-    let mut host = ProcessPluginHost::load(&tmp.path().join(".cairn").join("plugins")).unwrap();
+    let mut host = load_example(tmp.path());
     let mut cb = MapCallbacks(HashMap::new());
     host.dispatch_event(
         &cairn_ports::PluginEvent::NoteChanged(NotePath::new("x.md").unwrap()),
@@ -349,7 +369,7 @@ fn event_skipped_without_events_cap() {
     let tmp = tempfile::tempdir().unwrap();
     let pdir = tmp.path().join(".cairn").join("plugins").join("example");
     write_manifest(&pdir, bin, "\"fs:write\""); // fs:write but NOT events
-    let mut host = ProcessPluginHost::load(&tmp.path().join(".cairn").join("plugins")).unwrap();
+    let mut host = load_example(tmp.path());
     let mut cb = MapCallbacks(HashMap::new());
     host.dispatch_event(
         &cairn_ports::PluginEvent::NoteChanged(NotePath::new("x.md").unwrap()),
@@ -365,11 +385,7 @@ fn invoke_times_out_and_kills_plugin() {
     let tmp = tempfile::tempdir().unwrap();
     let pdir = tmp.path().join(".cairn").join("plugins").join("example");
     write_manifest(&pdir, bin, ""); // no caps needed; `hang` makes no callbacks
-    let mut host = ProcessPluginHost::load_with_timeout(
-        &tmp.path().join(".cairn").join("plugins"),
-        Duration::from_millis(2_000),
-    )
-    .unwrap();
+    let mut host = load_example_with_timeout(tmp.path(), Duration::from_millis(2_000));
     let mut cb = MapCallbacks(HashMap::new());
 
     let start = Instant::now();
@@ -396,5 +412,53 @@ fn invoke_times_out_and_kills_plugin() {
     assert!(
         matches!(err2, PortError::Adapter(_)),
         "expected Adapter, got {err2:?}"
+    );
+}
+
+#[test]
+fn approved_plugin_is_spawned_unapproved_is_not() {
+    let bin = env!("CARGO_BIN_EXE_cairn-plugin-example");
+    let tmp = tempfile::tempdir().unwrap();
+    let plugins = tmp.path().join(".cairn").join("plugins");
+    // Two valid plugins on disk, each with a working binary.
+    write_manifest(&plugins.join("example"), bin, "");
+    write_manifest(&plugins.join("rogue"), bin, "");
+    // Only `example` is trusted; `rogue` must be skipped by the trust gate.
+    let host =
+        ProcessPluginHost::load(&plugins, &TrustedPlugins::from_ids(["example".to_string()]))
+            .unwrap();
+    let ids: Vec<String> = host.plugins().into_iter().map(|p| p.id).collect();
+    assert_eq!(ids, vec!["example".to_string()]);
+}
+
+#[test]
+fn default_deny_spawns_nothing() {
+    let bin = env!("CARGO_BIN_EXE_cairn-plugin-example");
+    let tmp = tempfile::tempdir().unwrap();
+    let plugins = tmp.path().join(".cairn").join("plugins");
+    write_manifest(&plugins.join("example"), bin, "");
+    let host = ProcessPluginHost::load(&plugins, &TrustedPlugins::none()).unwrap();
+    assert!(host.plugins().is_empty());
+}
+
+#[test]
+fn trusted_dir_with_mismatched_manifest_id_is_rejected() {
+    let bin = env!("CARGO_BIN_EXE_cairn-plugin-example");
+    let tmp = tempfile::tempdir().unwrap();
+    let plugins = tmp.path().join(".cairn").join("plugins");
+    // Directory `example` is trusted, but its manifest claims id `evil`.
+    let pdir = plugins.join("example");
+    std::fs::create_dir_all(&pdir).unwrap();
+    std::fs::write(
+        pdir.join("manifest.toml"),
+        format!("id=\"evil\"\nname=\"E\"\nversion=\"0\"\n[engine]\ncommand='{bin}'\n"),
+    )
+    .unwrap();
+    let host =
+        ProcessPluginHost::load(&plugins, &TrustedPlugins::from_ids(["example".to_string()]))
+            .unwrap();
+    assert!(
+        host.plugins().is_empty(),
+        "id-mismatched plugin must not load"
     );
 }

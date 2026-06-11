@@ -98,8 +98,17 @@ async fn run() -> Result<(), String> {
         None => cairn_infra::DEFAULT_PLUGIN_TIMEOUT,
     };
     // Load engine plugins from <cairn>/.cairn/plugins (absent dir => none).
+    // Default-deny: only directories listed in [plugins].trusted are spawned.
     let plugins_dir = cli.cairn.join(".cairn").join("plugins");
-    match cairn_infra::ProcessPluginHost::load_with_timeout(&plugins_dir, plugin_timeout) {
+    let trusted = cairn_infra::TrustedPlugins::from_ids(config.plugins.trusted.clone());
+    if config.plugins.trusted.is_empty() {
+        println!(
+            "plugins: none trusted (add [plugins].trusted = [\"<dir>\"] to {}/cairn.toml to enable)",
+            cli.cairn.display()
+        );
+    }
+    match cairn_infra::ProcessPluginHost::load_with_timeout(&plugins_dir, plugin_timeout, &trusted)
+    {
         Ok(host) => {
             engine.set_plugin_host(Box::new(host));
             println!("plugins: read timeout {plugin_timeout:?}");
