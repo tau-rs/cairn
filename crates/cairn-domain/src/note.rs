@@ -136,16 +136,36 @@ impl Note {
     }
 
     /// A non-cryptographic hash of the note's content (frontmatter + body),
-    /// for in-memory change detection / memoization. Not for security, and
-    /// not stable across Rust versions or process restarts — do not persist
-    /// it or compare hashes across processes.
+    /// for change detection / memoization and the on-disk index in
+    /// `.cairn/state.json`. Stable across Rust versions and processes (FNV-1a
+    /// 64), so it may be persisted. Not for security: it is not collision-
+    /// resistant against an adversary. If the algorithm ever changes, bump
+    /// `STATE_SCHEMA_VERSION` in `cairn-app` so stale persisted hashes are
+    /// rebuilt rather than trusted.
     #[must_use]
     pub fn content_hash(&self) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        self.frontmatter.hash(&mut h);
-        self.body.hash(&mut h);
-        h.finish()
+        // FNV-1a 64. The explicit length prefix on the frontmatter keeps the
+        // (frontmatter, body) split unambiguous so that, e.g., (frontmatter
+        // "a", body "b") and (frontmatter "ab", body "") hash differently.
+        const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+        const PRIME: u64 = 0x0000_0100_0000_01b3;
+        let mut h = OFFSET;
+        let mut feed = |bytes: &[u8]| {
+            for &b in bytes {
+                h ^= u64::from(b);
+                h = h.wrapping_mul(PRIME);
+            }
+        };
+        match &self.frontmatter {
+            Some(fm) => {
+                feed(&[1]);
+                feed(&(fm.len() as u64).to_le_bytes());
+                feed(fm.as_bytes());
+            }
+            None => feed(&[0]),
+        }
+        feed(self.body.as_bytes());
+        h
     }
 
     /// Tags declared in the note's frontmatter `tags:` key. Frontmatter-only
@@ -297,6 +317,15 @@ mod tests {
         let b = Note::parse(p, "---\ntitle: X\n---\nDIFFERENT");
         assert_eq!(a1.content_hash(), a2.content_hash());
         assert_ne!(a1.content_hash(), b.content_hash());
+    }
+
+    #[test]
+    fn content_hash_is_a_fixed_fnv1a_known_answer() {
+        // FNV-1a 64 over: presence byte 0x00 (no frontmatter) + body bytes "body".
+        // Independently computed; pins the algorithm so an accidental change is caught.
+        let p = NotePath::new("a.md").unwrap();
+        let n = Note::parse(p, "body");
+        assert_eq!(n.content_hash(), 0xc2ea_c2be_539f_2a97);
     }
 
     fn tags_of(raw: &str) -> Vec<String> {
