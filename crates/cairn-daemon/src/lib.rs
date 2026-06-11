@@ -5,6 +5,9 @@
 pub mod config;
 pub use config::Config;
 
+mod auth;
+pub use auth::generate_token_file;
+
 use std::sync::{Arc, Mutex};
 
 use axum::{
