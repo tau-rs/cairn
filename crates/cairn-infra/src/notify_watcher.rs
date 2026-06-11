@@ -7,9 +7,15 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use cairn_domain::NotePath;
-use cairn_ports::{FsChange, PortError, WatchHandle, Watcher};
+use cairn_ports::{AdapterError, FsChange, PortError, WatchHandle, Watcher};
 use notify::RecursiveMode;
 use notify_debouncer_full::{new_debouncer, DebounceEventResult};
+
+/// Wrap a `notify` error as a [`PortError::Adapter`], preserving it as the
+/// typed `#[source]`.
+fn adapt<E: std::error::Error + Send + Sync + 'static>(e: E) -> PortError {
+    PortError::Adapter(AdapterError::new(e))
+}
 
 /// Filesystem watcher over a cairn directory.
 #[derive(Debug, Default)]
@@ -40,9 +46,9 @@ impl Watcher for NotifyWatcher {
         let (tx, rx) = mpsc::channel::<FsChange>();
         // Canonicalize to resolve symlinks (e.g. /tmp -> /private/tmp on macOS)
         // so that strip_prefix works correctly against OS-reported event paths.
-        let root = root
-            .canonicalize()
-            .map_err(|e| PortError::Adapter(format!("canonicalize {}: {e}", root.display())))?;
+        let root = root.canonicalize().map_err(|e| {
+            PortError::Adapter(format!("canonicalize {}: {e}", root.display()).into())
+        })?;
         let cb_root = root.clone();
         let mut debouncer = new_debouncer(
             Duration::from_millis(200),
@@ -59,10 +65,10 @@ impl Watcher for NotifyWatcher {
                 }
             },
         )
-        .map_err(|e| PortError::Adapter(e.to_string()))?;
+        .map_err(adapt)?;
         debouncer
             .watch(&root, RecursiveMode::Recursive)
-            .map_err(|e| PortError::Adapter(e.to_string()))?;
+            .map_err(adapt)?;
         Ok(WatchHandle::new(rx, Box::new(debouncer)))
     }
 }

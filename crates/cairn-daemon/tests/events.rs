@@ -2,7 +2,9 @@ use cairn_app::Engine;
 use cairn_contract::Command;
 use cairn_daemon::AppState;
 use cairn_infra::{GitVcs, LocalFsStore, TantivyIndex};
-use cairn_ports::{PluginCallbacks, PluginEvent, PluginHost, PluginInfo, PortError};
+use cairn_ports::{
+    EventDispatchError, PluginCallbacks, PluginEvent, PluginHost, PluginInfo, PortError,
+};
 use std::sync::{Arc, Mutex};
 
 /// A stub host that records every dispatched cairn event.
@@ -20,8 +22,13 @@ impl PluginHost for RecordingHost {
     ) -> Result<serde_json::Value, PortError> {
         Err(PortError::NotFound(format!("plugin {plugin}")))
     }
-    fn dispatch_event(&mut self, event: &PluginEvent, _callbacks: &mut dyn PluginCallbacks) {
+    fn dispatch_event(
+        &mut self,
+        event: &PluginEvent,
+        _callbacks: &mut dyn PluginCallbacks,
+    ) -> Vec<EventDispatchError> {
         self.0.lock().unwrap().push(event.clone());
+        Vec::new()
     }
 }
 

@@ -7,7 +7,7 @@ use cairn_contract::{
     PluginCommandSummary, PluginSummary, Query, QueryResponse, Revision, SearchResult, TagCount,
 };
 use cairn_domain::NotePath;
-use cairn_ports::{FsChange, PortError, SearchIndex, VaultStore, Vcs, WatchHandle};
+use cairn_ports::{AdapterError, FsChange, PortError, SearchIndex, VaultStore, Vcs, WatchHandle};
 
 /// Drain a watch handle until its sender drops, invoking `on_change` for each
 /// debounced change. Blocking — run on a dedicated thread (CLI `watch`) or via
@@ -31,9 +31,12 @@ pub enum ServiceError {
     /// The request was malformed (e.g. an invalid note path).
     #[error("invalid request: {0}")]
     InvalidRequest(String),
-    /// An internal/adapter failure.
-    #[error("{0}")]
-    Internal(String),
+    /// An internal/adapter failure. Carries the original adapter error as a
+    /// typed `#[source]` (see [`AdapterError`]) so it stays downcastable when
+    /// logged at the daemon edge; it is flattened to a string only at the wire
+    /// boundary (`ContractError`), which never leaks internals to clients.
+    #[error(transparent)]
+    Internal(AdapterError),
 }
 
 impl From<PortError> for ServiceError {
@@ -41,7 +44,7 @@ impl From<PortError> for ServiceError {
         match e {
             PortError::NotFound(s) => ServiceError::NotFound(s),
             PortError::AlreadyExists(s) => ServiceError::InvalidRequest(s),
-            PortError::Adapter(s) => ServiceError::Internal(s),
+            PortError::Adapter(a) => ServiceError::Internal(a),
         }
     }
 }
@@ -51,7 +54,10 @@ impl From<ServiceError> for ContractError {
         match e {
             ServiceError::NotFound(what) => ContractError::NotFound { what },
             ServiceError::InvalidRequest(message) => ContractError::InvalidRequest { message },
-            ServiceError::Internal(message) => ContractError::Internal { message },
+            // Flatten to the message only here, at the wire boundary.
+            ServiceError::Internal(a) => ContractError::Internal {
+                message: a.to_string(),
+            },
         }
     }
 }
@@ -555,6 +561,25 @@ mod tests {
             ContractError::from(ServiceError::Internal("boom".into())),
             ContractError::Internal { .. }
         ));
+    }
+
+    #[test]
+    fn internal_error_preserves_typed_source_through_from_port_error() {
+        // D3: an adapter's typed cause must survive PortError -> ServiceError so
+        // it stays downcastable when logged at the daemon edge, not flattened.
+        let io = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "lock held");
+        let svc: ServiceError = PortError::Adapter(AdapterError::new(io)).into();
+
+        let ServiceError::Internal(_) = &svc else {
+            panic!("adapter failure must map to Internal");
+        };
+        let source = std::error::Error::source(&svc).expect("typed source preserved");
+        let io = source
+            .downcast_ref::<std::io::Error>()
+            .expect("io::Error kind recoverable at the service edge");
+        assert_eq!(io.kind(), std::io::ErrorKind::PermissionDenied);
+        // Display still flattens for any string consumer.
+        assert_eq!(svc.to_string(), "lock held");
     }
 
     #[test]

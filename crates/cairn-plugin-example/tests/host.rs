@@ -63,7 +63,8 @@ impl PluginCallbacks for MapCallbacks {
         for (path, contents) in &self.0 {
             if contents.contains(query) {
                 hits.push(SearchHit {
-                    path: NotePath::new(path).map_err(|e| PortError::Adapter(e.to_string()))?,
+                    path: NotePath::new(path)
+                        .map_err(|e| PortError::Adapter(e.to_string().into()))?,
                     score: 1.0,
                     snippet: contents.clone(),
                     highlights: Vec::new(),
@@ -80,7 +81,7 @@ impl PluginCallbacks for MapCallbacks {
             .map(|(path, contents)| {
                 NotePath::new(path)
                     .map(|np| Note::parse(np, contents))
-                    .map_err(|e| PortError::Adapter(e.to_string()))
+                    .map_err(|e| PortError::Adapter(e.to_string().into()))
             })
             .collect::<Result<_, _>>()?;
         notes.sort_by(|a, b| a.path.as_str().cmp(b.path.as_str()));
@@ -397,7 +398,7 @@ fn invoke_times_out_and_kills_plugin() {
         "hang should time out quickly"
     );
     assert!(
-        matches!(&err, PortError::Adapter(m) if m.contains("timed out")),
+        matches!(&err, PortError::Adapter(m) if m.to_string().contains("timed out")),
         "expected a timeout Adapter, got {err:?}"
     );
 

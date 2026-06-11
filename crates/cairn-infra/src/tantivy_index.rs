@@ -7,7 +7,7 @@
 use std::path::Path;
 
 use cairn_domain::{Note, NotePath};
-use cairn_ports::{PortError, SearchHit, SearchIndex};
+use cairn_ports::{AdapterError, PortError, SearchHit, SearchIndex};
 use tantivy::collector::TopDocs;
 use tantivy::directory::MmapDirectory;
 use tantivy::query::QueryParser;
@@ -34,8 +34,8 @@ pub struct TantivyIndex {
     body: Field,
 }
 
-fn adapt<E: std::fmt::Display>(e: E) -> PortError {
-    PortError::Adapter(e.to_string())
+fn adapt<E: std::error::Error + Send + Sync + 'static>(e: E) -> PortError {
+    PortError::Adapter(AdapterError::new(e))
 }
 
 fn open_or_rebuild(dir: &Path, schema: &Schema) -> Result<Index, PortError> {

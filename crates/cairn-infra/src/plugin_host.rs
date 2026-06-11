@@ -16,7 +16,10 @@ use cairn_plugin_protocol::{
     CAP_FS_WRITE, JSONRPC_VERSION, METHOD_CAIRN_EVENT, METHOD_DELETE_NOTE, METHOD_INITIALIZE,
     METHOD_INVOKE, METHOD_LIST_NOTES, METHOD_READ_NOTE, METHOD_SEARCH, METHOD_WRITE_NOTE,
 };
-use cairn_ports::{PluginCallbacks, PluginCommand, PluginEvent, PluginHost, PluginInfo, PortError};
+use cairn_ports::{
+    AdapterError, EventDispatchError, PluginCallbacks, PluginCommand, PluginEvent, PluginHost,
+    PluginInfo, PortError,
+};
 
 /// Map a ports event to its wire form for delivery to plugins.
 fn to_cairn_event(event: &PluginEvent) -> CairnEvent {
@@ -32,8 +35,8 @@ fn to_cairn_event(event: &PluginEvent) -> CairnEvent {
     }
 }
 
-fn adapt<E: std::fmt::Display>(e: E) -> PortError {
-    PortError::Adapter(e.to_string())
+fn adapt<E: std::error::Error + Send + Sync + 'static>(e: E) -> PortError {
+    PortError::Adapter(AdapterError::new(e))
 }
 
 /// Default per-message timeout for plugin reads: a plugin silent longer than this
@@ -101,10 +104,9 @@ impl LoadedPlugin {
             Err(RecvTimeoutError::Timeout) => {
                 let _ = self.child.kill();
                 let _ = self.child.wait(); // reap now so a long-lived host doesn't accrue zombies
-                Err(PortError::Adapter(format!(
-                    "plugin {} timed out after {:?}",
-                    self.info.id, self.timeout
-                )))
+                Err(PortError::Adapter(
+                    format!("plugin {} timed out after {:?}", self.info.id, self.timeout).into(),
+                ))
             }
             Err(RecvTimeoutError::Disconnected) => Ok(None),
         }
@@ -128,7 +130,9 @@ impl LoadedPlugin {
             .recv_message()?
             .ok_or_else(|| PortError::Adapter("plugin closed its output".into()))?;
         if let Some(err) = resp.error {
-            return Err(PortError::Adapter(format!("plugin error: {}", err.message)));
+            return Err(PortError::Adapter(
+                format!("plugin error: {}", err.message).into(),
+            ));
         }
         resp.result
             .ok_or_else(|| PortError::Adapter("plugin response had no result".into()))
@@ -163,7 +167,9 @@ impl LoadedPlugin {
                         continue; // stray id; one-in-flight invariant, ignore
                     }
                     if let Some(err) = resp.error {
-                        return Err(PortError::Adapter(format!("plugin error: {}", err.message)));
+                        return Err(PortError::Adapter(
+                            format!("plugin error: {}", err.message).into(),
+                        ));
                     }
                     return resp
                         .result
@@ -429,10 +435,13 @@ impl ProcessPluginHost {
             .and_then(|n| n.to_str())
             .unwrap_or_default();
         if manifest.id != dir_name {
-            return Err(PortError::Adapter(format!(
-                "manifest id \"{}\" does not match directory name \"{dir_name}\"",
-                manifest.id
-            )));
+            return Err(PortError::Adapter(
+                format!(
+                    "manifest id \"{}\" does not match directory name \"{dir_name}\"",
+                    manifest.id
+                )
+                .into(),
+            ));
         }
 
         let cmd_path = {
@@ -450,8 +459,14 @@ impl ProcessPluginHost {
             .stderr(Stdio::inherit())
             .spawn()
             .map_err(adapt)?;
-        let stdin = child.stdin.take().ok_or_else(|| adapt("no stdin"))?;
-        let child_stdout = child.stdout.take().ok_or_else(|| adapt("no stdout"))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| PortError::Adapter("no stdin".into()))?;
+        let child_stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| PortError::Adapter("no stdout".into()))?;
         let (tx, rx) = mpsc::channel::<std::io::Result<String>>();
         let reader = std::thread::spawn(move || {
             let mut stdout = BufReader::new(child_stdout);
@@ -535,15 +550,26 @@ impl PluginHost for ProcessPluginHost {
         p.invoke_command(params, callbacks)
     }
 
-    fn dispatch_event(&mut self, event: &PluginEvent, callbacks: &mut dyn PluginCallbacks) {
+    fn dispatch_event(
+        &mut self,
+        event: &PluginEvent,
+        callbacks: &mut dyn PluginCallbacks,
+    ) -> Vec<EventDispatchError> {
         let cairn_event = to_cairn_event(event);
+        let mut errors = Vec::new();
         for p in self.loaded.iter_mut() {
             if p.capabilities.iter().any(|c| c == CAP_EVENTS) {
                 if let Err(e) = p.deliver_event(&cairn_event, callbacks) {
-                    eprintln!("plugin {}: event delivery failed: {e}", p.info.id);
+                    // Return the failure for the engine to log uniformly (audit
+                    // G4), rather than writing to stderr from the adapter.
+                    errors.push(EventDispatchError {
+                        plugin: p.info.id.clone(),
+                        error: e,
+                    });
                 }
             }
         }
+        errors
     }
 }
 

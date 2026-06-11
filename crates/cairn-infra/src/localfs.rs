@@ -4,7 +4,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use cairn_domain::NotePath;
-use cairn_ports::{FileStamp, PortError, VaultStore};
+use cairn_ports::{AdapterError, FileStamp, PortError, VaultStore};
+
+/// Wrap an adapter error (typically an [`std::io::Error`]) as a
+/// [`PortError::Adapter`], preserving it as the typed `#[source]` so callers can
+/// match on the cause (e.g. an [`std::io::ErrorKind`]).
+fn adapt<E: std::error::Error + Send + Sync + 'static>(e: E) -> PortError {
+    PortError::Adapter(AdapterError::new(e))
+}
 
 /// Create `<root>/.cairn/` and a `.gitignore` (`*`) so the cache never enters
 /// the user's notes repo. Idempotent. Returns the `.cairn` directory path.
@@ -13,10 +20,10 @@ use cairn_ports::{FileStamp, PortError, VaultStore};
 /// `Adapter` if the directory or `.gitignore` cannot be created.
 pub fn ensure_cairn_dir(root: &Path) -> Result<PathBuf, PortError> {
     let dir = root.join(".cairn");
-    fs::create_dir_all(&dir).map_err(|e| PortError::Adapter(e.to_string()))?;
+    fs::create_dir_all(&dir).map_err(adapt)?;
     let ignore = dir.join(".gitignore");
     if !ignore.exists() {
-        fs::write(&ignore, "*\n").map_err(|e| PortError::Adapter(e.to_string()))?;
+        fs::write(&ignore, "*\n").map_err(adapt)?;
     }
     Ok(dir)
 }
@@ -53,9 +60,8 @@ impl LocalFsStore {
     /// canonical path cannot be resolved.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, PortError> {
         let root = root.as_ref().to_path_buf();
-        fs::create_dir_all(&root).map_err(|e| PortError::Adapter(e.to_string()))?;
-        let canonical_root =
-            fs::canonicalize(&root).map_err(|e| PortError::Adapter(e.to_string()))?;
+        fs::create_dir_all(&root).map_err(adapt)?;
+        let canonical_root = fs::canonicalize(&root).map_err(adapt)?;
         Ok(Self {
             root,
             canonical_root,
@@ -83,10 +89,9 @@ impl LocalFsStore {
     ///    original target is returned for the caller to create.
     fn resolve(&self, path: &NotePath) -> Result<PathBuf, PortError> {
         if !is_safe_rel(path.as_str()) {
-            return Err(PortError::Adapter(format!(
-                "unsafe note path: {}",
-                path.as_str()
-            )));
+            return Err(PortError::Adapter(
+                format!("unsafe note path: {}", path.as_str()).into(),
+            ));
         }
         let full = self.full(path);
 
@@ -94,10 +99,9 @@ impl LocalFsStore {
             .symlink_metadata()
             .is_ok_and(|m| m.file_type().is_symlink())
         {
-            return Err(PortError::Adapter(format!(
-                "note path is a symlink: {}",
-                path.as_str()
-            )));
+            return Err(PortError::Adapter(
+                format!("note path is a symlink: {}", path.as_str()).into(),
+            ));
         }
 
         // Walk up to the deepest entry that exists on disk. `symlink_metadata`
@@ -106,28 +110,23 @@ impl LocalFsStore {
         let mut ancestor = full.as_path();
         while ancestor.symlink_metadata().is_err() {
             ancestor = ancestor.parent().ok_or_else(|| {
-                PortError::Adapter(format!("cannot resolve note path: {}", path.as_str()))
+                PortError::Adapter(format!("cannot resolve note path: {}", path.as_str()).into())
             })?;
         }
-        let canon = fs::canonicalize(ancestor).map_err(|e| PortError::Adapter(e.to_string()))?;
+        let canon = fs::canonicalize(ancestor).map_err(adapt)?;
         if !canon.starts_with(&self.canonical_root) {
-            return Err(PortError::Adapter(format!(
-                "note path escapes cairn root: {}",
-                path.as_str()
-            )));
+            return Err(PortError::Adapter(
+                format!("note path escapes cairn root: {}", path.as_str()).into(),
+            ));
         }
         Ok(full)
     }
 
     fn collect_md(&self, dir: &Path, out: &mut Vec<NotePath>) -> Result<(), PortError> {
-        for entry in fs::read_dir(dir).map_err(|e| PortError::Adapter(e.to_string()))? {
-            let entry = entry.map_err(|e| PortError::Adapter(e.to_string()))?;
+        for entry in fs::read_dir(dir).map_err(adapt)? {
+            let entry = entry.map_err(adapt)?;
             let path = entry.path();
-            if entry
-                .file_type()
-                .map_err(|e| PortError::Adapter(e.to_string()))?
-                .is_dir()
-            {
+            if entry.file_type().map_err(adapt)?.is_dir() {
                 // Skip VCS and the cairn cache (`.cairn/` holds the persisted
                 // index + state, never notes).
                 if path
@@ -138,11 +137,9 @@ impl LocalFsStore {
                 }
                 self.collect_md(&path, out)?;
             } else if path.extension().is_some_and(|e| e == "md") {
-                let rel = path
-                    .strip_prefix(&self.root)
-                    .map_err(|e| PortError::Adapter(e.to_string()))?;
+                let rel = path.strip_prefix(&self.root).map_err(adapt)?;
                 let rel = rel.to_str().ok_or_else(|| {
-                    PortError::Adapter(format!("non-UTF-8 path: {}", rel.display()))
+                    PortError::Adapter(format!("non-UTF-8 path: {}", rel.display()).into())
                 })?;
                 // A dotfile `.md` (e.g. `.draft.md`) is not a valid note path;
                 // skip it rather than failing the entire listing.
@@ -162,7 +159,7 @@ impl VaultStore for LocalFsStore {
             if e.kind() == std::io::ErrorKind::NotFound {
                 PortError::NotFound(path.as_str().to_string())
             } else {
-                PortError::Adapter(e.to_string())
+                adapt(e)
             }
         })
     }
@@ -170,9 +167,9 @@ impl VaultStore for LocalFsStore {
     fn write(&mut self, path: &NotePath, contents: &str) -> Result<(), PortError> {
         let full = self.resolve(path)?;
         if let Some(parent) = full.parent() {
-            fs::create_dir_all(parent).map_err(|e| PortError::Adapter(e.to_string()))?;
+            fs::create_dir_all(parent).map_err(adapt)?;
         }
-        fs::write(full, contents).map_err(|e| PortError::Adapter(e.to_string()))
+        fs::write(full, contents).map_err(adapt)
     }
 
     fn delete(&mut self, path: &NotePath) -> Result<(), PortError> {
@@ -180,7 +177,7 @@ impl VaultStore for LocalFsStore {
             if e.kind() == std::io::ErrorKind::NotFound {
                 PortError::NotFound(path.as_str().to_string())
             } else {
-                PortError::Adapter(e.to_string())
+                adapt(e)
             }
         })
     }
@@ -195,9 +192,9 @@ impl VaultStore for LocalFsStore {
             return Err(PortError::AlreadyExists(to.as_str().to_string()));
         }
         if let Some(parent) = dst.parent() {
-            fs::create_dir_all(parent).map_err(|e| PortError::Adapter(e.to_string()))?;
+            fs::create_dir_all(parent).map_err(adapt)?;
         }
-        fs::rename(&src, &dst).map_err(|e| PortError::Adapter(e.to_string()))
+        fs::rename(&src, &dst).map_err(adapt)
     }
 
     fn list(&self) -> Result<Vec<NotePath>, PortError> {
@@ -216,11 +213,9 @@ impl VaultStore for LocalFsStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Err(PortError::NotFound(path.as_str().to_string()));
             }
-            Err(e) => return Err(PortError::Adapter(e.to_string())),
+            Err(e) => return Err(adapt(e)),
         };
-        let modified = meta
-            .modified()
-            .map_err(|e| PortError::Adapter(e.to_string()))?;
+        let modified = meta.modified().map_err(adapt)?;
         Ok(FileStamp {
             modified,
             len: meta.len(),
@@ -232,13 +227,13 @@ impl VaultStore for LocalFsStore {
         match fs::read_to_string(&path) {
             Ok(s) => Ok(Some(s)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(PortError::Adapter(e.to_string())),
+            Err(e) => Err(adapt(e)),
         }
     }
 
     fn write_meta(&self, data: &str) -> Result<(), PortError> {
         let dir = ensure_cairn_dir(&self.root)?;
-        fs::write(dir.join("state.json"), data).map_err(|e| PortError::Adapter(e.to_string()))
+        fs::write(dir.join("state.json"), data).map_err(adapt)
     }
 
     fn quarantine_meta(&self) -> Result<Option<String>, PortError> {
@@ -257,7 +252,7 @@ impl VaultStore for LocalFsStore {
             dst = dir.join(format!("state.json.corrupt.{n}"));
             n += 1;
         }
-        fs::rename(&src, &dst).map_err(|e| PortError::Adapter(e.to_string()))?;
+        fs::rename(&src, &dst).map_err(adapt)?;
         Ok(Some(dst.display().to_string()))
     }
 }
