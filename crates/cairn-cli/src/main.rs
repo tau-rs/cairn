@@ -4,11 +4,12 @@ use std::io::Write;
 use std::path::Path;
 use std::process::ExitCode;
 
-use cairn_app::{Engine, Event, EventSink};
+use cairn_app::{Event, EventSink};
 use cairn_contract::{Command as WireCommand, CommandResponse, Query as WireQuery, QueryResponse};
-use cairn_infra::{GitVcs, LocalFsStore, NotifyWatcher, TantivyIndex, MIN_QUERY_CHARS};
+use cairn_infra::{NotifyWatcher, MIN_QUERY_CHARS};
 use cairn_ports::Watcher;
 use cairn_service::{app_event_to_wire, dispatch_command, dispatch_query, run_watch_loop};
+use cairn_startup::{build_engine, ensure_cairn};
 use clap::{Parser, Subcommand};
 
 /// Renders engine events for `cairn watch`. Generic over the writer so it is
@@ -163,13 +164,6 @@ fn short_query_hint(query: &str) -> Option<String> {
     }
 }
 
-fn build_engine(root: &Path) -> Result<Engine<LocalFsStore, TantivyIndex, GitVcs>, String> {
-    let store = LocalFsStore::open(root).map_err(|e| e.to_string())?;
-    let vcs = GitVcs::open_or_init(root).map_err(|e| e.to_string())?;
-    let index = TantivyIndex::in_memory().map_err(|e| e.to_string())?;
-    Ok(Engine::new(store, index, vcs))
-}
-
 fn run() -> Result<(), String> {
     let cli = Cli::parse();
     let root = cli.cairn;
@@ -177,18 +171,14 @@ fn run() -> Result<(), String> {
 
     // Only `init` may create a new cairn. Every other command requires an
     // existing one, so we never silently `git init` in the user's directory.
-    // `.git` is a dir in a normal repo but a file in worktrees/submodules.
-    // Capture this before `build_engine`'s `open_or_init` would create it, so
-    // `init` can tell a created cairn from a no-op (D9).
-    let is_cairn = root.join(".git").exists();
-    if !matches!(cli.command, Command::Init) && !is_cairn {
-        return Err(format!(
-            "not a cairn at {0} (run `cairn --cairn {0} init` first)",
-            root.display()
-        ));
+    // Capture cairn-ness before `build_engine`'s `open_or_init` would create
+    // `.git`, so `init` can tell a created cairn from a no-op (D9).
+    let is_cairn = cairn_startup::is_cairn(&root);
+    if !matches!(cli.command, Command::Init) {
+        ensure_cairn(&root).map_err(|e| e.to_string())?;
     }
 
-    let mut engine = build_engine(&root)?;
+    let mut engine = build_engine(&root).map_err(|e| e.to_string())?;
     // Build the search index only for commands that need it (D2): a full
     // reindex is O(vault) work and a full disk read, wasted on a one-shot
     // `read`, `commit`, or `backlinks`.

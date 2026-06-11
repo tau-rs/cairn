@@ -1,0 +1,17 @@
+[package]
+name = "cairn-startup"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+cairn-app = { path = "../cairn-app" }
+cairn-infra = { path = "../cairn-infra" }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

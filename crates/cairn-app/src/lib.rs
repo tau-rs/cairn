@@ -58,23 +58,34 @@ impl EventSink for Vec<Event> {
 }
 
 /// The engine: owns the ports and runs use-cases.
-pub struct Engine<S, I, V> {
-    store: S,
-    index: I,
-    vcs: V,
+///
+/// The ports are held as boxed trait objects (like `plugins`), so the engine is
+/// one concrete type rather than generic over its adapters. The daemon and CLI
+/// pin a single concrete tuple anyway, and tests still substitute fakes through
+/// `Engine::new`'s `impl Trait` parameters. The `+ Send` bound keeps `Engine:
+/// Send` so the daemon can hold it behind `Arc<Mutex<…>>`.
+pub struct Engine {
+    store: Box<dyn VaultStore + Send>,
+    index: Box<dyn SearchIndex + Send>,
+    vcs: Box<dyn Vcs + Send>,
     memo: HashMap<NotePath, u64>,
     stamps: HashMap<NotePath, FileStamp>,
     notes_cache: RefCell<Option<HashMap<NotePath, Note>>>,
     plugins: Box<dyn PluginHost>,
 }
 
-impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
-    /// Construct an engine from its ports.
-    pub fn new(store: S, index: I, vcs: V) -> Self {
+impl Engine {
+    /// Construct an engine from its ports. Generic at the constructor so callers
+    /// pass concrete adapters (or test fakes); the ports are boxed internally.
+    pub fn new(
+        store: impl VaultStore + Send + 'static,
+        index: impl SearchIndex + Send + 'static,
+        vcs: impl Vcs + Send + 'static,
+    ) -> Self {
         Self {
-            store,
-            index,
-            vcs,
+            store: Box::new(store),
+            index: Box::new(index),
+            vcs: Box::new(vcs),
             memo: HashMap::new(),
             stamps: HashMap::new(),
             notes_cache: RefCell::new(None),
@@ -595,12 +606,12 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
 /// Bridges plugin host-callbacks to engine operations. Held only for the duration
 /// of a single `invoke_plugin_command` or `dispatch_plugin_event`, while
 /// `self.plugins` is a `NoopPluginHost`.
-struct EngineCallbacks<'a, S, I, V> {
-    engine: &'a mut Engine<S, I, V>,
+struct EngineCallbacks<'a> {
+    engine: &'a mut Engine,
     sink: &'a mut dyn EventSink,
 }
 
-impl<S: VaultStore, I: SearchIndex, V: Vcs> PluginCallbacks for EngineCallbacks<'_, S, I, V> {
+impl PluginCallbacks for EngineCallbacks<'_> {
     fn read_note(&mut self, path: &str) -> Result<String, PortError> {
         let np = NotePath::new(path)
             .map_err(|e| PortError::NotFound(format!("invalid note path {path}: {e}")))?;
@@ -849,7 +860,7 @@ mod tests {
         assert!(e2.is_empty());
     }
 
-    fn engine(dir: &std::path::Path) -> Engine<LocalFsStore, InMemoryIndex, GitVcs> {
+    fn engine(dir: &std::path::Path) -> Engine {
         Engine::new(
             LocalFsStore::open(dir).unwrap(),
             InMemoryIndex::default(),

@@ -8,7 +8,7 @@ use tower::ServiceExt; // for `oneshot`
 // A realistic 64-hex token, matching what the daemon generates at startup.
 const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-fn engine(dir: &std::path::Path) -> Engine<LocalFsStore, TantivyIndex, GitVcs> {
+fn engine(dir: &std::path::Path) -> Engine {
     Engine::new(
         LocalFsStore::open(dir).unwrap(),
         TantivyIndex::in_memory().unwrap(),

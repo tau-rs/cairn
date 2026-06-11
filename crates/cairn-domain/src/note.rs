@@ -22,6 +22,15 @@ impl NotePath {
         if norm.starts_with('/') {
             return Err(NotePathError::Absolute);
         }
+        // A Windows drive prefix (`C:\foo` -> `C:/foo`, or drive-relative `C:foo`).
+        // `std::path::Component` would not catch this on a non-Windows host (it
+        // parses `C:` as a normal component there), so check lexically — a cairn
+        // authored on any platform must reject the same paths. (UNC roots like
+        // `\\host\share` normalize to `//host/share` and are caught above.)
+        let bytes = norm.as_bytes();
+        if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+            return Err(NotePathError::Absolute);
+        }
         for seg in norm.split('/') {
             if seg == ".." {
                 return Err(NotePathError::Escapes);
@@ -231,6 +240,25 @@ mod tests {
         assert_eq!(NotePath::new("/etc/passwd"), Err(NotePathError::Absolute));
         assert_eq!(NotePath::new("../secret"), Err(NotePathError::Escapes));
         assert_eq!(NotePath::new(""), Err(NotePathError::Empty));
+    }
+
+    #[test]
+    fn rejects_windows_drive_and_unc_roots() {
+        // Drive-absolute: `C:\secret` -> normalized `C:/secret`. The pre-existing
+        // `starts_with('/')` check misses this; a lexical drive-prefix guard catches it.
+        assert_eq!(NotePath::new(r"C:\secret"), Err(NotePathError::Absolute));
+        // Drive-relative (`C:secret`, no separator) is equally not a note path.
+        assert_eq!(NotePath::new("C:secret"), Err(NotePathError::Absolute));
+        // Lowercase drive letter.
+        assert_eq!(NotePath::new(r"d:\x"), Err(NotePathError::Absolute));
+        // Already-forward-slashed input (no backslashes to normalize) is caught
+        // by the same guard, not just the `C:\...` spelling.
+        assert_eq!(NotePath::new("C:/secret"), Err(NotePathError::Absolute));
+        // UNC root: `\\host\share` -> `//host/share`, already absolute. Locked in here.
+        assert_eq!(NotePath::new(r"\\host\share"), Err(NotePathError::Absolute));
+        // A colon mid-segment is NOT a drive prefix; only a leading `<letter>:`
+        // is a drive spec, so an ordinary nested path stays accepted.
+        assert_eq!(NotePath::new("a/b.md").unwrap().as_str(), "a/b.md");
     }
 
     #[test]

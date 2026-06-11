@@ -7,6 +7,7 @@ members = [
     "crates/cairn-ports",
     "crates/cairn-infra",
     "crates/cairn-app",
+    "crates/cairn-startup",
     "crates/cairn-contract",
     "crates/cairn-service",
     "crates/cairn-cli",

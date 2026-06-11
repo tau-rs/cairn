@@ -25,18 +25,14 @@ use cairn_app::{Engine, Event as AppEvent, EventSink};
 use cairn_contract::{
     Command, CommandResponse, ContractError, Event as WireEvent, Query, QueryResponse,
 };
-use cairn_infra::{GitVcs, LocalFsStore, TantivyIndex};
 use cairn_service::{app_event_to_wire, dispatch_command, dispatch_query, ServiceError};
 use tokio::sync::broadcast;
 use tracing::Instrument;
 
-/// The concrete engine the daemon serves.
-pub type CairnEngine = Engine<LocalFsStore, TantivyIndex, GitVcs>;
-
 /// Shared daemon state: the engine behind a mutex + an event broadcast.
 #[derive(Clone)]
 pub struct AppState {
-    engine: Arc<Mutex<CairnEngine>>,
+    engine: Arc<Mutex<Engine>>,
     events: broadcast::Sender<WireEvent>,
     /// Origins permitted to open the `/events` WebSocket. Same allowlist the
     /// CORS layer enforces; empty denies all (deny-by-default).
@@ -82,7 +78,7 @@ fn to_plugin_event(event: &AppEvent) -> Option<cairn_ports::PluginEvent> {
 impl AppState {
     /// Build state from an engine.
     #[must_use]
-    pub fn new(engine: CairnEngine) -> Self {
+    pub fn new(engine: Engine) -> Self {
         // 256 comfortably exceeds any realistic per-command event burst;
         // slow subscribers lag-drop rather than back-pressure the engine.
         let (events, _rx) = broadcast::channel(256);
@@ -117,7 +113,7 @@ impl AppState {
     /// poisoning DoS). The data behind the lock is a single engine whose
     /// invariants are re-established on the next operation, so recovering the
     /// guard and continuing is correct.
-    fn engine(&self) -> std::sync::MutexGuard<'_, CairnEngine> {
+    fn engine(&self) -> std::sync::MutexGuard<'_, Engine> {
         self.engine.lock().unwrap_or_else(|e| e.into_inner())
     }
 
