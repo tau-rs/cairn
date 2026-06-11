@@ -44,3 +44,4 @@ notify = "8"
 notify-debouncer-full = "0.7"
 tower-http = { version = "0.6", features = ["cors"] }
 toml = "1"
+getrandom = "0.3"

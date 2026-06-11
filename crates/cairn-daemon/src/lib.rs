@@ -1,9 +1,13 @@
-//! HTTP + WebSocket transport over the cairn dispatcher. Binds localhost
-//! only; no authentication (LoopbackTrust). The engine runs synchronously
+//! HTTP + WebSocket transport over the cairn dispatcher. Binds localhost only.
+//! `/command` and `/query` require a local bearer token (audit S5; see the
+//! `auth` module and [`AppState::with_token`]). The engine runs synchronously
 //! under a mutex via `spawn_blocking`.
 
 pub mod config;
 pub use config::Config;
+
+mod auth;
+pub use auth::generate_token_file;
 
 use std::sync::{Arc, Mutex};
 
@@ -36,6 +40,10 @@ pub struct AppState {
     /// Origins permitted to open the `/events` WebSocket. Same allowlist the
     /// CORS layer enforces; empty denies all (deny-by-default).
     allowed_origins: Arc<[String]>,
+    /// Bearer token required on `/command` and `/query`. `None` disables auth
+    /// (the in-process/library/test default); the `cairn-daemon` binary always
+    /// sets a token via [`AppState::with_token`].
+    token: Option<Arc<str>>,
 }
 
 /// An `EventSink` that republishes engine events as wire events.
@@ -81,6 +89,7 @@ impl AppState {
             engine: Arc::new(Mutex::new(engine)),
             events,
             allowed_origins: Arc::from([]),
+            token: None,
         }
     }
 
@@ -89,6 +98,14 @@ impl AppState {
     #[must_use]
     pub fn with_allowed_origins(mut self, origins: Vec<String>) -> Self {
         self.allowed_origins = Arc::from(origins.into_boxed_slice());
+        self
+    }
+
+    /// Require this bearer token on `/command` and `/query`. Reuse the same
+    /// optional-builder shape as [`AppState::with_allowed_origins`].
+    #[must_use]
+    pub fn with_token(mut self, token: impl Into<Arc<str>>) -> Self {
+        self.token = Some(token.into());
         self
     }
 
@@ -298,13 +315,22 @@ pub fn cors_layer(origins: &[String]) -> tower_http::cors::CorsLayer {
 }
 
 /// Build the axum router for the given state.
+///
+/// `/command` and `/query` require the bearer token (audit S5). `/health` is an
+/// open liveness probe; `/events` keeps its own Origin gate (audit S2) and is
+/// not token-gated in this increment.
 pub fn build_router(state: AppState) -> Router {
-    Router::new()
+    let protected = Router::new()
         .route("/command", post(command_handler))
         .route("/query", post(query_handler))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_token,
+        ));
+    let open = Router::new()
         .route("/events", get(events_handler))
-        .route("/health", get(health_handler))
-        .with_state(state)
+        .route("/health", get(health_handler));
+    protected.merge(open).with_state(state)
 }
 
 #[cfg(test)]

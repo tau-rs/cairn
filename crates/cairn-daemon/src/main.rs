@@ -127,9 +127,22 @@ async fn run() -> Result<(), String> {
         println!("CORS: allowing {}", cors_origins.join(", "));
     }
 
+    // Local bearer token: written to <cairn>/.cairn/token (mode 0600) and
+    // regenerated each startup. Any client with filesystem access to the cairn
+    // reads it and sends `Authorization: Bearer <token>` (audit S5). A write
+    // failure is fatal — the daemon never serves unauthenticated.
+    let token = cairn_daemon::generate_token_file(&cli.cairn)
+        .map_err(|e| format!("write daemon token: {e}"))?;
+    println!(
+        "auth: bearer token at {}/.cairn/token (clients read this file)",
+        cli.cairn.display()
+    );
+
     // The same allowlist gates the /events WS upgrade (browsers bypass CORS on
     // WebSocket handshakes; see events_handler).
-    let state = AppState::new(engine).with_allowed_origins(cors_origins.clone());
+    let state = AppState::new(engine)
+        .with_allowed_origins(cors_origins.clone())
+        .with_token(token);
     let app = build_router(state.clone()).layer(cors_layer(&cors_origins));
 
     if !cli.no_watch {
