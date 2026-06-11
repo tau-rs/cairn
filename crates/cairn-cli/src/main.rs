@@ -128,7 +128,7 @@ enum Command {
     },
 }
 
-fn build_engine(root: &Path) -> Result<Engine<LocalFsStore, TantivyIndex, GitVcs>, String> {
+fn build_engine(root: &Path) -> Result<Engine, String> {
     let store = LocalFsStore::open(root).map_err(|e| e.to_string())?;
     let vcs = GitVcs::open_or_init(root).map_err(|e| e.to_string())?;
     let index = TantivyIndex::in_memory().map_err(|e| e.to_string())?;

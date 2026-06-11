@@ -7,7 +7,7 @@ use cairn_contract::{
     PluginCommandSummary, PluginSummary, Query, QueryResponse, Revision, SearchResult, TagCount,
 };
 use cairn_domain::NotePath;
-use cairn_ports::{FsChange, PortError, SearchIndex, VaultStore, Vcs, WatchHandle};
+use cairn_ports::{FsChange, PortError, WatchHandle};
 
 /// Drain a watch handle until its sender drops, invoking `on_change` for each
 /// debounced change. Blocking — run on a dedicated thread (CLI `watch`) or via
@@ -86,8 +86,8 @@ fn parse_path(raw: &str) -> Result<NotePath, ServiceError> {
 /// Returns [`ServiceError`] on invalid input or engine failure.
 /// Callers serving a wire transport map the error via
 /// [`ContractError::from`].
-pub fn dispatch_command<S: VaultStore, I: SearchIndex, V: Vcs>(
-    engine: &mut Engine<S, I, V>,
+pub fn dispatch_command(
+    engine: &mut Engine,
     command: &Command,
     sink: &mut dyn EventSink,
 ) -> Result<CommandResponse, ServiceError> {
@@ -134,10 +134,7 @@ pub fn dispatch_command<S: VaultStore, I: SearchIndex, V: Vcs>(
 /// Returns [`ServiceError`] on invalid input or engine failure.
 /// Callers serving a wire transport map the error via
 /// [`ContractError::from`].
-pub fn dispatch_query<S: VaultStore, I: SearchIndex, V: Vcs>(
-    engine: &Engine<S, I, V>,
-    query: &Query,
-) -> Result<QueryResponse, ServiceError> {
+pub fn dispatch_query(engine: &Engine, query: &Query) -> Result<QueryResponse, ServiceError> {
     match query {
         Query::GetNote { path } => {
             let p = parse_path(path)?;
@@ -261,7 +258,7 @@ mod tests {
     use super::*;
     use cairn_infra::{GitVcs, InMemoryIndex, LocalFsStore};
 
-    fn engine(dir: &std::path::Path) -> Engine<LocalFsStore, InMemoryIndex, GitVcs> {
+    fn engine(dir: &std::path::Path) -> Engine {
         Engine::new(
             LocalFsStore::open(dir).unwrap(),
             InMemoryIndex::default(),
