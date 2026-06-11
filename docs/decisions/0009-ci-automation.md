@@ -1,6 +1,6 @@
 # ADR-0009: CI automation + CI philosophy
 
-**Status:** Accepted
+**Status:** Accepted (Decision 1 superseded 2026-06-11 — see Update below)
 **Date:** 2026-06-10
 
 ## Context
@@ -44,6 +44,25 @@ spurious ✗, not unblocking a merge.
 
 **4. Both workflows are independently revertable.** Two standalone files, neither
 wired into `ci-summary` or branch protection; either can be deleted in isolation.
+
+## Update — 2026-06-11: merge queue enabled, `auto-update-prs` retired
+
+Decision 1 is now superseded. The "Enable the full GitHub merge queue" alternative —
+deferred below as out of scope — was adopted. A `main-merge-queue` repository ruleset
+(mirroring tau's: `SQUASH` merge method, `ALLGREEN` grouping, build/merge batch of 5,
+5-min batch window, 60-min check timeout) now requires every merge to `main` to pass
+through GitHub's merge queue. The queue builds each PR against the *current* `main` in
+a temporary ref and runs CI (via the existing `merge_group` trigger) on that combined
+result before merging.
+
+This makes `auto-update-prs.yml` redundant: PRs no longer need to be up to date with
+`main` before merging, because the queue does the integration build itself. The
+workflow is therefore **removed** in this change. The friction-reduction *goal* of
+Decision 1 stands — the merge queue is a strictly better mechanism for it (it also
+catches semantic conflicts between independently-green PRs, which serial
+auto-updating could not). `auto-rerun-flaky.yml` (Decision 3) is unaffected and
+stays. Classic branch protection is left in place; the ruleset layers on top of it,
+matching tau's setup.
 
 ## The cairn CI baseline (documented here for the first time)
 
@@ -89,9 +108,10 @@ no untrusted PR/issue text reaches a shell command.
   without the cost.
 - **Flip `retries = 0` → `2` to match tau.** Rejected: cairn intentionally surfaces
   flakes as signal; this ADR reaffirms that.
-- **Enable the full GitHub merge queue.** Out of scope — cairn already has the
-  `merge_group` trigger; turning the queue on is a separate branch-protection
-  decision.
+- **Enable the full GitHub merge queue.** Out of scope at the time of this ADR —
+  cairn already had the `merge_group` trigger, but turning the queue on was a
+  separate branch-protection decision. **Adopted 2026-06-11** (see Update above),
+  which supersedes the `auto-update-prs.yml` half of Decision 1.
 
 ## References
 
