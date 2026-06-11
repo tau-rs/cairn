@@ -507,12 +507,13 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
     /// Invoke a plugin command, servicing any host-callbacks it makes mid-invoke.
     ///
     /// The host is moved out of `self` for the duration (see below). If the host
-    /// *panics*, `self.plugins` is left as a [`NoopPluginHost`] rather than
-    /// restored — accepted, since a panicking host already implies a poisoned
-    /// engine (no `catch_unwind` guard).
+    /// *panics*, the unwind is caught and surfaced as [`PortError::Adapter`], and
+    /// the host is restored — a panicking plugin must not unwind through the
+    /// daemon's locked engine and poison the mutex (audit: mutex-poisoning DoS).
     ///
     /// # Errors
-    /// Propagates [`PortError`] from the plugin host.
+    /// Propagates [`PortError`] from the plugin host, or [`PortError::Adapter`]
+    /// if the host panicked.
     pub fn invoke_plugin_command(
         &mut self,
         plugin: &str,
@@ -524,22 +525,34 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
         // the callbacks handler can then borrow the rest of `self` (the store) to
         // service host-callbacks the plugin sends mid-invoke.
         let mut host = std::mem::replace(&mut self.plugins, Box::new(NoopPluginHost));
-        let result = {
+        // Catch a panicking host so it surfaces as an error instead of unwinding
+        // through the daemon's locked engine (which would poison the mutex and
+        // brick the daemon). `self`/`host` are only borrowed for the call, so
+        // `AssertUnwindSafe` is sound: on panic the engine's `RefCell` borrow
+        // guards unwind cleanly and `host` (owned here, not by the closure) is
+        // restored below.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut cb = EngineCallbacks { engine: self, sink };
             host.invoke(plugin, command, args, &mut cb)
             // cb is dropped here, releasing the &mut self borrow
-        };
+        }));
         self.plugins = host;
-        result
+        result.unwrap_or_else(|_| Err(PortError::Adapter("plugin host panicked".into())))
     }
 
     /// Deliver a cairn event to subscribed plugins (best-effort). Event-handler
     /// callbacks route through the engine, and any events they emit go to `sink`.
     pub fn dispatch_plugin_event(&mut self, event: &PluginEvent, sink: &mut dyn EventSink) {
         let mut host = std::mem::replace(&mut self.plugins, Box::new(NoopPluginHost));
-        {
+        // Catch a panicking host (see `invoke_plugin_command`) so a plugin can't
+        // poison the daemon's engine mutex via event dispatch. Best-effort: this
+        // method has no error channel, so a panic is logged and swallowed.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut cb = EngineCallbacks { engine: self, sink };
             host.dispatch_event(event, &mut cb);
+        }));
+        if outcome.is_err() {
+            eprintln!("plugin host panicked handling event {event:?}");
         }
         self.plugins = host;
     }
@@ -1247,5 +1260,46 @@ mod tests {
         eng.restore_note(&a, &v1_rev, &mut events).unwrap();
         assert_eq!(eng.read_note(&a).unwrap(), "v1");
         assert!(events.contains(&Event::NoteChanged(a.clone())));
+    }
+
+    /// A host whose invoke panics — simulates a buggy or malicious plugin host.
+    struct PanickingHost;
+    impl PluginHost for PanickingHost {
+        fn plugins(&self) -> Vec<PluginInfo> {
+            vec![PluginInfo {
+                id: "boom".into(),
+                name: "boom".into(),
+                version: "0".into(),
+                commands: Vec::new(),
+            }]
+        }
+        fn invoke(
+            &mut self,
+            _plugin: &str,
+            _command: &str,
+            _args: &serde_json::Value,
+            _callbacks: &mut dyn cairn_ports::PluginCallbacks,
+        ) -> Result<serde_json::Value, PortError> {
+            panic!("plugin host panicked mid-invoke");
+        }
+    }
+
+    #[test]
+    fn plugin_panic_is_caught_and_engine_survives() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut events = Vec::new();
+        let a = NotePath::new("a.md").unwrap();
+        eng.write_note(&a, "hello body", &mut events).unwrap();
+
+        eng.set_plugin_host(Box::new(PanickingHost));
+        let mut sink: Vec<Event> = Vec::new();
+        // The panic must surface as an error, not unwind through the caller (which,
+        // in the daemon, holds the engine mutex — an unwind would poison it).
+        let res = eng.invoke_plugin_command("boom", "x", &serde_json::Value::Null, &mut sink);
+        assert!(matches!(res, Err(PortError::Adapter(_))));
+
+        // The engine is still usable afterward — its state was not corrupted.
+        assert_eq!(eng.read_note(&a).unwrap(), "hello body");
     }
 }
