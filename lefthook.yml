@@ -4,34 +4,38 @@
 #   - pre-commit: fast checks (fmt + clippy + tests), parallel
 #   - pre-push:   the full CI gate, including the locked MSRV build
 #
-# Install once:  brew install lefthook && lefthook install
-# Bypass (emergencies): git commit --no-verify  /  git push --no-verify
+# Each command shells through a `just` verb — the SAME verbs ci.yml runs — so
+# "passes locally" and "passes in CI" cannot drift (audit D5). The justfile
+# recipe carries only the cargo string; lefthook supplies the environment
+# (CARGO_INCREMENTAL=0 + a per-command CARGO_TARGET_DIR) so each hook keeps its
+# own isolated target dir and never collides with your normal `target/`.
 #
-# Target dirs are isolated per command so they don't collide with your
-# normal `target/`.
+# Install once:  brew install just lefthook && lefthook install
+# Bypass (emergencies): git commit --no-verify  /  git push --no-verify
 
 pre-commit:
   parallel: true
   commands:
     fmt:
       glob: "*.rs"
-      run: env CARGO_TARGET_DIR=target/lefthook/fmt cargo fmt --all -- --check
+      run: env CARGO_TARGET_DIR=target/lefthook/fmt just fmt
     clippy:
       glob: "*.{rs,toml}"
-      run: env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=target/lefthook/clippy cargo clippy --workspace --all-targets --locked -- -D warnings
+      run: env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=target/lefthook/clippy just lint
     test:
       glob: "*.{rs,toml}"
       # Unset CARGO_TARGET_DIR / GIT_* so test fixtures that shell out to
       # git or spawn nested cargo builds operate on their own tmpdirs, not
-      # the host repo; isolate nextest's own output via --target-dir.
-      run: bash -c 'unset CARGO_TARGET_DIR GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_NAMESPACE && env CARGO_INCREMENTAL=0 cargo nextest run --workspace --all-targets --target-dir target/lefthook/test'
+      # the host repo; isolate nextest's own output via the forwarded
+      # --target-dir (`just test` passes extra args straight to nextest).
+      run: bash -c 'unset CARGO_TARGET_DIR GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_NAMESPACE && env CARGO_INCREMENTAL=0 just test --target-dir target/lefthook/test'
 
 pre-push:
   parallel: true
   commands:
     doc-tests:
-      run: env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=target/lefthook/doc cargo test --workspace --doc
+      run: env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=target/lefthook/doc just doc-test
     locked-check:
       # Mirrors CI's locked-check: fails if Cargo.lock drifts off the
       # Rust 1.88 MSRV pin.
-      run: env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=target/lefthook/locked cargo check --workspace --all-targets --locked
+      run: env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=target/lefthook/locked just locked-check

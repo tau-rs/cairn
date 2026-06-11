@@ -4,10 +4,7 @@
 
 ## Test plan
 
-- [ ] Local gate is green:
-      `cargo fmt --all -- --check`,
-      `cargo clippy --workspace --all-targets --locked -- -D warnings`,
-      `cargo test --workspace --locked`.
+- [ ] Local gate is green: `just ci` (the same verbs CI runs).
 - [ ] If CI behavior changes, the workflow file is updated and validated.
 
 ## ADR check

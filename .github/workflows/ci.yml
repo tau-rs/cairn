@@ -35,7 +35,8 @@ jobs:
         with:
           components: rustfmt
           shared-key: linux
-      - run: cargo fmt --all -- --check
+          with-just: true
+      - run: just fmt
 
   clippy:
     name: clippy
@@ -48,7 +49,8 @@ jobs:
           shared-key: linux
           with-sccache: true
           with-mold: true
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+          with-just: true
+      - run: just lint
 
   cargo-deny:
     name: cargo-deny
@@ -76,7 +78,8 @@ jobs:
           with-nextest: true
           with-sccache: true
           with-mold: true
-      - run: cargo nextest run --profile ci --workspace --all-targets
+          with-just: true
+      - run: just test
 
   doc-tests:
     name: doc-tests / linux
@@ -88,9 +91,10 @@ jobs:
           shared-key: linux
           with-sccache: true
           with-mold: true
+          with-just: true
       # nextest does not run doctests; cover them here (Linux is enough —
       # no OS-specific doc examples in this workspace).
-      - run: cargo test --workspace --doc
+      - run: just doc-test
 
   locked-check:
     # Guards the Cargo.lock MSRV pin: a `cargo update` / Dependabot bump
@@ -105,7 +109,8 @@ jobs:
         with:
           with-mold: true
           shared-key: linux
-      - run: cargo check --workspace --all-targets --locked
+          with-just: true
+      - run: just locked-check
 
   ci-summary:
     # Single aggregated status for branch protection: require this one
