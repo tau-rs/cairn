@@ -457,5 +457,8 @@ fn trusted_dir_with_mismatched_manifest_id_is_rejected() {
     let host =
         ProcessPluginHost::load(&plugins, &TrustedPlugins::from_ids(["example".to_string()]))
             .unwrap();
-    assert!(host.plugins().is_empty(), "id-mismatched plugin must not load");
+    assert!(
+        host.plugins().is_empty(),
+        "id-mismatched plugin must not load"
+    );
 }

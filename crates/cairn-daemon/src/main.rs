@@ -107,7 +107,8 @@ async fn run() -> Result<(), String> {
             cli.cairn.display()
         );
     }
-    match cairn_infra::ProcessPluginHost::load_with_timeout(&plugins_dir, plugin_timeout, &trusted) {
+    match cairn_infra::ProcessPluginHost::load_with_timeout(&plugins_dir, plugin_timeout, &trusted)
+    {
         Ok(host) => {
             engine.set_plugin_host(Box::new(host));
             println!("plugins: read timeout {plugin_timeout:?}");
