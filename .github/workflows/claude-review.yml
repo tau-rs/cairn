@@ -31,6 +31,11 @@ concurrency:
   group: claude-review-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
+# Default to no permissions at the workflow level; the `review-pr` job below
+# elevates only the scopes the action needs. Any future job added without
+# its own block inherits this deny-all default.
+permissions: {}
+
 jobs:
   review-pr:
     name: review PR
@@ -49,11 +54,11 @@ jobs:
       id-token: write
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0
 
-      - uses: anthropics/claude-code-action@beta
+      - uses: anthropics/claude-code-action@28f83620103c48a57093dcc2837eec89e036bb9f # beta
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # Dependabot PRs run as a Bot actor; allow it so dependency
