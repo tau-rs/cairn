@@ -144,7 +144,7 @@ impl AppState {
             collected: Vec::new(),
         };
         if let Err(e) = guard.apply_change(change, &mut tap) {
-            eprintln!("watch: apply_change failed: {e}");
+            tracing::warn!("watch: apply_change failed: {e}");
             return;
         }
         let collected = tap.collected;
