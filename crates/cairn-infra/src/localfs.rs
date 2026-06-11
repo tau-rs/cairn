@@ -327,9 +327,15 @@ mod tests {
         store.write_meta("second-corruption").unwrap();
         let second = store.quarantine_meta().unwrap().expect("second path");
 
-        assert_ne!(first, second, "second quarantine must not reuse the first path");
+        assert_ne!(
+            first, second,
+            "second quarantine must not reuse the first path"
+        );
         assert_eq!(std::fs::read_to_string(&first).unwrap(), "first-corruption");
-        assert_eq!(std::fs::read_to_string(&second).unwrap(), "second-corruption");
+        assert_eq!(
+            std::fs::read_to_string(&second).unwrap(),
+            "second-corruption"
+        );
     }
 
     #[test]
