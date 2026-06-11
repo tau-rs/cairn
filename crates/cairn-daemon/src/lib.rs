@@ -332,7 +332,10 @@ mod tests {
             panic!("simulated engine panic under lock");
         })
         .join();
-        assert!(state.engine.is_poisoned(), "precondition: mutex is poisoned");
+        assert!(
+            state.engine.is_poisoned(),
+            "precondition: mutex is poisoned"
+        );
 
         // Despite poisoning, a request must still succeed rather than 500 forever.
         let resp = state.run_query_blocking(&Query::ListNotes);
