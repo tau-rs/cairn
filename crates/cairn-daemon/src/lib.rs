@@ -224,14 +224,19 @@ async fn command_handler(State(state): State<AppState>, Json(command): Json<Comm
     );
     async move {
         let start = std::time::Instant::now();
-        let result = tokio::task::spawn_blocking(move || state.run_command_blocking(&command)).await;
+        let result =
+            tokio::task::spawn_blocking(move || state.run_command_blocking(&command)).await;
         let response = service_response(result);
         let span = tracing::Span::current();
         span.record("status", response.status().as_u16());
         span.record("duration_ms", start.elapsed().as_millis() as u64);
         span.record(
             "outcome",
-            if response.status().is_success() { "ok" } else { "error" },
+            if response.status().is_success() {
+                "ok"
+            } else {
+                "error"
+            },
         );
         tracing::info!("request completed");
         response
@@ -259,7 +264,11 @@ async fn query_handler(State(state): State<AppState>, Json(query): Json<Query>) 
         span.record("duration_ms", start.elapsed().as_millis() as u64);
         span.record(
             "outcome",
-            if response.status().is_success() { "ok" } else { "error" },
+            if response.status().is_success() {
+                "ok"
+            } else {
+                "error"
+            },
         );
         tracing::info!("request completed");
         response
