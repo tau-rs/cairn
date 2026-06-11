@@ -1,0 +1,134 @@
+name: sync-template
+
+# Cross-repo anti-drift sync — RECEIVING (pull) side for cairn (audit D6).
+#
+# WHY PULL, NOT PUSH. The canonical CI template lives in `tau-rs/tau`, which is
+# the single source of truth: tau owns the push-side `repo-file-sync-action` and
+# its `.github/sync.yml` deliberately EXCLUDES `sync-template.yml` from
+# propagation so that no sibling repo ever becomes a second writer. Cairn
+# therefore does NOT host a push/source workflow (that would create a second
+# source + a recursion hazard). Instead this workflow PULLS the canonical
+# surface from tau and opens a REVIEWABLE PR in cairn on drift. Benefits:
+#   - cairn owns the merge/decline decision (close the PR to keep a justified
+#     local variation — e.g. cairn's richer T1 OS matrix);
+#   - no cross-repo PAT/secret: it reads a public repo and opens a LOCAL PR with
+#     the default GITHUB_TOKEN;
+#   - drift becomes a visible PR, never a silent push (no auto-merge).
+# This is the brief's "Renovate file-sync" option implemented as a self-hosted,
+# secret-free Actions workflow.
+#
+# IF THE ORG LATER ACTIVATES tau's PUSH DIRECTION (repo-file-sync-action with a
+# REPO_FILE_SYNC_TOKEN that can write to cairn), DISABLE this workflow to avoid
+# duplicate sync PRs. The two directions are mutually exclusive by design.
+#
+# SCOPE OF THE SYNCED SURFACE. Only the byte-shareable policy files where a raw
+# overwrite yields a CORRECT, mergeable PR are synced (see FILES below):
+# `clippy.toml`, `rustfmt.toml`. The crate-bearing workflow bodies
+# (ci.yml / heavy.yml / tier2 / the schedule workflows) are intentionally NOT
+# auto-overwritten: cairn's crate names differ from tau's, so a byte overwrite
+# would produce a broken PR. Their convergence stays manual review until a
+# projen-style YAML generator lands (deferred phase-2, per the brief). Extend
+# FILES by one line once a file is genuinely byte-identical across repos.
+#
+# NOTE: a PR opened with GITHUB_TOKEN does not itself trigger other workflows
+# (GitHub anti-recursion). That is fine for a template-sync PR — the reviewer
+# inspects the diff; CI runs once a human pushes or re-opens.
+
+on:
+  schedule:
+    # Weekly, Monday 05:00 UTC — a real sync run that opens the PR on drift.
+    - cron: "0 5 * * 1"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Log the drift diff without opening a PR"
+        type: boolean
+        default: true
+
+# Serialize syncs without cancelling: a manual dry_run dispatch must NOT cancel
+# an in-flight scheduled run and silently drop that week's drift PR. Queued runs
+# wait their turn (matches the other T3 schedules).
+concurrency:
+  group: sync-template
+  cancel-in-progress: false
+
+permissions:
+  contents: write        # create the sync branch
+  pull-requests: write   # open the reviewable PR
+
+jobs:
+  sync:
+    name: pull canonical template and open a reviewable PR on drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # Source of truth. Pin to a tag/branch you trust; `main` tracks latest.
+      SOURCE_REPO: tau-rs/tau
+      SOURCE_REF: main
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+
+      - name: Pull canonical policy files from the source repo
+        id: pull
+        env:
+          # Byte-shareable policy surface. One path per line; same path in both
+          # repos. Add a line only when a file is truly byte-identical across the
+          # four repos (crate-bearing workflow bodies do NOT qualify — see header).
+          FILES: |
+            clippy.toml
+            rustfmt.toml
+        run: |
+          set -euo pipefail
+          base="https://raw.githubusercontent.com/${SOURCE_REPO}/${SOURCE_REF}"
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            echo "::group::sync $f"
+            tmp="$(mktemp)"
+            if curl -fsSL "$base/$f" -o "$tmp"; then
+              mkdir -p "$(dirname "$f")"
+              mv "$tmp" "$f"
+              echo "pulled $f from ${SOURCE_REPO}@${SOURCE_REF}"
+            else
+              rm -f "$tmp"
+              echo "::warning::source $f not found at ${SOURCE_REPO}@${SOURCE_REF} — left cairn's copy untouched"
+            fi
+            echo "::endgroup::"
+          done <<< "$FILES"
+
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "drift=true" >> "$GITHUB_OUTPUT"
+            echo "Template drift detected:"
+            git --no-pager diff --stat
+            git --no-pager diff
+          else
+            echo "drift=false" >> "$GITHUB_OUTPUT"
+            echo "No drift — cairn is byte-aligned with ${SOURCE_REPO}@${SOURCE_REF} for the synced surface."
+          fi
+
+      - name: Open or update the reviewable sync PR
+        # Real sync on schedule; manual runs honour dry_run (default true), which
+        # stops after logging the diff above. Never opens a PR when there's no drift.
+        if: >-
+          steps.pull.outputs.drift == 'true' &&
+          !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1  # v8.1.1
+        with:
+          branch: ci/sync-template
+          delete-branch: true
+          commit-message: "ci(sync): align lint/policy config with tau-rs/tau"
+          title: "ci(sync): align lint/policy config with tau-rs/tau"
+          labels: |
+            sync
+            ci-template
+          body: |
+            Automated CI template sync — **pull** side (audit D6).
+
+            This PR mirrors the canonical lint/policy surface from
+            [`tau-rs/tau`](https://github.com/tau-rs/tau) (the source of truth) so
+            cairn stays converged. **cairn owns the final decision** — review and
+            merge, or close to keep a justified local variation. Drift is
+            intentionally surfaced as a reviewable PR, never force-pushed or
+            auto-merged.
+
+            Synced surface: `clippy.toml`, `rustfmt.toml`. Crate-bearing workflow
+            bodies are reviewed manually (see `sync-template.yml` header).

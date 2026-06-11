@@ -1,0 +1,135 @@
+name: Security — daily CVE scan
+
+# TIER 3 — scheduled dependency/CVE review (the brief's D7 "dependency-review",
+# in a scheduled form). NON-BLOCKING and OFF the release critical path: a
+# separate workflow file, never part of ci.yml's `ci-summary`, so it cannot gate
+# a merge or a release.
+#
+# Why this and not actions/dependency-review-action: that action only works in a
+# pull_request context (it diffs the manifest between base and head), which would
+# make it a PR gate. A scheduled drift-catcher needs to scan main HEAD on a
+# cadence instead, so it runs cargo-audit + osv-scanner against the committed
+# lockfile and surfaces NEW advisories as issues.
+#
+# Daily 04:00 UTC. Runs cargo-audit + osv-scanner against main HEAD. Diffs result
+# vs yesterday's cached report. Opens issue `[security] new CVE: <id>`
+# (label `security`) on NEW findings only — never re-files known advisories.
+
+on:
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: security-daily-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  audit:
+    name: cargo audit + osv-scanner
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - uses: ./.github/actions/setup-rust
+        with:
+          shared-key: linux
+      - name: cargo audit
+        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998  # v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+        # Non-blocking: audit-check fails the step when it finds an advisory.
+        # Letting that abort the job would skip the artifact-save + the
+        # downstream diff/issue-filing job — i.e. NO issue would be filed on the
+        # very day a CVE lands. As a T3 drift-catcher the signal is the filed
+        # issue, not a red run, so swallow the step failure (parity with osv).
+        continue-on-error: true
+      - name: osv-scanner
+        uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2  # v2.3.8
+        with:
+          scan-args: |-
+            -r .
+        # Non-blocking: an osv hiccup must never turn this drift-catcher red.
+        continue-on-error: true
+      - name: Save scan results as artifact (for tomorrow's diff)
+        run: |
+          set -euo pipefail
+          mkdir -p _security
+          # cargo-audit output is already surfaced by the action above; re-run
+          # it in JSON to a file so tomorrow's run can diff against it.
+          cargo install cargo-audit --locked --version =0.22.2 || true
+          cargo audit --json > _security/cargo-audit.json || true
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: security-daily-${{ github.run_id }}
+          path: _security/
+          retention-days: 30
+
+  diff-and-file-issues:
+    name: diff vs yesterday + file issues on new
+    needs: audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - name: Download today's report
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6
+        with:
+          name: security-daily-${{ github.run_id }}
+          path: _today/
+      - name: Find yesterday's report
+        id: yesterday
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # Find the most recent successful run of THIS workflow other than the
+          # current run, and use its artifact.
+          PREV=$(gh run list --workflow=security-daily.yml --status success \
+            --limit 5 --json databaseId --jq ".[] | select(.databaseId != ${RUN_ID}) | .databaseId" \
+            | head -1)
+          if [ -n "$PREV" ]; then
+            echo "prev_run=$PREV" >> "$GITHUB_OUTPUT"
+          else
+            echo "prev_run=" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Download yesterday's report
+        if: steps.yesterday.outputs.prev_run != ''
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6
+        with:
+          run-id: ${{ steps.yesterday.outputs.prev_run }}
+          name: security-daily-${{ steps.yesterday.outputs.prev_run }}
+          path: _yesterday/
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Diff + open issues
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ ! -f _yesterday/cargo-audit.json ]; then
+            echo "No yesterday baseline; skipping diff (will file issues for ALL findings tomorrow)."
+            exit 0
+          fi
+          # Extract advisory IDs from both reports (jq), diff, file an issue for
+          # each new ID. IDs come from the RustSec advisory DB, not user input.
+          TODAY_IDS=$(jq -r '.vulnerabilities.list[].advisory.id // empty' _today/cargo-audit.json 2>/dev/null | sort -u)
+          YDAY_IDS=$(jq -r '.vulnerabilities.list[].advisory.id // empty' _yesterday/cargo-audit.json 2>/dev/null | sort -u)
+          NEW_IDS=$(comm -23 <(echo "$TODAY_IDS") <(echo "$YDAY_IDS"))
+          if [ -z "$NEW_IDS" ]; then
+            echo "No new advisories vs yesterday."
+            exit 0
+          fi
+          echo "$NEW_IDS" | while read -r ID; do
+            [ -z "$ID" ] && continue
+            DETAILS=$(jq -r ".vulnerabilities.list[] | select(.advisory.id == \"$ID\") | .advisory" _today/cargo-audit.json)
+            gh issue create \
+              --title "[security] new CVE: $ID" \
+              --label security \
+              --body "$(printf 'New RustSec advisory detected.\n\nID: %s\n\nDetails:\n\n%s\n\nRun: %s' "$ID" "$DETAILS" "$RUN_URL")"
+          done

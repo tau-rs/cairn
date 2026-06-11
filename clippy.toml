@@ -1,1 +1,2 @@
-# project-wide clippy config; intentionally minimal for now
+# Empty stub. Clippy lint configuration is added per-need with ADR justification.
+# Lint denial level is set per-crate in lib.rs / main.rs and via CI flags.
