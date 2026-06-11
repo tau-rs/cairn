@@ -157,10 +157,13 @@ async fn run() -> Result<(), String> {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // Default to `info`, but quiet tantivy's per-commit index chatter (it logs
+    // each segment commit/GC at info) so cairn's own logs aren't buried. Any
+    // `RUST_LOG` value fully overrides this default.
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,tantivy=warn")),
         )
         .init();
     match run().await {
