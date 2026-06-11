@@ -29,8 +29,9 @@ jobs:
   fmt:
     name: rustfmt
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: ./.github/actions/setup-rust
         with:
           components: rustfmt
@@ -40,8 +41,9 @@ jobs:
   clippy:
     name: clippy
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: ./.github/actions/setup-rust
         with:
           components: clippy
@@ -53,9 +55,10 @@ jobs:
   cargo-deny:
     name: cargo-deny
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2.0.20
         with:
           command: check
           # advisories + licenses + bans + sources per deny.toml at repo root.
@@ -64,12 +67,13 @@ jobs:
   test:
     name: test / ${{ matrix.os == 'ubuntu-latest' && 'linux' || matrix.os == 'macos-latest' && 'macos' || 'windows' }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: ./.github/actions/setup-rust
         with:
           shared-key: ${{ matrix.os }}
@@ -81,8 +85,9 @@ jobs:
   doc-tests:
     name: doc-tests / linux
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: ./.github/actions/setup-rust
         with:
           shared-key: linux
@@ -99,8 +104,9 @@ jobs:
     # this is also the MSRV build check.
     name: locked-check (MSRV 1.88)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: ./.github/actions/setup-rust
         with:
           with-mold: true
@@ -114,6 +120,7 @@ jobs:
     if: always()
     needs: [fmt, clippy, cargo-deny, test, doc-tests, locked-check]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Require all jobs to have succeeded
         run: |
