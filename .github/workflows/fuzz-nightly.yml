@@ -1,0 +1,149 @@
+name: Fuzz nightly
+
+# cargo-fuzz nightly run for every fuzz harness in the repo.
+#
+# TIER 3 — scheduled drift-catcher. NON-BLOCKING and OFF the release critical
+# path: this is a separate workflow file, never part of ci.yml's `ci-summary`
+# aggregate, so it can never gate a merge or a release. Branch protection
+# requires only `ci-summary`.
+#
+# cargo-fuzz requires nightly Rust + libFuzzer + sanitizers, which are
+# materially different from the stable toolchain pinned in
+# rust-toolchain.toml. Running fuzz on every PR would multiply CI cost and pull
+# a second toolchain into the install surface; the nightly schedule + manual
+# dispatch is the standard pattern.
+#
+# Shared definitions: the fuzz setup (cargo-fuzz `=0.13.2`, libFuzzer flags,
+# corpus caching) is intentionally identical to the fuzz job in the T2
+# `heavy.yml` (session 82). The cross-repo sync mechanism
+# (.github/workflows/sync-template.yml) keeps these aligned — there is NO
+# runtime `workflow_call` coupling between this schedule and the heavy tier, so
+# this workflow stands alone and runs even before `heavy.yml` lands.
+#
+# Each matrix entry runs ONE fuzz target for `target_minutes` minutes
+# (default 10). Corpus is persisted via actions/cache so runs accumulate
+# coverage over time rather than starting from the seed corpus every night.
+#
+# On crash (target exits non-zero), the failing input is uploaded as a
+# workflow artifact for triage and the workflow fails loudly so the user gets
+# the GitHub Actions failure notification.
+#
+# Cairn has no fuzz harnesses merged yet (the parse/validation surfaces flagged
+# in audit/security.md — NotePath parsing, plugin manifest TOML — get their
+# harnesses with the T2 heavy work). Until then each matrix entry SKIPS green
+# via the "fuzz dir absent" precheck, so this workflow is valid and passes today.
+
+on:
+  schedule:
+    # 04:00 UTC daily. Off-peak so it doesn't compete with PR CI for runners.
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+    inputs:
+      target_minutes:
+        description: "Minutes per fuzz target (default 10)"
+        type: string
+        required: false
+        default: "10"
+
+permissions:
+  contents: read
+  # Needed if a future revision uses `gh issue create` to auto-file crash
+  # reports. For now the workflow just fails loudly and the crash input is
+  # uploaded as an artifact.
+  issues: write
+
+concurrency:
+  group: fuzz-nightly
+  cancel-in-progress: false
+
+jobs:
+  fuzz:
+    name: fuzz ${{ matrix.target }} (${{ matrix.crate }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Each entry pairs a fuzz directory with the binary target name
+          # defined in its Cargo.toml (`[[bin]]` section). Targets mirror the
+          # parse/validation surfaces flagged in audit/security.md.
+          - crate: cairn-domain
+            fuzz_dir: crates/cairn-domain/fuzz
+            target: note_path
+          - crate: cairn-plugin-protocol
+            fuzz_dir: crates/cairn-plugin-protocol/fuzz
+            target: manifest_decode
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+
+      - name: Skip if fuzz directory not present
+        id: precheck
+        env:
+          FUZZ_DIR: ${{ matrix.fuzz_dir }}
+        run: |
+          set -euo pipefail
+          if [ ! -f "$FUZZ_DIR/Cargo.toml" ]; then
+            echo "fuzz dir $FUZZ_DIR not present — skipping (harness not yet merged)"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Rust nightly + cargo-fuzz
+        if: steps.precheck.outputs.skip != 'true'
+        uses: dtolnay/rust-toolchain@5b842231ba77f5c045dba54ac5560fed2db780e2  # nightly
+
+      - name: Cache cargo-fuzz binary
+        if: steps.precheck.outputs.skip != 'true'
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        with:
+          path: ~/.cargo/bin/cargo-fuzz
+          key: cargo-fuzz-bin-v1
+
+      - name: Install cargo-fuzz (if not cached)
+        if: steps.precheck.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          if ! command -v cargo-fuzz >/dev/null 2>&1; then
+            cargo +nightly install cargo-fuzz --locked --version =0.13.2
+          else
+            echo "cargo-fuzz already present"
+          fi
+
+      - name: Restore accumulated corpus
+        if: steps.precheck.outputs.skip != 'true'
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        with:
+          # Per-target cache so harnesses don't clobber each other.
+          path: ${{ matrix.fuzz_dir }}/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-${{ matrix.target }}-
+
+      - name: Run fuzz target
+        if: steps.precheck.outputs.skip != 'true'
+        env:
+          FUZZ_DIR: ${{ matrix.fuzz_dir }}
+          TARGET: ${{ matrix.target }}
+          MINUTES: ${{ inputs.target_minutes || '10' }}
+        run: |
+          set -euo pipefail
+          SECONDS_BUDGET=$(( MINUTES * 60 ))
+          echo "Running $TARGET for ${SECONDS_BUDGET}s..."
+          cd "$FUZZ_DIR"
+          # `-print_final_stats=1` flushes counters at end so the log captures
+          # coverage / exec rate even on time-out exit.
+          cargo +nightly fuzz run "$TARGET" -- \
+            -max_total_time="$SECONDS_BUDGET" \
+            -print_final_stats=1
+
+      - name: Upload crash artifacts on failure
+        if: steps.precheck.outputs.skip != 'true' && failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: fuzz-crashes-${{ matrix.target }}-${{ github.run_id }}
+          path: ${{ matrix.fuzz_dir }}/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore
+          retention-days: 30
