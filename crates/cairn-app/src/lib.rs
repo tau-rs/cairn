@@ -3,8 +3,9 @@
 
 use cairn_domain::{rewrite_link_target, Graph, Note, NotePath};
 use cairn_ports::{
-    FileStamp, FsChange, NoopPluginHost, PluginCallbacks, PluginEvent, PluginHost, PluginInfo,
-    PortError, Revision, SearchHit, SearchIndex, VaultStore, Vcs,
+    AdapterError, EventDispatchError, FileStamp, FsChange, NoopPluginHost, PluginCallbacks,
+    PluginEvent, PluginHost, PluginInfo, PortError, Revision, SearchHit, SearchIndex, VaultStore,
+    Vcs,
 };
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -234,7 +235,7 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
             schema_version: STATE_SCHEMA_VERSION,
             entries,
         })
-        .map_err(|e| PortError::Adapter(e.to_string()))?;
+        .map_err(|e| PortError::Adapter(AdapterError::new(e)))?;
         self.store.write_meta(&json)
     }
 
@@ -572,15 +573,22 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
         let mut host = std::mem::replace(&mut self.plugins, Box::new(NoopPluginHost));
         // Catch a panicking host (see `invoke_plugin_command`) so a plugin can't
         // poison the daemon's engine mutex via event dispatch. Best-effort: this
-        // method has no error channel, so a panic is logged and swallowed.
+        // method has no error channel, so failures are logged and swallowed.
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut cb = EngineCallbacks { engine: self, sink };
-            host.dispatch_event(event, &mut cb);
+            host.dispatch_event(event, &mut cb)
         }));
-        if outcome.is_err() {
-            eprintln!("plugin host panicked handling event {event:?}");
-        }
         self.plugins = host;
+        match outcome {
+            // Per-plugin handler errors are reported here rather than dropped
+            // (audit G4), uniformly for every host implementation.
+            Ok(errors) => {
+                for EventDispatchError { plugin, error } in errors {
+                    tracing::warn!(plugin = %plugin, error = %error, "plugin event handler failed");
+                }
+            }
+            Err(_) => tracing::error!(?event, "plugin host panicked handling event"),
+        }
     }
 }
 
@@ -1451,8 +1459,9 @@ mod tests {
             &mut self,
             _event: &cairn_ports::PluginEvent,
             callbacks: &mut dyn cairn_ports::PluginCallbacks,
-        ) {
+        ) -> Vec<EventDispatchError> {
             let _ = callbacks.write_note("seen.md", "seen");
+            Vec::new()
         }
     }
 
@@ -1471,6 +1480,49 @@ mod tests {
             "seen"
         );
         assert!(events.contains(&Event::NoteChanged(NotePath::new("seen.md").unwrap())));
+    }
+
+    /// A host whose event handler fails — surfaces a per-plugin delivery error.
+    struct FailingEventHost;
+    impl PluginHost for FailingEventHost {
+        fn plugins(&self) -> Vec<PluginInfo> {
+            Vec::new()
+        }
+        fn invoke(
+            &mut self,
+            plugin: &str,
+            _command: &str,
+            _args: &serde_json::Value,
+            _callbacks: &mut dyn cairn_ports::PluginCallbacks,
+        ) -> Result<serde_json::Value, PortError> {
+            Err(PortError::NotFound(format!("plugin {plugin}")))
+        }
+        fn dispatch_event(
+            &mut self,
+            _event: &cairn_ports::PluginEvent,
+            _callbacks: &mut dyn cairn_ports::PluginCallbacks,
+        ) -> Vec<EventDispatchError> {
+            vec![EventDispatchError {
+                plugin: "broken-plugin".to_string(),
+                error: PortError::Adapter(AdapterError::message("handler exploded")),
+            }]
+        }
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn dispatch_event_reports_handler_errors() {
+        // A handler error must be logged, not silently dropped (audit G4).
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        eng.set_plugin_host(Box::new(FailingEventHost));
+        let mut events: Vec<Event> = Vec::new();
+        eng.dispatch_plugin_event(
+            &cairn_ports::PluginEvent::NoteChanged(NotePath::new("x.md").unwrap()),
+            &mut events,
+        );
+        assert!(logs_contain("plugin event handler failed"));
+        assert!(logs_contain("broken-plugin"));
     }
 
     #[test]

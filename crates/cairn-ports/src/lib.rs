@@ -9,12 +9,60 @@ pub enum PortError {
     /// The requested note does not exist.
     #[error("note not found: {0}")]
     NotFound(String),
-    /// An underlying adapter failed.
-    #[error("{0}")]
-    Adapter(String),
+    /// An underlying adapter failed. Carries the original adapter error as a
+    /// typed `#[source]` (see [`AdapterError`]) so callers can downcast to the
+    /// cause instead of matching on a flattened message string.
+    #[error(transparent)]
+    Adapter(AdapterError),
     /// The target of a create/rename already exists.
     #[error("already exists: {0}")]
     AlreadyExists(String),
+}
+
+/// An adapter-layer failure. Preserves the original error as a typed `#[source]`
+/// — a `git2::Error`, `std::io::Error`, a Tantivy error — so callers can
+/// `downcast_ref` to the concrete cause (e.g. inspect an [`std::io::ErrorKind`]
+/// or a `git2::ErrorCode`) rather than parsing the `Display` string. Its own
+/// `Display` is the source error's message, so wrapping is transparent to any
+/// caller that only formats the error.
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub struct AdapterError {
+    message: String,
+    #[source]
+    source: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
+}
+
+impl AdapterError {
+    /// Wrap a typed adapter error, preserving it as the recoverable `#[source]`.
+    /// The `Display` is the wrapped error's message.
+    pub fn new(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self {
+            message: source.to_string(),
+            source: Some(Box::new(source)),
+        }
+    }
+
+    /// A message-only adapter failure with no typed cause (e.g. a validation
+    /// message constructed at the boundary, not a wrapped library error).
+    pub fn message(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            source: None,
+        }
+    }
+}
+
+impl From<String> for AdapterError {
+    fn from(message: String) -> Self {
+        Self::message(message)
+    }
+}
+
+impl From<&str> for AdapterError {
+    fn from(message: &str) -> Self {
+        Self::message(message)
+    }
 }
 
 /// Cheap file-change fingerprint: a note's last-modified time and byte length,
@@ -289,6 +337,17 @@ pub enum PluginEvent {
     NoteDeleted(NotePath),
 }
 
+/// A single plugin's failure to handle a dispatched event. Event dispatch is
+/// best-effort and has no caller-facing error channel, so a host returns these
+/// for the engine to log rather than swallowing them silently (audit G4).
+#[derive(Debug)]
+pub struct EventDispatchError {
+    /// The plugin whose handler failed.
+    pub plugin: String,
+    /// The underlying failure.
+    pub error: PortError,
+}
+
 /// Hosts out-of-process plugins. Seam: [`NoopPluginHost`].
 pub trait PluginHost: Send {
     /// The loaded plugins and their declared commands.
@@ -309,8 +368,16 @@ pub trait PluginHost: Send {
 
     /// Deliver a cairn event to every loaded plugin that declared the `events`
     /// capability, servicing any host-callbacks each makes while handling it.
-    /// Best-effort. Default: no-op (a host that doesn't support events ignores them).
-    fn dispatch_event(&mut self, _event: &PluginEvent, _callbacks: &mut dyn PluginCallbacks) {}
+    /// Best-effort: returns any per-plugin handler failures for the caller to
+    /// log (audit G4), rather than swallowing them. Default: no-op (a host that
+    /// doesn't support events ignores them and reports no failures).
+    fn dispatch_event(
+        &mut self,
+        _event: &PluginEvent,
+        _callbacks: &mut dyn PluginCallbacks,
+    ) -> Vec<EventDispatchError> {
+        Vec::new()
+    }
 }
 
 /// No-plugins seam — the engine's default host.
@@ -329,5 +396,38 @@ impl PluginHost for NoopPluginHost {
         _callbacks: &mut dyn PluginCallbacks,
     ) -> Result<serde_json::Value, PortError> {
         Err(PortError::NotFound(format!("plugin {plugin}")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adapter_preserves_typed_source_kind() {
+        // A typed adapter error (here an io::Error) must survive through
+        // PortError::Adapter so callers can downcast to the cause and match on
+        // kind ("lock held" vs "corrupt repo"), not just read a flattened string.
+        let io = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "lock held");
+        let err = PortError::Adapter(AdapterError::new(io));
+
+        // Display is byte-identical to the old flattened message.
+        assert_eq!(err.to_string(), "lock held");
+
+        // ...but the typed cause is recoverable.
+        let source = std::error::Error::source(&err).expect("typed source preserved");
+        let io = source
+            .downcast_ref::<std::io::Error>()
+            .expect("io::Error kind recoverable");
+        assert_eq!(io.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn adapter_message_only_has_no_source() {
+        // A message-only adapter error (validation text, not a wrapped error)
+        // carries no source and still displays its message.
+        let err = PortError::Adapter(AdapterError::from("non-UTF-8 path".to_string()));
+        assert_eq!(err.to_string(), "non-UTF-8 path");
+        assert!(std::error::Error::source(&err).is_none());
     }
 }

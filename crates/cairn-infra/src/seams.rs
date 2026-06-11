@@ -40,9 +40,12 @@ impl CollabSession for NoCollab {
 pub struct NullRuntime;
 impl AgentRuntime for NullRuntime {
     fn run_action(&self, action: &str, _context: Option<&str>) -> Result<String, PortError> {
-        Err(PortError::Adapter(format!(
-            "no agent runtime configured (action '{action}' unavailable until tau is wired)"
-        )))
+        Err(PortError::Adapter(
+            format!(
+                "no agent runtime configured (action '{action}' unavailable until tau is wired)"
+            )
+            .into(),
+        ))
     }
 }
 

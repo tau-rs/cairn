@@ -2,11 +2,11 @@
 
 use std::path::{Path, PathBuf};
 
-use cairn_ports::{PortError, Revision, Vcs};
+use cairn_ports::{AdapterError, PortError, Revision, Vcs};
 use git2::{Repository, Signature};
 
-fn adapt<E: std::fmt::Display>(e: E) -> PortError {
-    PortError::Adapter(e.to_string())
+fn adapt<E: std::error::Error + Send + Sync + 'static>(e: E) -> PortError {
+    PortError::Adapter(AdapterError::new(e))
 }
 
 /// Whether `commit` added/changed/removed the blob at `path` (vs its parents).
@@ -59,9 +59,9 @@ impl GitVcs {
         match Repository::open(&root) {
             Ok(_) => {}
             Err(e) if e.code() == git2::ErrorCode::NotFound => {
-                Repository::init(&root).map_err(|e| PortError::Adapter(e.to_string()))?;
+                Repository::init(&root).map_err(adapt)?;
             }
-            Err(e) => return Err(PortError::Adapter(e.to_string())),
+            Err(e) => return Err(adapt(e)),
         }
         Ok(Self { root })
     }
@@ -69,22 +69,14 @@ impl GitVcs {
 
 impl Vcs for GitVcs {
     fn commit_all(&mut self, message: &str) -> Result<String, PortError> {
-        let repo = Repository::open(&self.root).map_err(|e| PortError::Adapter(e.to_string()))?;
-        let mut index = repo
-            .index()
-            .map_err(|e| PortError::Adapter(e.to_string()))?;
+        let repo = Repository::open(&self.root).map_err(adapt)?;
+        let mut index = repo.index().map_err(adapt)?;
         index
             .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
-            .map_err(|e| PortError::Adapter(e.to_string()))?;
-        index
-            .write()
-            .map_err(|e| PortError::Adapter(e.to_string()))?;
-        let tree_id = index
-            .write_tree()
-            .map_err(|e| PortError::Adapter(e.to_string()))?;
-        let tree = repo
-            .find_tree(tree_id)
-            .map_err(|e| PortError::Adapter(e.to_string()))?;
+            .map_err(adapt)?;
+        index.write().map_err(adapt)?;
+        let tree_id = index.write_tree().map_err(adapt)?;
+        let tree = repo.find_tree(tree_id).map_err(adapt)?;
         let sig = signature_from_config(&repo.config().map_err(adapt)?)?;
 
         let parent = repo
@@ -95,7 +87,7 @@ impl Vcs for GitVcs {
         let parents: Vec<&git2::Commit> = parent.iter().collect();
         let oid = repo
             .commit(Some("HEAD"), &sig, &sig, message, &tree, &parents)
-            .map_err(|e| PortError::Adapter(e.to_string()))?;
+            .map_err(adapt)?;
         Ok(oid.to_string()[..7].to_string())
     }
 
