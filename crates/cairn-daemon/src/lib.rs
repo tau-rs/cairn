@@ -28,6 +28,7 @@ use cairn_contract::{
 use cairn_infra::{GitVcs, LocalFsStore, TantivyIndex};
 use cairn_service::{app_event_to_wire, dispatch_command, dispatch_query, ServiceError};
 use tokio::sync::broadcast;
+use tracing::Instrument;
 
 /// The concrete engine the daemon serves.
 pub type CairnEngine = Engine<LocalFsStore, TantivyIndex, GitVcs>;
@@ -172,7 +173,7 @@ impl AppState {
             collected: Vec::new(),
         };
         if let Err(e) = guard.apply_change(change, &mut tap) {
-            eprintln!("watch: apply_change failed: {e}");
+            tracing::warn!("watch: apply_change failed: {e}");
             return;
         }
         let collected = tap.collected;
@@ -210,14 +211,98 @@ fn service_response<T: serde::Serialize>(
     }
 }
 
+/// The wire `type` tag for a command (matches the serde `rename_all = "snake_case"`),
+/// used as the `command` span field so a logged request matches what a client sent.
+fn command_kind(command: &Command) -> &'static str {
+    match command {
+        Command::WriteNote { .. } => "write_note",
+        Command::DeleteNote { .. } => "delete_note",
+        Command::RenameNote { .. } => "rename_note",
+        Command::Commit { .. } => "commit",
+        Command::RestoreNote { .. } => "restore_note",
+        Command::InvokePluginCommand { .. } => "invoke_plugin_command",
+    }
+}
+
+/// The wire `type` tag for a query (matches the serde `rename_all = "snake_case"`).
+fn query_kind(query: &Query) -> &'static str {
+    match query {
+        Query::GetNote { .. } => "get_note",
+        Query::Search { .. } => "search",
+        Query::GetBacklinks { .. } => "get_backlinks",
+        Query::ListNotes => "list_notes",
+        Query::GetGraph => "get_graph",
+        Query::ListTags => "list_tags",
+        Query::NotesByTag { .. } => "notes_by_tag",
+        Query::ListPlugins => "list_plugins",
+        Query::NoteHistory { .. } => "note_history",
+        Query::NoteAt { .. } => "note_at",
+    }
+}
+
 async fn command_handler(State(state): State<AppState>, Json(command): Json<Command>) -> Response {
-    let result = tokio::task::spawn_blocking(move || state.run_command_blocking(&command)).await;
-    service_response(result)
+    let span = tracing::info_span!(
+        "request",
+        method = "POST",
+        path = "/command",
+        command = command_kind(&command),
+        status = tracing::field::Empty,
+        duration_ms = tracing::field::Empty,
+        outcome = tracing::field::Empty,
+    );
+    async move {
+        let start = std::time::Instant::now();
+        let result =
+            tokio::task::spawn_blocking(move || state.run_command_blocking(&command)).await;
+        let response = service_response(result);
+        let span = tracing::Span::current();
+        span.record("status", response.status().as_u16());
+        span.record("duration_ms", start.elapsed().as_millis() as u64);
+        span.record(
+            "outcome",
+            if response.status().is_success() {
+                "ok"
+            } else {
+                "error"
+            },
+        );
+        tracing::info!("request completed");
+        response
+    }
+    .instrument(span)
+    .await
 }
 
 async fn query_handler(State(state): State<AppState>, Json(query): Json<Query>) -> Response {
-    let result = tokio::task::spawn_blocking(move || state.run_query_blocking(&query)).await;
-    service_response(result)
+    let span = tracing::info_span!(
+        "request",
+        method = "POST",
+        path = "/query",
+        command = query_kind(&query),
+        status = tracing::field::Empty,
+        duration_ms = tracing::field::Empty,
+        outcome = tracing::field::Empty,
+    );
+    async move {
+        let start = std::time::Instant::now();
+        let result = tokio::task::spawn_blocking(move || state.run_query_blocking(&query)).await;
+        let response = service_response(result);
+        let span = tracing::Span::current();
+        span.record("status", response.status().as_u16());
+        span.record("duration_ms", start.elapsed().as_millis() as u64);
+        span.record(
+            "outcome",
+            if response.status().is_success() {
+                "ok"
+            } else {
+                "error"
+            },
+        );
+        tracing::info!("request completed");
+        response
+    }
+    .instrument(span)
+    .await
 }
 
 /// True if `origin` (the request's `Origin` header value) is present and in the

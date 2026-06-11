@@ -76,20 +76,20 @@ async fn run() -> Result<(), String> {
         let index = TantivyIndex::open_at(&index_dir).map_err(|e| e.to_string())?;
         let mut eng = Engine::new(store, index, vcs);
         eng.reconcile(&mut startup).map_err(|e| e.to_string())?;
-        println!("persisting index at {}", index_dir.display());
+        tracing::info!("persisting index at {}", index_dir.display());
         eng
     } else {
         let mut eng = build_engine(&cli.cairn)?;
         eng.reindex(&mut startup).map_err(|e| e.to_string())?;
-        println!("index: in-memory (not persisted)");
+        tracing::info!("index: in-memory (not persisted)");
         eng
     };
 
     // Plugin read timeout: cairn.toml `[plugins] timeout_secs`, else the host default.
     let plugin_timeout = match config.plugins.timeout_secs {
         Some(0) => {
-            eprintln!(
-                "warning: [plugins] timeout_secs = 0 is invalid; using default {:?}",
+            tracing::warn!(
+                "[plugins] timeout_secs = 0 is invalid; using default {:?}",
                 cairn_infra::DEFAULT_PLUGIN_TIMEOUT
             );
             cairn_infra::DEFAULT_PLUGIN_TIMEOUT
@@ -102,7 +102,7 @@ async fn run() -> Result<(), String> {
     let plugins_dir = cli.cairn.join(".cairn").join("plugins");
     let trusted = cairn_infra::TrustedPlugins::from_ids(config.plugins.trusted.clone());
     if config.plugins.trusted.is_empty() {
-        println!(
+        tracing::info!(
             "plugins: none trusted (add [plugins].trusted = [\"<dir>\"] to {}/cairn.toml to enable)",
             cli.cairn.display()
         );
@@ -111,20 +111,20 @@ async fn run() -> Result<(), String> {
     {
         Ok(host) => {
             engine.set_plugin_host(Box::new(host));
-            println!("plugins: read timeout {plugin_timeout:?}");
+            tracing::info!("plugins: read timeout {plugin_timeout:?}");
         }
-        Err(e) => eprintln!("warning: plugin host disabled: {e}"),
+        Err(e) => tracing::warn!("plugin host disabled: {e}"),
     }
 
     // CORS allowlist: settings file (or default <cairn>/cairn.toml) ∪ --cors-origin.
     let cors_origins = cairn_daemon::merge_cors_origins(config.cors.origins, &cli.cors_origin);
     if cors_origins.is_empty() {
-        println!(
+        tracing::info!(
             "CORS: no cross-origin origins allowed (add [cors].origins to {}/cairn.toml or pass --cors-origin)",
             cli.cairn.display()
         );
     } else {
-        println!("CORS: allowing {}", cors_origins.join(", "));
+        tracing::info!("CORS: allowing {}", cors_origins.join(", "));
     }
 
     // Local bearer token: written to <cairn>/.cairn/token (mode 0600) and
@@ -133,7 +133,7 @@ async fn run() -> Result<(), String> {
     // failure is fatal — the daemon never serves unauthenticated.
     let token = cairn_daemon::generate_token_file(&cli.cairn)
         .map_err(|e| format!("write daemon token: {e}"))?;
-    println!(
+    tracing::info!(
         "auth: bearer token at {}/.cairn/token (clients read this file)",
         cli.cairn.display()
     );
@@ -154,9 +154,9 @@ async fn run() -> Result<(), String> {
                         watch_state.apply_change_blocking(change)
                     });
                 });
-                println!("watching {} for changes", cli.cairn.display());
+                tracing::info!("watching {} for changes", cli.cairn.display());
             }
-            Err(e) => eprintln!("warning: file watcher disabled: {e}"),
+            Err(e) => tracing::warn!("file watcher disabled: {e}"),
         }
     }
 
@@ -164,16 +164,25 @@ async fn run() -> Result<(), String> {
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .map_err(|e| e.to_string())?;
-    println!("cairn-daemon listening on http://{addr}");
+    tracing::info!("cairn-daemon listening on http://{addr}");
     axum::serve(listener, app).await.map_err(|e| e.to_string())
 }
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // Default to `info`, but quiet tantivy's per-commit index chatter (it logs
+    // each segment commit/GC at info) so cairn's own logs aren't buried. Any
+    // `RUST_LOG` value fully overrides this default.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,tantivy=warn")),
+        )
+        .init();
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("error: {e}");
+            tracing::error!("{e}");
             ExitCode::FAILURE
         }
     }
