@@ -146,7 +146,23 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
         match self.store.read_meta()? {
             Some(json) => match parse_state(&json) {
                 Ok(restored) => self.reconcile_warm(restored, sink),
-                Err(()) => self.reconcile_cold(sink),
+                // A stale schema/hash regime is an expected migration: rebuild
+                // quietly, exactly as before versioning.
+                Err(StateRejection::Stale) => self.reconcile_cold(sink),
+                Err(StateRejection::Corrupt(reason)) => {
+                    // Preserve the corrupt blob (best-effort) so it is not lost,
+                    // then warn before abandoning the warm-start path. A failed
+                    // preservation is itself reported rather than swallowed.
+                    let preserved = match self.store.quarantine_meta() {
+                        Ok(dest) => dest,
+                        Err(e) => {
+                            eprintln!("warning: could not preserve rejected state.json: {e}");
+                            None
+                        }
+                    };
+                    eprintln!("{}", state_rejected_warning(&reason, preserved.as_deref()));
+                    self.reconcile_cold(sink)
+                }
             },
             None => self.reconcile_cold(sink),
         }
@@ -610,14 +626,41 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> PluginCallbacks for EngineCallbacks<
 
 type RestoredState = HashMap<NotePath, (u64, FileStamp)>;
 
-fn parse_state(json: &str) -> Result<RestoredState, ()> {
-    let payload: StatePayload = serde_json::from_str(json).map_err(|_| ())?;
+/// Why a persisted `state.json` could not be restored.
+#[derive(Debug)]
+enum StateRejection {
+    /// A routine, expected mismatch — the schema / hash regime changed, so the
+    /// persisted hashes are stale. Nothing is wrong with the file; rebuild
+    /// quietly rather than alarming the user or quarantining it.
+    Stale,
+    /// The blob is malformed or internally invalid. Preserve it for diagnosis
+    /// and warn, rather than discarding a genuine problem silently.
+    Corrupt(String),
+}
+
+/// The warning text emitted when a persisted `state.json` is rejected as
+/// corrupt. Pure so it is unit-testable as captured output; the caller writes
+/// it to stderr.
+fn state_rejected_warning(reason: &str, preserved: Option<&str>) -> String {
+    match preserved {
+        Some(dest) => format!(
+            "warning: persisted state.json rejected ({reason}); preserved at {dest}, rebuilding index"
+        ),
+        None => format!("warning: persisted state.json rejected ({reason}); rebuilding index"),
+    }
+}
+
+fn parse_state(json: &str) -> Result<RestoredState, StateRejection> {
+    let payload: StatePayload =
+        serde_json::from_str(json).map_err(|e| StateRejection::Corrupt(e.to_string()))?;
     if payload.schema_version != STATE_SCHEMA_VERSION {
-        return Err(()); // different/absent hash regime → reconcile_cold rebuilds
+        return Err(StateRejection::Stale); // different/absent hash regime → reconcile_cold rebuilds
     }
     let mut map = HashMap::with_capacity(payload.entries.len());
     for e in payload.entries {
-        let path = NotePath::new(&e.path).map_err(|_| ())?;
+        let path = NotePath::new(&e.path).map_err(|err| {
+            StateRejection::Corrupt(format!("invalid note path {}: {err}", e.path))
+        })?;
         let modified = UNIX_EPOCH + Duration::new(e.mtime_secs, e.mtime_nanos);
         map.insert(
             path,
@@ -672,6 +715,99 @@ mod tests {
         fn write_meta(&self, data: &str) -> Result<(), PortError> {
             self.inner.write_meta(data)
         }
+        fn quarantine_meta(&self) -> Result<Option<String>, PortError> {
+            self.inner.quarantine_meta()
+        }
+    }
+
+    #[test]
+    fn warning_message_names_reason_and_preserved_path() {
+        // The emitted (stderr) warning text — asserted here as captured output
+        // via the pure formatter that feeds eprintln!.
+        let msg = state_rejected_warning(
+            "expected value at line 1",
+            Some("/v/.cairn/state.json.corrupt"),
+        );
+        assert!(msg.contains("state.json"));
+        assert!(msg.contains("expected value at line 1"));
+        assert!(msg.contains("/v/.cairn/state.json.corrupt"));
+
+        let msg_none = state_rejected_warning("bad", None);
+        assert!(msg_none.contains("bad"));
+        assert!(msg_none.contains("rebuild"));
+    }
+
+    #[test]
+    fn corrupt_state_is_preserved_and_rebuild_succeeds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = LocalFsStore::open(tmp.path()).unwrap();
+        std::fs::write(tmp.path().join("a.md"), "hello").unwrap();
+        // Plant a corrupt state.json the warm path cannot parse.
+        store.write_meta("{ not valid json").unwrap();
+
+        let mut eng = Engine::new(
+            store,
+            InMemoryIndex::default(),
+            GitVcs::open_or_init(tmp.path()).unwrap(),
+        );
+        let mut ev = Vec::new();
+        eng.reconcile(&mut ev).unwrap(); // must not error; falls back to cold rebuild
+
+        // The note got indexed by the cold rebuild.
+        assert_eq!(ev, vec![Event::Reindexed(1)]);
+        // The corrupt file was preserved, not silently dropped.
+        let corrupt = tmp.path().join(".cairn").join("state.json.corrupt");
+        assert_eq!(
+            std::fs::read_to_string(&corrupt).unwrap(),
+            "{ not valid json"
+        );
+        // A fresh, valid state.json was written by the rebuild.
+        let fresh = tmp.path().join(".cairn").join("state.json");
+        assert!(parse_state(&std::fs::read_to_string(&fresh).unwrap()).is_ok());
+    }
+
+    #[test]
+    fn parse_state_returns_reason_on_bad_json() {
+        match parse_state("{ not json").unwrap_err() {
+            StateRejection::Corrupt(reason) => {
+                assert!(!reason.is_empty(), "reason must be non-empty")
+            }
+            StateRejection::Stale => panic!("malformed JSON should be Corrupt, not Stale"),
+        }
+    }
+
+    #[test]
+    fn stale_schema_is_not_quarantined() {
+        // A schema/hash-regime bump is an expected migration (every pre-versioning
+        // state.json hits it on first upgrade): rebuild quietly, do NOT rename the
+        // file to .corrupt — that is reserved for genuinely malformed state.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = LocalFsStore::open(tmp.path()).unwrap();
+        std::fs::write(tmp.path().join("a.md"), "hello").unwrap();
+        // Valid JSON, but a future/legacy schema version the warm path won't trust.
+        store
+            .write_meta(&format!(
+                "{{\"schema_version\":{},\"entries\":[]}}",
+                STATE_SCHEMA_VERSION + 1
+            ))
+            .unwrap();
+
+        let mut eng = Engine::new(
+            store,
+            InMemoryIndex::default(),
+            GitVcs::open_or_init(tmp.path()).unwrap(),
+        );
+        eng.reconcile(&mut Vec::new()).unwrap();
+
+        // No quarantine file left behind for a benign migration.
+        assert!(!tmp
+            .path()
+            .join(".cairn")
+            .join("state.json.corrupt")
+            .exists());
+        // A fresh, current-version state.json was written by the rebuild.
+        let fresh = tmp.path().join(".cairn").join("state.json");
+        assert!(parse_state(&std::fs::read_to_string(&fresh).unwrap()).is_ok());
     }
 
     #[test]

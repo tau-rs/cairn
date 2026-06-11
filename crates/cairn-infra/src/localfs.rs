@@ -158,7 +158,13 @@ impl LocalFsStore {
 impl VaultStore for LocalFsStore {
     fn read(&self, path: &NotePath) -> Result<String, PortError> {
         let full = self.resolve(path)?;
-        fs::read_to_string(full).map_err(|_| PortError::NotFound(path.as_str().to_string()))
+        fs::read_to_string(full).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                PortError::NotFound(path.as_str().to_string())
+            } else {
+                PortError::Adapter(e.to_string())
+            }
+        })
     }
 
     fn write(&mut self, path: &NotePath, contents: &str) -> Result<(), PortError> {
@@ -234,6 +240,26 @@ impl VaultStore for LocalFsStore {
         let dir = ensure_cairn_dir(&self.root)?;
         fs::write(dir.join("state.json"), data).map_err(|e| PortError::Adapter(e.to_string()))
     }
+
+    fn quarantine_meta(&self) -> Result<Option<String>, PortError> {
+        let dir = self.root.join(".cairn");
+        let src = dir.join("state.json");
+        if !src.exists() {
+            return Ok(None);
+        }
+        // Choose a destination that does not clobber a prior quarantine: a
+        // recurring corruption loop would otherwise lose all but the latest
+        // blob, and on platforms where `rename` refuses an existing target the
+        // preservation would fail outright.
+        let mut dst = dir.join("state.json.corrupt");
+        let mut n = 1u32;
+        while dst.exists() {
+            dst = dir.join(format!("state.json.corrupt.{n}"));
+            n += 1;
+        }
+        fs::rename(&src, &dst).map_err(|e| PortError::Adapter(e.to_string()))?;
+        Ok(Some(dst.display().to_string()))
+    }
 }
 
 #[cfg(test)]
@@ -269,6 +295,47 @@ mod tests {
 
         let ignore = tmp.path().join(".cairn").join(".gitignore");
         assert_eq!(std::fs::read_to_string(ignore).unwrap(), "*\n");
+    }
+
+    #[test]
+    fn quarantine_meta_moves_state_aside_and_is_noop_when_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = LocalFsStore::open(tmp.path()).unwrap();
+
+        // Nothing to move yet.
+        assert_eq!(store.quarantine_meta().unwrap(), None);
+
+        store.write_meta("corrupt{").unwrap();
+        let moved = store.quarantine_meta().unwrap().expect("a path");
+        assert!(moved.ends_with("state.json.corrupt"), "got {moved}");
+
+        // Original bytes preserved at the new path; state.json no longer present.
+        let corrupt = tmp.path().join(".cairn").join("state.json.corrupt");
+        assert_eq!(std::fs::read_to_string(&corrupt).unwrap(), "corrupt{");
+        assert!(store.read_meta().unwrap().is_none());
+    }
+
+    #[test]
+    fn quarantine_meta_does_not_clobber_a_prior_quarantine() {
+        // A recurring corrupt-state loop (G3's "every startup" impact) must not
+        // lose earlier corruption: each quarantine gets a distinct destination.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = LocalFsStore::open(tmp.path()).unwrap();
+
+        store.write_meta("first-corruption").unwrap();
+        let first = store.quarantine_meta().unwrap().expect("first path");
+        store.write_meta("second-corruption").unwrap();
+        let second = store.quarantine_meta().unwrap().expect("second path");
+
+        assert_ne!(
+            first, second,
+            "second quarantine must not reuse the first path"
+        );
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "first-corruption");
+        assert_eq!(
+            std::fs::read_to_string(&second).unwrap(),
+            "second-corruption"
+        );
     }
 
     #[test]
@@ -403,6 +470,23 @@ mod tests {
         symlink(tmp.path().join("real"), tmp.path().join("link")).unwrap();
         let via = NotePath::new("link/a.md").unwrap();
         assert_eq!(store.read(&via).unwrap(), "hello");
+    }
+
+    #[test]
+    fn read_unreadable_path_is_not_not_found() {
+        // A path that exists but cannot be read as a note (here: a directory
+        // sitting where a note file would be) must surface as a real adapter
+        // error, never masquerade as a missing note.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = LocalFsStore::open(tmp.path()).unwrap();
+        let p = NotePath::new("a.md").unwrap();
+        std::fs::create_dir(tmp.path().join("a.md")).unwrap();
+
+        let err = store.read(&p).unwrap_err();
+        assert!(
+            matches!(err, PortError::Adapter(_)),
+            "expected Adapter, got {err:?}"
+        );
     }
 
     #[test]
