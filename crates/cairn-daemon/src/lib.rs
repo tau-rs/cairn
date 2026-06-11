@@ -24,6 +24,7 @@ use cairn_contract::{
 use cairn_infra::{GitVcs, LocalFsStore, TantivyIndex};
 use cairn_service::{app_event_to_wire, dispatch_command, dispatch_query, ServiceError};
 use tokio::sync::broadcast;
+use tracing::Instrument;
 
 /// The concrete engine the daemon serves.
 pub type CairnEngine = Engine<LocalFsStore, TantivyIndex, GitVcs>;
@@ -221,18 +222,22 @@ async fn command_handler(State(state): State<AppState>, Json(command): Json<Comm
         duration_ms = tracing::field::Empty,
         outcome = tracing::field::Empty,
     );
-    let _enter = span.enter();
-    let start = std::time::Instant::now();
-    let result = tokio::task::spawn_blocking(move || state.run_command_blocking(&command)).await;
-    let response = service_response(result);
-    span.record("status", response.status().as_u16());
-    span.record("duration_ms", start.elapsed().as_millis() as u64);
-    span.record(
-        "outcome",
-        if response.status().is_success() { "ok" } else { "error" },
-    );
-    tracing::info!("request completed");
-    response
+    async move {
+        let start = std::time::Instant::now();
+        let result = tokio::task::spawn_blocking(move || state.run_command_blocking(&command)).await;
+        let response = service_response(result);
+        let span = tracing::Span::current();
+        span.record("status", response.status().as_u16());
+        span.record("duration_ms", start.elapsed().as_millis() as u64);
+        span.record(
+            "outcome",
+            if response.status().is_success() { "ok" } else { "error" },
+        );
+        tracing::info!("request completed");
+        response
+    }
+    .instrument(span)
+    .await
 }
 
 async fn query_handler(State(state): State<AppState>, Json(query): Json<Query>) -> Response {
@@ -245,18 +250,22 @@ async fn query_handler(State(state): State<AppState>, Json(query): Json<Query>) 
         duration_ms = tracing::field::Empty,
         outcome = tracing::field::Empty,
     );
-    let _enter = span.enter();
-    let start = std::time::Instant::now();
-    let result = tokio::task::spawn_blocking(move || state.run_query_blocking(&query)).await;
-    let response = service_response(result);
-    span.record("status", response.status().as_u16());
-    span.record("duration_ms", start.elapsed().as_millis() as u64);
-    span.record(
-        "outcome",
-        if response.status().is_success() { "ok" } else { "error" },
-    );
-    tracing::info!("request completed");
-    response
+    async move {
+        let start = std::time::Instant::now();
+        let result = tokio::task::spawn_blocking(move || state.run_query_blocking(&query)).await;
+        let response = service_response(result);
+        let span = tracing::Span::current();
+        span.record("status", response.status().as_u16());
+        span.record("duration_ms", start.elapsed().as_millis() as u64);
+        span.record(
+            "outcome",
+            if response.status().is_success() { "ok" } else { "error" },
+        );
+        tracing::info!("request completed");
+        response
+    }
+    .instrument(span)
+    .await
 }
 
 /// True if `origin` (the request's `Origin` header value) is present and in the
