@@ -1,5 +1,6 @@
 //! `PluginHost` backed by child processes speaking JSON-RPC/NDJSON over stdio.
 
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -49,6 +50,30 @@ fn required_cap(method: &str) -> Option<&'static str> {
         METHOD_SEARCH => Some(CAP_FS_READ),
         METHOD_LIST_NOTES => Some(CAP_FS_READ),
         _ => None,
+    }
+}
+
+/// The set of plugin **directory names** the user has explicitly trusted. A
+/// plugin under `<cairn>/.cairn/plugins/<dir>` is spawned only if `<dir>` is in
+/// this set — the directory name is the trust anchor because the user controls
+/// it, unlike the manifest's self-declared `id`. An empty set trusts nothing.
+#[derive(Debug, Default, Clone)]
+pub struct TrustedPlugins(HashSet<String>);
+
+impl TrustedPlugins {
+    /// A set that trusts no plugin (default-deny).
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// Build from an iterator of trusted directory names.
+    pub fn from_ids<I: IntoIterator<Item = String>>(ids: I) -> Self {
+        Self(ids.into_iter().collect())
+    }
+
+    /// Is this plugin directory name trusted?
+    pub fn contains(&self, dir_name: &str) -> bool {
+        self.0.contains(dir_name)
     }
 }
 
@@ -343,8 +368,8 @@ impl ProcessPluginHost {
     ///
     /// # Errors
     /// [`PortError::Adapter`] only on an unexpected IO error reading the dir.
-    pub fn load(dir: &Path) -> Result<Self, PortError> {
-        Self::load_with_timeout(dir, DEFAULT_PLUGIN_TIMEOUT)
+    pub fn load(dir: &Path, trusted: &TrustedPlugins) -> Result<Self, PortError> {
+        Self::load_with_timeout(dir, DEFAULT_PLUGIN_TIMEOUT, trusted)
     }
 
     /// Like [`Self::load`] but with an explicit per-message read `timeout` (used by
@@ -352,7 +377,11 @@ impl ProcessPluginHost {
     ///
     /// # Errors
     /// [`PortError::Adapter`] only on an unexpected IO error reading the dir.
-    pub fn load_with_timeout(dir: &Path, timeout: Duration) -> Result<Self, PortError> {
+    pub fn load_with_timeout(
+        dir: &Path,
+        timeout: Duration,
+        trusted: &TrustedPlugins,
+    ) -> Result<Self, PortError> {
         let mut loaded = Vec::new();
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
@@ -364,6 +393,20 @@ impl ProcessPluginHost {
                 Ok(e) if e.path().is_dir() => e.path(),
                 _ => continue,
             };
+            // Trust gate: the directory name (not the manifest's self-declared
+            // id) is the trust anchor. Untrusted dirs are skipped before their
+            // manifest is even read, so attacker-controlled TOML is never parsed.
+            let dir_name = plugin_dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            if !trusted.contains(dir_name) {
+                eprintln!(
+                    "plugin: skipping {dir_name} (not in [plugins] trusted; \
+                     add \"{dir_name}\" to cairn.toml to enable)"
+                );
+                continue;
+            }
             match Self::spawn_plugin(&plugin_dir, timeout) {
                 Ok(p) => loaded.push(p),
                 Err(e) => eprintln!("plugin: skipping {}: {e}", plugin_dir.display()),
@@ -375,6 +418,20 @@ impl ProcessPluginHost {
     fn spawn_plugin(plugin_dir: &Path, timeout: Duration) -> Result<LoadedPlugin, PortError> {
         let raw = std::fs::read_to_string(plugin_dir.join("manifest.toml")).map_err(adapt)?;
         let manifest: Manifest = toml::from_str(&raw).map_err(adapt)?;
+
+        // The directory name is the trust anchor (see `TrustedPlugins`); a
+        // manifest that self-declares a different id is rejected so "directory
+        // name" and "plugin id" stay the same value end to end.
+        let dir_name = plugin_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if manifest.id != dir_name {
+            return Err(PortError::Adapter(format!(
+                "manifest id \"{}\" does not match directory name \"{dir_name}\"",
+                manifest.id
+            )));
+        }
 
         let cmd_path = {
             let p = Path::new(&manifest.engine.command);
@@ -492,24 +549,66 @@ impl PluginHost for ProcessPluginHost {
 mod tests {
     use super::*;
 
+    /// Write `<root>/<dir_name>/manifest.toml` declaring `id` and a non-spawnable
+    /// command.
+    fn write_plugin(root: &Path, dir_name: &str, manifest_id: &str) {
+        let pdir = root.join(dir_name);
+        std::fs::create_dir_all(&pdir).unwrap();
+        std::fs::write(
+            pdir.join("manifest.toml"),
+            format!(
+                "id=\"{manifest_id}\"\nname=\"N\"\nversion=\"0\"\n\
+                 [engine]\ncommand=\"/nonexistent/xyz\"\n"
+            ),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn load_absent_dir_is_empty() {
         let tmp = tempfile::tempdir().unwrap();
-        let host = ProcessPluginHost::load(&tmp.path().join("missing")).unwrap();
+        let trusted = TrustedPlugins::from_ids(["anything".to_string()]);
+        let host = ProcessPluginHost::load(&tmp.path().join("missing"), &trusted).unwrap();
         assert!(host.plugins().is_empty());
     }
 
     #[test]
     fn unspawnable_plugin_is_skipped_not_fatal() {
         let tmp = tempfile::tempdir().unwrap();
-        let pdir = tmp.path().join("broken");
-        std::fs::create_dir_all(&pdir).unwrap();
-        std::fs::write(
-            pdir.join("manifest.toml"),
-            "id=\"broken\"\nname=\"B\"\nversion=\"0\"\n[engine]\ncommand=\"/nonexistent/xyz\"\n",
-        )
-        .unwrap();
-        let host = ProcessPluginHost::load(tmp.path()).unwrap();
+        write_plugin(tmp.path(), "broken", "broken");
+        let trusted = TrustedPlugins::from_ids(["broken".to_string()]);
+        // Trusted but the command can't spawn: load succeeds, plugin absent.
+        let host = ProcessPluginHost::load(tmp.path(), &trusted).unwrap();
         assert!(host.plugins().is_empty());
+    }
+
+    #[test]
+    fn untrusted_plugin_is_not_loaded() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_plugin(tmp.path(), "rogue", "rogue");
+        // Empty trust set => default-deny.
+        let host = ProcessPluginHost::load(tmp.path(), &TrustedPlugins::none()).unwrap();
+        assert!(host.plugins().is_empty());
+    }
+
+    #[test]
+    fn untrusted_manifest_is_not_parsed() {
+        // A directory not in the trust set must be skipped *before* its manifest
+        // is read. A malformed manifest there must therefore NOT cause an error.
+        let tmp = tempfile::tempdir().unwrap();
+        let pdir = tmp.path().join("rogue");
+        std::fs::create_dir_all(&pdir).unwrap();
+        std::fs::write(pdir.join("manifest.toml"), "this is not valid toml {{{").unwrap();
+        let host = ProcessPluginHost::load(tmp.path(), &TrustedPlugins::none()).unwrap();
+        assert!(host.plugins().is_empty());
+    }
+
+    #[test]
+    fn trusted_set_membership() {
+        let trusted = TrustedPlugins::from_ids(["a".to_string(), "b".to_string()]);
+        assert!(trusted.contains("a"));
+        assert!(trusted.contains("b"));
+        assert!(!trusted.contains("c"));
+        assert!(!TrustedPlugins::none().contains("a"));
     }
 }
