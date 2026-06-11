@@ -282,6 +282,7 @@ dependencies = [
  "cairn-infra",
  "cairn-ports",
  "cairn-service",
+ "cairn-startup",
  "clap",
  "predicates",
  "serde_json",
@@ -308,6 +309,7 @@ dependencies = [
  "cairn-infra",
  "cairn-ports",
  "cairn-service",
+ "cairn-startup",
  "clap",
  "futures-util",
  "getrandom 0.3.4",
@@ -399,6 +401,16 @@ dependencies = [
  "cairn-infra",
  "cairn-ports",
  "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "cairn-startup"
+version = "0.0.0"
+dependencies = [
+ "cairn-app",
+ "cairn-infra",
  "tempfile",
  "thiserror",
 ]
