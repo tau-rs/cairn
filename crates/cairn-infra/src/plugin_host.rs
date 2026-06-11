@@ -396,10 +396,12 @@ impl ProcessPluginHost {
             // Trust gate: the directory name (not the manifest's self-declared
             // id) is the trust anchor. Untrusted dirs are skipped before their
             // manifest is even read, so attacker-controlled TOML is never parsed.
-            let dir_name = plugin_dir
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or_default();
+            // A non-UTF-8 directory name yields `None` here; treat it as the
+            // empty string, which no sane trusted set contains, so it is skipped.
+            let dir_name = plugin_dir.file_name().and_then(|n| n.to_str());
+            let Some(dir_name) = dir_name.filter(|n| !n.is_empty()) else {
+                continue; // unnameable in a trust list; never spawn it
+            };
             if !trusted.contains(dir_name) {
                 eprintln!(
                     "plugin: skipping {dir_name} (not in [plugins] trusted; \
