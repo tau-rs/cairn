@@ -10,6 +10,11 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, UNIX_EPOCH};
 
+/// Schema version of `.cairn/state.json`. Tags the hash regime: bump this
+/// whenever `Note::content_hash`'s algorithm changes so stale persisted hashes
+/// are rebuilt (cold) rather than silently trusted.
+const STATE_SCHEMA_VERSION: u32 = 1;
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct StateEntry {
     path: String,
@@ -21,6 +26,8 @@ struct StateEntry {
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct StatePayload {
+    #[serde(default)]
+    schema_version: u32,
     entries: Vec<StateEntry>,
 }
 
@@ -207,8 +214,11 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
                 len: stamp.len,
             });
         }
-        let json = serde_json::to_string(&StatePayload { entries })
-            .map_err(|e| PortError::Adapter(e.to_string()))?;
+        let json = serde_json::to_string(&StatePayload {
+            schema_version: STATE_SCHEMA_VERSION,
+            entries,
+        })
+        .map_err(|e| PortError::Adapter(e.to_string()))?;
         self.store.write_meta(&json)
     }
 
@@ -602,6 +612,9 @@ type RestoredState = HashMap<NotePath, (u64, FileStamp)>;
 
 fn parse_state(json: &str) -> Result<RestoredState, ()> {
     let payload: StatePayload = serde_json::from_str(json).map_err(|_| ())?;
+    if payload.schema_version != STATE_SCHEMA_VERSION {
+        return Err(()); // different/absent hash regime → reconcile_cold rebuilds
+    }
     let mut map = HashMap::with_capacity(payload.entries.len());
     for e in payload.entries {
         let path = NotePath::new(&e.path).map_err(|_| ())?;
@@ -1196,6 +1209,90 @@ mod tests {
             .unwrap()
             .iter()
             .any(|h| h.path.as_str() == "c.md"));
+    }
+
+    #[test]
+    fn parse_state_rejects_mismatched_schema_version() {
+        // A payload from a different (future) hash regime must not seed memo.
+        let json = serde_json::json!({
+            "schema_version": STATE_SCHEMA_VERSION + 1,
+            "entries": []
+        })
+        .to_string();
+        assert!(parse_state(&json).is_err());
+    }
+
+    #[test]
+    fn parse_state_rejects_legacy_state_without_version() {
+        // Pre-versioning state.json (no schema_version field) is rebuilt, not trusted.
+        let json = r#"{"entries":[]}"#;
+        assert!(parse_state(json).is_err());
+    }
+
+    #[test]
+    fn save_state_round_trips_through_parse_state() {
+        // save_state's serialized field names must match what parse_state reads:
+        // a serde rename of `schema_version`/`entries` would slip past the
+        // hand-built-JSON tests but break real persistence.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.md"), "alpha body").unwrap();
+        let mut eng = engine(tmp.path());
+        eng.reconcile(&mut Vec::new()).unwrap();
+
+        let store = LocalFsStore::open(tmp.path()).unwrap();
+        let raw = store.read_meta().unwrap().unwrap();
+        let restored = parse_state(&raw).expect("save_state output must parse back");
+        assert!(restored.contains_key(&NotePath::new("a.md").unwrap()));
+    }
+
+    #[test]
+    fn parse_state_accepts_current_version() {
+        let json = serde_json::json!({
+            "schema_version": STATE_SCHEMA_VERSION,
+            "entries": []
+        })
+        .to_string();
+        assert!(parse_state(&json).is_ok());
+    }
+
+    #[test]
+    fn stale_state_json_triggers_full_rebuild() {
+        // End-to-end: a state.json from a different regime must rebuild the
+        // index (re-read every note) rather than warm-start off stale hashes.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.md"), "alpha body").unwrap();
+        std::fs::write(tmp.path().join("b.md"), "beta body").unwrap();
+
+        // First run writes a current-version state.json.
+        {
+            let mut eng = engine(tmp.path());
+            eng.reconcile(&mut Vec::new()).unwrap();
+        }
+
+        // Rewrite state.json with a bumped schema_version (simulated future regime).
+        let store = LocalFsStore::open(tmp.path()).unwrap();
+        let raw = store.read_meta().unwrap().unwrap();
+        let mut payload: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        payload["schema_version"] =
+            serde_json::json!(payload["schema_version"].as_u64().unwrap() + 1);
+        store.write_meta(&payload.to_string()).unwrap();
+
+        // Reconcile again with a read-counting store: a rebuild re-reads both notes.
+        let reads = Arc::new(AtomicUsize::new(0));
+        let mut eng = Engine::new(
+            CountingStore {
+                inner: LocalFsStore::open(tmp.path()).unwrap(),
+                reads: reads.clone(),
+            },
+            InMemoryIndex::default(),
+            GitVcs::open_or_init(tmp.path()).unwrap(),
+        );
+        eng.reconcile(&mut Vec::new()).unwrap();
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            2,
+            "stale schema_version forces a full rebuild that re-reads every note"
+        );
     }
 
     /// A stub host whose dispatch_event writes a marker note via the callbacks —
