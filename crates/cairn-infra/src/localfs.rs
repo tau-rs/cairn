@@ -40,33 +40,83 @@ fn is_safe_rel(rel: &str) -> bool {
 #[derive(Debug, Clone)]
 pub struct LocalFsStore {
     root: PathBuf,
+    /// `root` with all symlinks resolved, used to confirm that a resolved
+    /// target stays inside the cairn.
+    canonical_root: PathBuf,
 }
 
 impl LocalFsStore {
     /// Open a store rooted at `root`, creating the directory if needed.
     ///
     /// # Errors
-    /// Returns [`PortError`] if the root directory cannot be created.
+    /// Returns [`PortError`] if the root directory cannot be created or its
+    /// canonical path cannot be resolved.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, PortError> {
         let root = root.as_ref().to_path_buf();
         fs::create_dir_all(&root).map_err(|e| PortError::Adapter(e.to_string()))?;
-        Ok(Self { root })
+        let canonical_root =
+            fs::canonicalize(&root).map_err(|e| PortError::Adapter(e.to_string()))?;
+        Ok(Self {
+            root,
+            canonical_root,
+        })
     }
 
     fn full(&self, path: &NotePath) -> PathBuf {
         self.root.join(path.as_str())
     }
 
-    /// Resolve `path` under the root, refusing anything [`is_safe_rel`]
-    /// rejects. Used by every mutating operation; read-only paths use `full`.
-    fn safe_full(&self, path: &NotePath) -> Result<PathBuf, PortError> {
+    /// Resolve `path` under the root, following and validating symlinks so a
+    /// symlink planted inside the cairn cannot redirect an operation outside
+    /// the root (closing the TOCTOU gap left by purely lexical validation).
+    /// Used by every read/write/rename/delete/stamp. (`list` does not need it:
+    /// `collect_md` uses `read_dir`'s lstat-based `file_type`, so a directory
+    /// symlink reports as a symlink and is never recursed into.)
+    ///
+    /// 1. Lexical guard ([`is_safe_rel`]) — defense in depth behind `NotePath`.
+    /// 2. The final component must not itself be a symlink (`O_NOFOLLOW`-style):
+    ///    a leaf symlink could redirect a write/delete/rename through to
+    ///    another file.
+    /// 3. The deepest ancestor that exists on disk is canonicalized — resolving
+    ///    every symlink in that prefix — and must stay under the canonical
+    ///    root. Not-yet-existing tail components cannot be symlinks, so the
+    ///    original target is returned for the caller to create.
+    fn resolve(&self, path: &NotePath) -> Result<PathBuf, PortError> {
         if !is_safe_rel(path.as_str()) {
             return Err(PortError::Adapter(format!(
                 "unsafe note path: {}",
                 path.as_str()
             )));
         }
-        Ok(self.full(path))
+        let full = self.full(path);
+
+        if full
+            .symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink())
+        {
+            return Err(PortError::Adapter(format!(
+                "note path is a symlink: {}",
+                path.as_str()
+            )));
+        }
+
+        // Walk up to the deepest entry that exists on disk. `symlink_metadata`
+        // (lstat) treats a broken symlink as existing, so it is caught by the
+        // `canonicalize` below rather than silently skipped.
+        let mut ancestor = full.as_path();
+        while ancestor.symlink_metadata().is_err() {
+            ancestor = ancestor.parent().ok_or_else(|| {
+                PortError::Adapter(format!("cannot resolve note path: {}", path.as_str()))
+            })?;
+        }
+        let canon = fs::canonicalize(ancestor).map_err(|e| PortError::Adapter(e.to_string()))?;
+        if !canon.starts_with(&self.canonical_root) {
+            return Err(PortError::Adapter(format!(
+                "note path escapes cairn root: {}",
+                path.as_str()
+            )));
+        }
+        Ok(full)
     }
 
     fn collect_md(&self, dir: &Path, out: &mut Vec<NotePath>) -> Result<(), PortError> {
@@ -107,7 +157,8 @@ impl LocalFsStore {
 
 impl VaultStore for LocalFsStore {
     fn read(&self, path: &NotePath) -> Result<String, PortError> {
-        fs::read_to_string(self.full(path)).map_err(|e| {
+        let full = self.resolve(path)?;
+        fs::read_to_string(full).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 PortError::NotFound(path.as_str().to_string())
             } else {
@@ -117,7 +168,7 @@ impl VaultStore for LocalFsStore {
     }
 
     fn write(&mut self, path: &NotePath, contents: &str) -> Result<(), PortError> {
-        let full = self.safe_full(path)?;
+        let full = self.resolve(path)?;
         if let Some(parent) = full.parent() {
             fs::create_dir_all(parent).map_err(|e| PortError::Adapter(e.to_string()))?;
         }
@@ -125,7 +176,7 @@ impl VaultStore for LocalFsStore {
     }
 
     fn delete(&mut self, path: &NotePath) -> Result<(), PortError> {
-        fs::remove_file(self.safe_full(path)?).map_err(|e| {
+        fs::remove_file(self.resolve(path)?).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 PortError::NotFound(path.as_str().to_string())
             } else {
@@ -135,8 +186,8 @@ impl VaultStore for LocalFsStore {
     }
 
     fn rename(&mut self, from: &NotePath, to: &NotePath) -> Result<(), PortError> {
-        let src = self.safe_full(from)?;
-        let dst = self.safe_full(to)?;
+        let src = self.resolve(from)?;
+        let dst = self.resolve(to)?;
         if !src.exists() {
             return Err(PortError::NotFound(from.as_str().to_string()));
         }
@@ -159,7 +210,7 @@ impl VaultStore for LocalFsStore {
     }
 
     fn stamp(&self, path: &NotePath) -> Result<FileStamp, PortError> {
-        let full = self.full(path);
+        let full = self.resolve(path)?;
         let meta = match fs::metadata(&full) {
             Ok(m) => m,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -321,6 +372,98 @@ mod tests {
         store.write(&p, "hello").unwrap();
         assert_eq!(store.read(&p).unwrap(), "hello");
         assert_eq!(store.list().unwrap(), vec![p]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_escaping_root_cannot_be_read_or_written() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.md"), "TOPSECRET").unwrap();
+
+        let mut store = LocalFsStore::open(tmp.path()).unwrap();
+        std::fs::create_dir_all(tmp.path().join("notes")).unwrap();
+        // A symlink planted inside the cairn pointing outside the root.
+        symlink(outside.path(), tmp.path().join("notes/escape")).unwrap();
+
+        // Reading through the symlink must not escape the root.
+        let r = NotePath::new("notes/escape/secret.md").unwrap();
+        assert!(
+            store.read(&r).is_err(),
+            "read escaped the cairn via symlink"
+        );
+
+        // Neither may stamp leak metadata of a file outside the cairn.
+        assert!(
+            store.stamp(&r).is_err(),
+            "stamp escaped the cairn via symlink"
+        );
+
+        // Writing through the symlink must not escape the root, and must not
+        // land a file outside the cairn.
+        let w = NotePath::new("notes/escape/pwned.md").unwrap();
+        assert!(
+            store.write(&w, "x").is_err(),
+            "write escaped the cairn via symlink"
+        );
+        assert!(
+            !outside.path().join("pwned.md").exists(),
+            "write landed outside the cairn"
+        );
+
+        // Deleting/renaming through the symlink must not touch the file outside.
+        assert!(
+            store.delete(&r).is_err(),
+            "delete escaped the cairn via symlink"
+        );
+        assert!(
+            store
+                .rename(&r, &NotePath::new("notes/escape/moved.md").unwrap())
+                .is_err(),
+            "rename escaped the cairn via symlink"
+        );
+        assert!(
+            outside.path().join("secret.md").exists(),
+            "delete/rename mutated a file outside the cairn"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn leaf_symlink_is_rejected_even_when_target_is_in_root() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = LocalFsStore::open(tmp.path()).unwrap();
+        store
+            .write(&NotePath::new("real.md").unwrap(), "hi")
+            .unwrap();
+        // A note whose final component is itself a symlink (even to an in-root
+        // file) is refused, so a mutation cannot be redirected through it.
+        symlink(tmp.path().join("real.md"), tmp.path().join("link.md")).unwrap();
+
+        let link = NotePath::new("link.md").unwrap();
+        assert!(store.write(&link, "x").is_err());
+        assert!(store.delete(&link).is_err());
+        assert_eq!(
+            store.read(&NotePath::new("real.md").unwrap()).unwrap(),
+            "hi",
+            "the real note was modified through a leaf symlink"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn in_root_symlink_resolves_correctly() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = LocalFsStore::open(tmp.path()).unwrap();
+        let real = NotePath::new("real/a.md").unwrap();
+        store.write(&real, "hello").unwrap();
+        // A directory symlink that stays inside the root resolves normally.
+        symlink(tmp.path().join("real"), tmp.path().join("link")).unwrap();
+        let via = NotePath::new("link/a.md").unwrap();
+        assert_eq!(store.read(&via).unwrap(), "hello");
     }
 
     #[test]
