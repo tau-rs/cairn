@@ -6,7 +6,14 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 
-use axum::http::{header, HeaderMap};
+use axum::{
+    extract::{Request, State},
+    http::{header, HeaderMap, StatusCode},
+    middleware::Next,
+    response::{IntoResponse, Response},
+};
+
+use crate::AppState;
 
 /// Generate a fresh 64-char lowercase-hex bearer token, write it to
 /// `<cairn_root>/.cairn/token` with mode `0600` (truncating any prior token),
@@ -56,6 +63,26 @@ fn write_secret_file(path: &Path, contents: &str) -> io::Result<()> {
 #[cfg(not(unix))]
 fn write_secret_file(path: &Path, contents: &str) -> io::Result<()> {
     fs::write(path, contents)
+}
+
+/// axum middleware: when the daemon was configured with a token, reject any
+/// request that lacks a matching `Authorization: Bearer <token>` header with
+/// `401`. With no token configured, every request passes through.
+pub(crate) async fn require_token(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if let Some(expected) = &state.token {
+        if !bearer_matches(req.headers(), expected) {
+            return (
+                StatusCode::UNAUTHORIZED,
+                [(header::WWW_AUTHENTICATE, "Bearer")],
+            )
+                .into_response();
+        }
+    }
+    next.run(req).await
 }
 
 /// True if `headers` carry `Authorization: Bearer <token>` whose token equals

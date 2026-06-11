@@ -1,5 +1,6 @@
-//! HTTP + WebSocket transport over the cairn dispatcher. Binds localhost
-//! only; no authentication (LoopbackTrust). The engine runs synchronously
+//! HTTP + WebSocket transport over the cairn dispatcher. Binds localhost only.
+//! `/command` and `/query` require a local bearer token (audit S5; see the
+//! `auth` module and [`AppState::with_token`]). The engine runs synchronously
 //! under a mutex via `spawn_blocking`.
 
 pub mod config;
@@ -303,11 +304,20 @@ pub fn cors_layer(origins: &[String]) -> tower_http::cors::CorsLayer {
 }
 
 /// Build the axum router for the given state.
+///
+/// `/command` and `/query` require the bearer token (audit S5). `/health` is an
+/// open liveness probe; `/events` keeps its own Origin gate (audit S2) and is
+/// not token-gated in this increment.
 pub fn build_router(state: AppState) -> Router {
-    Router::new()
+    let protected = Router::new()
         .route("/command", post(command_handler))
         .route("/query", post(query_handler))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_token,
+        ));
+    let open = Router::new()
         .route("/events", get(events_handler))
-        .route("/health", get(health_handler))
-        .with_state(state)
+        .route("/health", get(health_handler));
+    protected.merge(open).with_state(state)
 }
