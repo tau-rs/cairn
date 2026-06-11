@@ -92,6 +92,17 @@ impl AppState {
         self
     }
 
+    /// Lock the engine, recovering from poisoning instead of propagating it.
+    ///
+    /// A panic in any engine operation poisons the `Mutex`; with `.expect(...)`
+    /// every subsequent request would panic and 500 forever (audit: mutex-
+    /// poisoning DoS). The data behind the lock is a single engine whose
+    /// invariants are re-established on the next operation, so recovering the
+    /// guard and continuing is correct.
+    fn engine(&self) -> std::sync::MutexGuard<'_, CairnEngine> {
+        self.engine.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Run a command synchronously, publishing produced events.
     ///
     /// Blocks the current thread while it holds the engine lock and runs
@@ -102,7 +113,7 @@ impl AppState {
     /// # Errors
     /// Returns [`ServiceError`] on invalid input or engine failure.
     pub fn run_command_blocking(&self, command: &Command) -> Result<CommandResponse, ServiceError> {
-        let mut guard = self.engine.lock().expect("engine mutex poisoned");
+        let mut guard = self.engine();
         let mut tap = EventTap {
             tx: self.events.clone(),
             collected: Vec::new(),
@@ -130,7 +141,7 @@ impl AppState {
     /// # Errors
     /// Returns [`ServiceError`] on invalid input or engine failure.
     pub fn run_query_blocking(&self, query: &Query) -> Result<QueryResponse, ServiceError> {
-        let guard = self.engine.lock().expect("engine mutex poisoned");
+        let guard = self.engine();
         dispatch_query(&guard, query)
     }
 
@@ -138,7 +149,7 @@ impl AppState {
     /// events to subscribers. Best-effort: a transient failure is logged, not
     /// propagated, so the watch loop keeps running.
     pub fn apply_change_blocking(&self, change: &cairn_ports::FsChange) {
-        let mut guard = self.engine.lock().expect("engine mutex poisoned");
+        let mut guard = self.engine();
         let mut tap = EventTap {
             tx: self.events.clone(),
             collected: Vec::new(),
@@ -294,4 +305,43 @@ pub fn build_router(state: AppState) -> Router {
         .route("/events", get(events_handler))
         .route("/health", get(health_handler))
         .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cairn_infra::{GitVcs, LocalFsStore, TantivyIndex};
+
+    fn state(dir: &std::path::Path) -> AppState {
+        AppState::new(Engine::new(
+            LocalFsStore::open(dir).unwrap(),
+            TantivyIndex::in_memory().unwrap(),
+            GitVcs::open_or_init(dir).unwrap(),
+        ))
+    }
+
+    #[test]
+    fn poisoned_engine_mutex_still_serves_requests() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state(tmp.path());
+
+        // Poison the mutex: panic while holding the engine lock.
+        let st = state.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = st.engine.lock().unwrap();
+            panic!("simulated engine panic under lock");
+        })
+        .join();
+        assert!(
+            state.engine.is_poisoned(),
+            "precondition: mutex is poisoned"
+        );
+
+        // Despite poisoning, a request must still succeed rather than 500 forever.
+        let resp = state.run_query_blocking(&Query::ListNotes);
+        assert!(
+            resp.is_ok(),
+            "poisoned mutex must be recovered, not propagated"
+        );
+    }
 }
