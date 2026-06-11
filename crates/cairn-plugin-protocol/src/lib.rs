@@ -199,7 +199,13 @@ pub struct EngineSection {
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
-    /// Declared capabilities — recorded only (not enforced in slice 1).
+    /// Declared capabilities. The host gates every plugin->host callback on
+    /// this list (see `cairn-infra` `plugin_host::service_callback`): a callback
+    /// whose required capability is absent here is denied. Note the boundary's
+    /// limits (audit `security.md` S3): capabilities are *self-declared* in the
+    /// plugin's own manifest, and gating only narrows the host-callback RPC
+    /// surface — it is not a sandbox and does not constrain what the spawned
+    /// plugin process does directly (network, filesystem, exec).
     #[serde(default)]
     pub capabilities: Vec<String>,
 }

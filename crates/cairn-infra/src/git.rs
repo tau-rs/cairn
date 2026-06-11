@@ -25,6 +25,24 @@ fn commit_touched_path(commit: &git2::Commit, path: &Path) -> Result<bool, git2:
     Ok(false)
 }
 
+/// The commit identity for cairn-made commits: the repo's configured git
+/// identity (`user.name`/`user.email`, as merged from local/global/system
+/// config) when both are set, else a `Cairn` default so a commit can still be
+/// made in a repo with no identity configured. Mirrors [`Repository::signature`]
+/// but takes the [`git2::Config`] directly so the fallback is testable without
+/// depending on the ambient global git identity.
+fn signature_from_config(config: &git2::Config) -> Result<Signature<'static>, PortError> {
+    match (
+        config.get_string("user.name"),
+        config.get_string("user.email"),
+    ) {
+        (Ok(name), Ok(email)) if !name.is_empty() && !email.is_empty() => {
+            Signature::now(&name, &email).map_err(adapt)
+        }
+        _ => Signature::now("Cairn", "cairn@localhost").map_err(adapt),
+    }
+}
+
 /// Operates on the git repository rooted at `root`.
 #[derive(Debug)]
 pub struct GitVcs {
@@ -67,8 +85,7 @@ impl Vcs for GitVcs {
         let tree = repo
             .find_tree(tree_id)
             .map_err(|e| PortError::Adapter(e.to_string()))?;
-        let sig = Signature::now("Cairn", "cairn@localhost")
-            .map_err(|e| PortError::Adapter(e.to_string()))?;
+        let sig = signature_from_config(&repo.config().map_err(adapt)?)?;
 
         let parent = repo
             .head()
@@ -196,6 +213,38 @@ mod tests {
             vcs.show("nope.md", "HEAD"),
             Err(PortError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn commit_uses_configured_git_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut vcs = GitVcs::open_or_init(tmp.path()).unwrap();
+        // A repo-local identity must override the `Cairn` default so cairn-made
+        // commits are attributed to the user.
+        let repo = Repository::open(tmp.path()).unwrap();
+        let mut cfg = repo.config().unwrap();
+        cfg.set_str("user.name", "Ada Lovelace").unwrap();
+        cfg.set_str("user.email", "ada@example.com").unwrap();
+
+        fs::write(tmp.path().join("a.md"), "hi").unwrap();
+        vcs.commit_all("first").unwrap();
+
+        let commit = repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(commit.author().name(), Some("Ada Lovelace"));
+        assert_eq!(commit.author().email(), Some("ada@example.com"));
+        assert_eq!(commit.committer().name(), Some("Ada Lovelace"));
+        assert_eq!(commit.committer().email(), Some("ada@example.com"));
+    }
+
+    #[test]
+    fn signature_falls_back_to_cairn_default_when_unset() {
+        // An empty config (no `user.name`/`user.email` anywhere) must yield the
+        // `Cairn` default so a commit can still be made. Tested against an
+        // isolated `Config` to avoid depending on the ambient global identity.
+        let empty = git2::Config::new().unwrap();
+        let sig = signature_from_config(&empty).unwrap();
+        assert_eq!(sig.name(), Some("Cairn"));
+        assert_eq!(sig.email(), Some("cairn@localhost"));
     }
 
     #[test]
