@@ -197,13 +197,19 @@ fn service_response<T: serde::Serialize>(
     match result {
         Ok(Ok(resp)) => (StatusCode::OK, Json(resp)).into_response(),
         Ok(Err(svc)) => (status_for(&svc), Json(ContractError::from(svc))).into_response(),
-        Err(_join) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ContractError::Internal {
-                message: "internal error".to_string(),
-            }),
-        )
-            .into_response(),
+        Err(join) => {
+            // A worker thread panicked. Log the JoinError with the request span's
+            // context (audit G5) so the panic is correlated to the request, but
+            // return only a generic message — never leak panic text to clients.
+            tracing::error!(error = %join, "request worker panicked");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ContractError::Internal {
+                    message: "internal error".to_string(),
+                }),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -330,6 +336,37 @@ async fn events_handler(
     ws.on_upgrade(move |socket| forward_events(socket, rx))
 }
 
+/// What the WS forward loop should do with a single broadcast `recv` outcome.
+enum WsForward {
+    /// Send this serialized event to the client.
+    Send(String),
+    /// Skip this event (it was dropped); keep the connection open.
+    Skip,
+    /// The broadcast channel closed; end the loop.
+    Stop,
+}
+
+/// Decide the WS forward action for one broadcast outcome, logging the
+/// intentionally best-effort drops (audit G4): a subscriber that lagged past the
+/// channel capacity, or an event that failed to serialize. Both keep the socket
+/// open, but neither should be silent.
+fn ws_event_action(event: Result<WireEvent, broadcast::error::RecvError>) -> WsForward {
+    match event {
+        Ok(ev) => match serde_json::to_string(&ev) {
+            Ok(text) => WsForward::Send(text),
+            Err(e) => {
+                tracing::warn!(error = %e, "ws: dropping event, serialize failed");
+                WsForward::Skip
+            }
+        },
+        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+            tracing::warn!(skipped, "ws: subscriber lagged, dropped events");
+            WsForward::Skip
+        }
+        Err(broadcast::error::RecvError::Closed) => WsForward::Stop,
+    }
+}
+
 async fn forward_events(mut socket: WebSocket, mut rx: broadcast::Receiver<WireEvent>) {
     loop {
         tokio::select! {
@@ -343,15 +380,14 @@ async fn forward_events(mut socket: WebSocket, mut rx: broadcast::Receiver<WireE
             }
             // Forward broadcast events as JSON text frames.
             event = rx.recv() => {
-                match event {
-                    Ok(ev) => {
-                        let Ok(text) = serde_json::to_string(&ev) else { continue };
+                match ws_event_action(event) {
+                    WsForward::Send(text) => {
                         if socket.send(Message::Text(text.into())).await.is_err() {
                             break;
                         }
                     }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => break,
+                    WsForward::Skip => continue,
+                    WsForward::Stop => break,
                 }
             }
         }
@@ -450,5 +486,32 @@ mod tests {
             resp.is_ok(),
             "poisoned mutex must be recovered, not propagated"
         );
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn lagged_subscriber_is_logged_and_skipped() {
+        // A subscriber that fell behind the broadcast capacity drops events;
+        // the loop continues but the drop is observable (audit G4).
+        let action = ws_event_action(Err(broadcast::error::RecvError::Lagged(7)));
+        assert!(matches!(action, WsForward::Skip));
+        assert!(logs_contain("ws: subscriber lagged, dropped events"));
+        assert!(logs_contain("skipped=7"));
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn worker_panic_logs_join_error_and_returns_500() {
+        // A panicking spawn_blocking worker yields a JoinError; it must be logged
+        // with request context and return a generic 500 (audit G5), never leaking
+        // the panic text to the client.
+        let join_err = tokio::task::spawn_blocking(|| panic!("simulated worker panic"))
+            .await
+            .expect_err("the worker panicked, so awaiting it yields a JoinError");
+        let resp = service_response::<()>(Err(join_err));
+
+        // The client gets a generic 500; panic text never reaches the response body.
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(logs_contain("request worker panicked"));
     }
 }
