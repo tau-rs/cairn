@@ -1,9 +1,13 @@
-//! HTTP + WebSocket transport over the cairn dispatcher. Binds localhost
-//! only; no authentication (LoopbackTrust). The engine runs synchronously
+//! HTTP + WebSocket transport over the cairn dispatcher. Binds localhost only.
+//! `/command` and `/query` require a local bearer token (audit S5; see the
+//! `auth` module and [`AppState::with_token`]). The engine runs synchronously
 //! under a mutex via `spawn_blocking`.
 
 pub mod config;
 pub use config::Config;
+
+mod auth;
+pub use auth::generate_token_file;
 
 use std::sync::{Arc, Mutex};
 
@@ -37,6 +41,10 @@ pub struct AppState {
     /// Origins permitted to open the `/events` WebSocket. Same allowlist the
     /// CORS layer enforces; empty denies all (deny-by-default).
     allowed_origins: Arc<[String]>,
+    /// Bearer token required on `/command` and `/query`. `None` disables auth
+    /// (the in-process/library/test default); the `cairn-daemon` binary always
+    /// sets a token via [`AppState::with_token`].
+    token: Option<Arc<str>>,
 }
 
 /// An `EventSink` that republishes engine events as wire events.
@@ -82,6 +90,7 @@ impl AppState {
             engine: Arc::new(Mutex::new(engine)),
             events,
             allowed_origins: Arc::from([]),
+            token: None,
         }
     }
 
@@ -91,6 +100,25 @@ impl AppState {
     pub fn with_allowed_origins(mut self, origins: Vec<String>) -> Self {
         self.allowed_origins = Arc::from(origins.into_boxed_slice());
         self
+    }
+
+    /// Require this bearer token on `/command` and `/query`. Reuse the same
+    /// optional-builder shape as [`AppState::with_allowed_origins`].
+    #[must_use]
+    pub fn with_token(mut self, token: impl Into<Arc<str>>) -> Self {
+        self.token = Some(token.into());
+        self
+    }
+
+    /// Lock the engine, recovering from poisoning instead of propagating it.
+    ///
+    /// A panic in any engine operation poisons the `Mutex`; with `.expect(...)`
+    /// every subsequent request would panic and 500 forever (audit: mutex-
+    /// poisoning DoS). The data behind the lock is a single engine whose
+    /// invariants are re-established on the next operation, so recovering the
+    /// guard and continuing is correct.
+    fn engine(&self) -> std::sync::MutexGuard<'_, CairnEngine> {
+        self.engine.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Run a command synchronously, publishing produced events.
@@ -103,7 +131,7 @@ impl AppState {
     /// # Errors
     /// Returns [`ServiceError`] on invalid input or engine failure.
     pub fn run_command_blocking(&self, command: &Command) -> Result<CommandResponse, ServiceError> {
-        let mut guard = self.engine.lock().expect("engine mutex poisoned");
+        let mut guard = self.engine();
         let mut tap = EventTap {
             tx: self.events.clone(),
             collected: Vec::new(),
@@ -131,7 +159,7 @@ impl AppState {
     /// # Errors
     /// Returns [`ServiceError`] on invalid input or engine failure.
     pub fn run_query_blocking(&self, query: &Query) -> Result<QueryResponse, ServiceError> {
-        let guard = self.engine.lock().expect("engine mutex poisoned");
+        let guard = self.engine();
         dispatch_query(&guard, query)
     }
 
@@ -139,7 +167,7 @@ impl AppState {
     /// events to subscribers. Best-effort: a transient failure is logged, not
     /// propagated, so the watch loop keeps running.
     pub fn apply_change_blocking(&self, change: &cairn_ports::FsChange) {
-        let mut guard = self.engine.lock().expect("engine mutex poisoned");
+        let mut guard = self.engine();
         let mut tap = EventTap {
             tx: self.events.clone(),
             collected: Vec::new(),
@@ -372,11 +400,59 @@ pub fn cors_layer(origins: &[String]) -> tower_http::cors::CorsLayer {
 }
 
 /// Build the axum router for the given state.
+///
+/// `/command` and `/query` require the bearer token (audit S5). `/health` is an
+/// open liveness probe; `/events` keeps its own Origin gate (audit S2) and is
+/// not token-gated in this increment.
 pub fn build_router(state: AppState) -> Router {
-    Router::new()
+    let protected = Router::new()
         .route("/command", post(command_handler))
         .route("/query", post(query_handler))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_token,
+        ));
+    let open = Router::new()
         .route("/events", get(events_handler))
-        .route("/health", get(health_handler))
-        .with_state(state)
+        .route("/health", get(health_handler));
+    protected.merge(open).with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cairn_infra::{GitVcs, LocalFsStore, TantivyIndex};
+
+    fn state(dir: &std::path::Path) -> AppState {
+        AppState::new(Engine::new(
+            LocalFsStore::open(dir).unwrap(),
+            TantivyIndex::in_memory().unwrap(),
+            GitVcs::open_or_init(dir).unwrap(),
+        ))
+    }
+
+    #[test]
+    fn poisoned_engine_mutex_still_serves_requests() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state(tmp.path());
+
+        // Poison the mutex: panic while holding the engine lock.
+        let st = state.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = st.engine.lock().unwrap();
+            panic!("simulated engine panic under lock");
+        })
+        .join();
+        assert!(
+            state.engine.is_poisoned(),
+            "precondition: mutex is poisoned"
+        );
+
+        // Despite poisoning, a request must still succeed rather than 500 forever.
+        let resp = state.run_query_blocking(&Query::ListNotes);
+        assert!(
+            resp.is_ok(),
+            "poisoned mutex must be recovered, not propagated"
+        );
+    }
 }

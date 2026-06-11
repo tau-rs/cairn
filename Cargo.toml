@@ -44,6 +44,7 @@ notify = "8"
 notify-debouncer-full = "0.7"
 tower-http = { version = "0.6", features = ["cors"] }
 toml = "1"
+getrandom = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-test = { version = "0.2", features = ["no-env-filter"] }

@@ -10,6 +10,11 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, UNIX_EPOCH};
 
+/// Schema version of `.cairn/state.json`. Tags the hash regime: bump this
+/// whenever `Note::content_hash`'s algorithm changes so stale persisted hashes
+/// are rebuilt (cold) rather than silently trusted.
+const STATE_SCHEMA_VERSION: u32 = 1;
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct StateEntry {
     path: String,
@@ -21,6 +26,8 @@ struct StateEntry {
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct StatePayload {
+    #[serde(default)]
+    schema_version: u32,
     entries: Vec<StateEntry>,
 }
 
@@ -139,7 +146,23 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
         match self.store.read_meta()? {
             Some(json) => match parse_state(&json) {
                 Ok(restored) => self.reconcile_warm(restored, sink),
-                Err(()) => self.reconcile_cold(sink),
+                // A stale schema/hash regime is an expected migration: rebuild
+                // quietly, exactly as before versioning.
+                Err(StateRejection::Stale) => self.reconcile_cold(sink),
+                Err(StateRejection::Corrupt(reason)) => {
+                    // Preserve the corrupt blob (best-effort) so it is not lost,
+                    // then warn before abandoning the warm-start path. A failed
+                    // preservation is itself reported rather than swallowed.
+                    let preserved = match self.store.quarantine_meta() {
+                        Ok(dest) => dest,
+                        Err(e) => {
+                            eprintln!("warning: could not preserve rejected state.json: {e}");
+                            None
+                        }
+                    };
+                    eprintln!("{}", state_rejected_warning(&reason, preserved.as_deref()));
+                    self.reconcile_cold(sink)
+                }
             },
             None => self.reconcile_cold(sink),
         }
@@ -207,8 +230,11 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
                 len: stamp.len,
             });
         }
-        let json = serde_json::to_string(&StatePayload { entries })
-            .map_err(|e| PortError::Adapter(e.to_string()))?;
+        let json = serde_json::to_string(&StatePayload {
+            schema_version: STATE_SCHEMA_VERSION,
+            entries,
+        })
+        .map_err(|e| PortError::Adapter(e.to_string()))?;
         self.store.write_meta(&json)
     }
 
@@ -507,12 +533,13 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
     /// Invoke a plugin command, servicing any host-callbacks it makes mid-invoke.
     ///
     /// The host is moved out of `self` for the duration (see below). If the host
-    /// *panics*, `self.plugins` is left as a [`NoopPluginHost`] rather than
-    /// restored — accepted, since a panicking host already implies a poisoned
-    /// engine (no `catch_unwind` guard).
+    /// *panics*, the unwind is caught and surfaced as [`PortError::Adapter`], and
+    /// the host is restored — a panicking plugin must not unwind through the
+    /// daemon's locked engine and poison the mutex (audit: mutex-poisoning DoS).
     ///
     /// # Errors
-    /// Propagates [`PortError`] from the plugin host.
+    /// Propagates [`PortError`] from the plugin host, or [`PortError::Adapter`]
+    /// if the host panicked.
     pub fn invoke_plugin_command(
         &mut self,
         plugin: &str,
@@ -524,22 +551,34 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> Engine<S, I, V> {
         // the callbacks handler can then borrow the rest of `self` (the store) to
         // service host-callbacks the plugin sends mid-invoke.
         let mut host = std::mem::replace(&mut self.plugins, Box::new(NoopPluginHost));
-        let result = {
+        // Catch a panicking host so it surfaces as an error instead of unwinding
+        // through the daemon's locked engine (which would poison the mutex and
+        // brick the daemon). `self`/`host` are only borrowed for the call, so
+        // `AssertUnwindSafe` is sound: on panic the engine's `RefCell` borrow
+        // guards unwind cleanly and `host` (owned here, not by the closure) is
+        // restored below.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut cb = EngineCallbacks { engine: self, sink };
             host.invoke(plugin, command, args, &mut cb)
             // cb is dropped here, releasing the &mut self borrow
-        };
+        }));
         self.plugins = host;
-        result
+        result.unwrap_or_else(|_| Err(PortError::Adapter("plugin host panicked".into())))
     }
 
     /// Deliver a cairn event to subscribed plugins (best-effort). Event-handler
     /// callbacks route through the engine, and any events they emit go to `sink`.
     pub fn dispatch_plugin_event(&mut self, event: &PluginEvent, sink: &mut dyn EventSink) {
         let mut host = std::mem::replace(&mut self.plugins, Box::new(NoopPluginHost));
-        {
+        // Catch a panicking host (see `invoke_plugin_command`) so a plugin can't
+        // poison the daemon's engine mutex via event dispatch. Best-effort: this
+        // method has no error channel, so a panic is logged and swallowed.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut cb = EngineCallbacks { engine: self, sink };
             host.dispatch_event(event, &mut cb);
+        }));
+        if outcome.is_err() {
+            eprintln!("plugin host panicked handling event {event:?}");
         }
         self.plugins = host;
     }
@@ -587,11 +626,41 @@ impl<S: VaultStore, I: SearchIndex, V: Vcs> PluginCallbacks for EngineCallbacks<
 
 type RestoredState = HashMap<NotePath, (u64, FileStamp)>;
 
-fn parse_state(json: &str) -> Result<RestoredState, ()> {
-    let payload: StatePayload = serde_json::from_str(json).map_err(|_| ())?;
+/// Why a persisted `state.json` could not be restored.
+#[derive(Debug)]
+enum StateRejection {
+    /// A routine, expected mismatch — the schema / hash regime changed, so the
+    /// persisted hashes are stale. Nothing is wrong with the file; rebuild
+    /// quietly rather than alarming the user or quarantining it.
+    Stale,
+    /// The blob is malformed or internally invalid. Preserve it for diagnosis
+    /// and warn, rather than discarding a genuine problem silently.
+    Corrupt(String),
+}
+
+/// The warning text emitted when a persisted `state.json` is rejected as
+/// corrupt. Pure so it is unit-testable as captured output; the caller writes
+/// it to stderr.
+fn state_rejected_warning(reason: &str, preserved: Option<&str>) -> String {
+    match preserved {
+        Some(dest) => format!(
+            "warning: persisted state.json rejected ({reason}); preserved at {dest}, rebuilding index"
+        ),
+        None => format!("warning: persisted state.json rejected ({reason}); rebuilding index"),
+    }
+}
+
+fn parse_state(json: &str) -> Result<RestoredState, StateRejection> {
+    let payload: StatePayload =
+        serde_json::from_str(json).map_err(|e| StateRejection::Corrupt(e.to_string()))?;
+    if payload.schema_version != STATE_SCHEMA_VERSION {
+        return Err(StateRejection::Stale); // different/absent hash regime → reconcile_cold rebuilds
+    }
     let mut map = HashMap::with_capacity(payload.entries.len());
     for e in payload.entries {
-        let path = NotePath::new(&e.path).map_err(|_| ())?;
+        let path = NotePath::new(&e.path).map_err(|err| {
+            StateRejection::Corrupt(format!("invalid note path {}: {err}", e.path))
+        })?;
         let modified = UNIX_EPOCH + Duration::new(e.mtime_secs, e.mtime_nanos);
         map.insert(
             path,
@@ -646,6 +715,99 @@ mod tests {
         fn write_meta(&self, data: &str) -> Result<(), PortError> {
             self.inner.write_meta(data)
         }
+        fn quarantine_meta(&self) -> Result<Option<String>, PortError> {
+            self.inner.quarantine_meta()
+        }
+    }
+
+    #[test]
+    fn warning_message_names_reason_and_preserved_path() {
+        // The emitted (stderr) warning text — asserted here as captured output
+        // via the pure formatter that feeds eprintln!.
+        let msg = state_rejected_warning(
+            "expected value at line 1",
+            Some("/v/.cairn/state.json.corrupt"),
+        );
+        assert!(msg.contains("state.json"));
+        assert!(msg.contains("expected value at line 1"));
+        assert!(msg.contains("/v/.cairn/state.json.corrupt"));
+
+        let msg_none = state_rejected_warning("bad", None);
+        assert!(msg_none.contains("bad"));
+        assert!(msg_none.contains("rebuild"));
+    }
+
+    #[test]
+    fn corrupt_state_is_preserved_and_rebuild_succeeds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = LocalFsStore::open(tmp.path()).unwrap();
+        std::fs::write(tmp.path().join("a.md"), "hello").unwrap();
+        // Plant a corrupt state.json the warm path cannot parse.
+        store.write_meta("{ not valid json").unwrap();
+
+        let mut eng = Engine::new(
+            store,
+            InMemoryIndex::default(),
+            GitVcs::open_or_init(tmp.path()).unwrap(),
+        );
+        let mut ev = Vec::new();
+        eng.reconcile(&mut ev).unwrap(); // must not error; falls back to cold rebuild
+
+        // The note got indexed by the cold rebuild.
+        assert_eq!(ev, vec![Event::Reindexed(1)]);
+        // The corrupt file was preserved, not silently dropped.
+        let corrupt = tmp.path().join(".cairn").join("state.json.corrupt");
+        assert_eq!(
+            std::fs::read_to_string(&corrupt).unwrap(),
+            "{ not valid json"
+        );
+        // A fresh, valid state.json was written by the rebuild.
+        let fresh = tmp.path().join(".cairn").join("state.json");
+        assert!(parse_state(&std::fs::read_to_string(&fresh).unwrap()).is_ok());
+    }
+
+    #[test]
+    fn parse_state_returns_reason_on_bad_json() {
+        match parse_state("{ not json").unwrap_err() {
+            StateRejection::Corrupt(reason) => {
+                assert!(!reason.is_empty(), "reason must be non-empty")
+            }
+            StateRejection::Stale => panic!("malformed JSON should be Corrupt, not Stale"),
+        }
+    }
+
+    #[test]
+    fn stale_schema_is_not_quarantined() {
+        // A schema/hash-regime bump is an expected migration (every pre-versioning
+        // state.json hits it on first upgrade): rebuild quietly, do NOT rename the
+        // file to .corrupt — that is reserved for genuinely malformed state.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = LocalFsStore::open(tmp.path()).unwrap();
+        std::fs::write(tmp.path().join("a.md"), "hello").unwrap();
+        // Valid JSON, but a future/legacy schema version the warm path won't trust.
+        store
+            .write_meta(&format!(
+                "{{\"schema_version\":{},\"entries\":[]}}",
+                STATE_SCHEMA_VERSION + 1
+            ))
+            .unwrap();
+
+        let mut eng = Engine::new(
+            store,
+            InMemoryIndex::default(),
+            GitVcs::open_or_init(tmp.path()).unwrap(),
+        );
+        eng.reconcile(&mut Vec::new()).unwrap();
+
+        // No quarantine file left behind for a benign migration.
+        assert!(!tmp
+            .path()
+            .join(".cairn")
+            .join("state.json.corrupt")
+            .exists());
+        // A fresh, current-version state.json was written by the rebuild.
+        let fresh = tmp.path().join(".cairn").join("state.json");
+        assert!(parse_state(&std::fs::read_to_string(&fresh).unwrap()).is_ok());
     }
 
     #[test]
@@ -1185,6 +1347,90 @@ mod tests {
             .any(|h| h.path.as_str() == "c.md"));
     }
 
+    #[test]
+    fn parse_state_rejects_mismatched_schema_version() {
+        // A payload from a different (future) hash regime must not seed memo.
+        let json = serde_json::json!({
+            "schema_version": STATE_SCHEMA_VERSION + 1,
+            "entries": []
+        })
+        .to_string();
+        assert!(parse_state(&json).is_err());
+    }
+
+    #[test]
+    fn parse_state_rejects_legacy_state_without_version() {
+        // Pre-versioning state.json (no schema_version field) is rebuilt, not trusted.
+        let json = r#"{"entries":[]}"#;
+        assert!(parse_state(json).is_err());
+    }
+
+    #[test]
+    fn save_state_round_trips_through_parse_state() {
+        // save_state's serialized field names must match what parse_state reads:
+        // a serde rename of `schema_version`/`entries` would slip past the
+        // hand-built-JSON tests but break real persistence.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.md"), "alpha body").unwrap();
+        let mut eng = engine(tmp.path());
+        eng.reconcile(&mut Vec::new()).unwrap();
+
+        let store = LocalFsStore::open(tmp.path()).unwrap();
+        let raw = store.read_meta().unwrap().unwrap();
+        let restored = parse_state(&raw).expect("save_state output must parse back");
+        assert!(restored.contains_key(&NotePath::new("a.md").unwrap()));
+    }
+
+    #[test]
+    fn parse_state_accepts_current_version() {
+        let json = serde_json::json!({
+            "schema_version": STATE_SCHEMA_VERSION,
+            "entries": []
+        })
+        .to_string();
+        assert!(parse_state(&json).is_ok());
+    }
+
+    #[test]
+    fn stale_state_json_triggers_full_rebuild() {
+        // End-to-end: a state.json from a different regime must rebuild the
+        // index (re-read every note) rather than warm-start off stale hashes.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.md"), "alpha body").unwrap();
+        std::fs::write(tmp.path().join("b.md"), "beta body").unwrap();
+
+        // First run writes a current-version state.json.
+        {
+            let mut eng = engine(tmp.path());
+            eng.reconcile(&mut Vec::new()).unwrap();
+        }
+
+        // Rewrite state.json with a bumped schema_version (simulated future regime).
+        let store = LocalFsStore::open(tmp.path()).unwrap();
+        let raw = store.read_meta().unwrap().unwrap();
+        let mut payload: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        payload["schema_version"] =
+            serde_json::json!(payload["schema_version"].as_u64().unwrap() + 1);
+        store.write_meta(&payload.to_string()).unwrap();
+
+        // Reconcile again with a read-counting store: a rebuild re-reads both notes.
+        let reads = Arc::new(AtomicUsize::new(0));
+        let mut eng = Engine::new(
+            CountingStore {
+                inner: LocalFsStore::open(tmp.path()).unwrap(),
+                reads: reads.clone(),
+            },
+            InMemoryIndex::default(),
+            GitVcs::open_or_init(tmp.path()).unwrap(),
+        );
+        eng.reconcile(&mut Vec::new()).unwrap();
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            2,
+            "stale schema_version forces a full rebuild that re-reads every note"
+        );
+    }
+
     /// A stub host whose dispatch_event writes a marker note via the callbacks —
     /// exercises Engine::dispatch_plugin_event + handler callbacks.
     struct EventWriter;
@@ -1247,5 +1493,46 @@ mod tests {
         eng.restore_note(&a, &v1_rev, &mut events).unwrap();
         assert_eq!(eng.read_note(&a).unwrap(), "v1");
         assert!(events.contains(&Event::NoteChanged(a.clone())));
+    }
+
+    /// A host whose invoke panics — simulates a buggy or malicious plugin host.
+    struct PanickingHost;
+    impl PluginHost for PanickingHost {
+        fn plugins(&self) -> Vec<PluginInfo> {
+            vec![PluginInfo {
+                id: "boom".into(),
+                name: "boom".into(),
+                version: "0".into(),
+                commands: Vec::new(),
+            }]
+        }
+        fn invoke(
+            &mut self,
+            _plugin: &str,
+            _command: &str,
+            _args: &serde_json::Value,
+            _callbacks: &mut dyn cairn_ports::PluginCallbacks,
+        ) -> Result<serde_json::Value, PortError> {
+            panic!("plugin host panicked mid-invoke");
+        }
+    }
+
+    #[test]
+    fn plugin_panic_is_caught_and_engine_survives() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut events = Vec::new();
+        let a = NotePath::new("a.md").unwrap();
+        eng.write_note(&a, "hello body", &mut events).unwrap();
+
+        eng.set_plugin_host(Box::new(PanickingHost));
+        let mut sink: Vec<Event> = Vec::new();
+        // The panic must surface as an error, not unwind through the caller (which,
+        // in the daemon, holds the engine mutex — an unwind would poison it).
+        let res = eng.invoke_plugin_command("boom", "x", &serde_json::Value::Null, &mut sink);
+        assert!(matches!(res, Err(PortError::Adapter(_))));
+
+        // The engine is still usable afterward — its state was not corrupted.
+        assert_eq!(eng.read_note(&a).unwrap(), "hello body");
     }
 }

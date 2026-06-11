@@ -71,6 +71,23 @@ For the full design rationale see
 and the first architecture decision record at
 [`docs/decisions/0001-walking-skeleton.md`](docs/decisions/0001-walking-skeleton.md).
 
+## Daemon trust model
+
+`cairn-daemon` binds `127.0.0.1` only. Its `/command` and `/query` routes
+require a local bearer token: on startup the daemon writes a random token to
+`<cairn>/.cairn/token` (mode `0600`) and requires it as an
+`Authorization: Bearer <token>` header. Any client with filesystem access to the
+cairn reads that file; on a multi-user host the `0600` permissions restrict that
+to the cairn's owner, so another local user cannot drive the daemon. The token
+is regenerated each startup.
+
+`/health` is an open liveness probe. The `/events` WebSocket is gated by an
+Origin allowlist (see [`docs/decisions/0004-daemon-cors.md`](docs/decisions/0004-daemon-cors.md));
+cross-origin browser access to the daemon is governed by the same CORS
+allowlist. See [`docs/decisions/0010-daemon-auth.md`](docs/decisions/0010-daemon-auth.md)
+for the authentication design and its deferred increments (Unix-socket
+transport, token-gated events, the browser-UI token channel).
+
 ## Vocabulary
 
 | Concept | Cairn term |

@@ -72,6 +72,15 @@ pub trait VaultStore {
     /// # Errors
     /// `Adapter` on an IO failure.
     fn write_meta(&self, data: &str) -> Result<(), PortError>;
+
+    /// Move a rejected metadata blob aside so it is not lost to a fresh write,
+    /// renaming `<root>/.cairn/state.json` to `state.json.corrupt`. Best-effort
+    /// diagnostics aid. Returns the destination path (for logging), or
+    /// `Ok(None)` if there was nothing to move.
+    ///
+    /// # Errors
+    /// `Adapter` on an IO failure during the rename.
+    fn quarantine_meta(&self) -> Result<Option<String>, PortError>;
 }
 
 /// A single ranked search match.
