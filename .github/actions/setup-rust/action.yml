@@ -34,6 +34,12 @@ inputs:
       Ignored on non-Linux runners.
     required: false
     default: "false"
+  with-just:
+    description: |
+      Install the `just` command runner (true / false). Jobs whose `run:`
+      step shells through a `just` verb must set this.
+    required: false
+    default: "false"
 
 runs:
   using: composite
@@ -88,6 +94,12 @@ runs:
       uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
       with:
         tool: nextest
+
+    - name: Install just
+      if: inputs.with-just == 'true'
+      uses: taiki-e/install-action@v2
+      with:
+        tool: just
 
     - name: Cache cargo registry, target, and sccache
       uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
