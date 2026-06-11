@@ -251,6 +251,9 @@ mod tests {
         assert_eq!(NotePath::new("C:secret"), Err(NotePathError::Absolute));
         // Lowercase drive letter.
         assert_eq!(NotePath::new(r"d:\x"), Err(NotePathError::Absolute));
+        // Already-forward-slashed input (no backslashes to normalize) is caught
+        // by the same guard, not just the `C:\...` spelling.
+        assert_eq!(NotePath::new("C:/secret"), Err(NotePathError::Absolute));
         // UNC root: `\\host\share` -> `//host/share`, already absolute. Locked in here.
         assert_eq!(NotePath::new(r"\\host\share"), Err(NotePathError::Absolute));
         // A colon mid-segment is NOT a drive prefix; only a leading `<letter>:`
