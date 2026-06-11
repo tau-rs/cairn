@@ -1,4 +1,5 @@
 use assert_cmd::Command;
+use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 
 /// A `cairn` invocation pre-pointed at `dir` via `--cairn`.
@@ -44,6 +45,81 @@ fn write_search_backlinks_commit_flow() {
         .assert()
         .success()
         .stdout(contains("committed"));
+}
+
+#[test]
+fn reinit_reports_already_a_cairn() {
+    // D9: a second `init` on an existing cairn must report it as a no-op,
+    // distinct from the fresh-init success line, instead of silently claiming
+    // it initialized again.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    cairn(dir)
+        .arg("init")
+        .assert()
+        .success()
+        .stdout(contains("initialized cairn"));
+    cairn(dir)
+        .arg("init")
+        .assert()
+        .success()
+        .stdout(contains("already a cairn"))
+        .stdout(contains("initialized cairn").not());
+}
+
+#[test]
+fn short_query_search_prints_hint() {
+    // D11: a sub-2-char query is rejected by the n-gram index; the CLI must
+    // surface a hint (on stderr) rather than a bare empty result.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    cairn(dir).arg("init").assert().success();
+    cairn(dir)
+        .args(["write", "a.md", "alpha beta"])
+        .assert()
+        .success();
+    cairn(dir)
+        .args(["search", "a"])
+        .assert()
+        .success()
+        .stderr(contains("minimum"));
+    // A long-enough query still works and prints no hint.
+    cairn(dir)
+        .args(["search", "alpha"])
+        .assert()
+        .success()
+        .stdout(contains("a.md"))
+        .stderr(contains("minimum").not());
+}
+
+#[test]
+fn non_search_commands_work_without_a_startup_reindex() {
+    // D2: `backlinks` and `list` read the lazy notes-cache directly, so they
+    // must return correct results even though the CLI no longer builds the
+    // search index on startup for them.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    cairn(dir).arg("init").assert().success();
+    cairn(dir)
+        .args(["write", "a.md", "links to [[b]]"])
+        .assert()
+        .success();
+    cairn(dir)
+        .args(["write", "b.md", "target"])
+        .assert()
+        .success();
+
+    cairn(dir)
+        .args(["backlinks", "b.md"])
+        .assert()
+        .success()
+        .stdout(contains("a.md"));
+    cairn(dir)
+        .arg("list")
+        .assert()
+        .success()
+        .stdout(contains("a.md"))
+        .stdout(contains("b.md"));
 }
 
 #[test]

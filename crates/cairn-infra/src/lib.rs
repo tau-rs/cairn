@@ -14,4 +14,4 @@ pub use localfs::{ensure_cairn_dir, LocalFsStore};
 pub use notify_watcher::NotifyWatcher;
 pub use plugin_host::{ProcessPluginHost, TrustedPlugins, DEFAULT_PLUGIN_TIMEOUT};
 pub use seams::{BlockingExecutor, NoCollab, NoopWatcher, NullRuntime};
-pub use tantivy_index::TantivyIndex;
+pub use tantivy_index::{TantivyIndex, MIN_QUERY_CHARS};
