@@ -5,15 +5,19 @@ use cairn_daemon::{build_router, AppState};
 use cairn_infra::{GitVcs, LocalFsStore, TantivyIndex};
 use tower::ServiceExt; // for `oneshot`
 
-const TOKEN: &str = "test-token-abc123";
+// A realistic 64-hex token, matching what the daemon generates at startup.
+const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-fn app(dir: &std::path::Path) -> axum::Router {
-    let engine = Engine::new(
+fn engine(dir: &std::path::Path) -> Engine<LocalFsStore, TantivyIndex, GitVcs> {
+    Engine::new(
         LocalFsStore::open(dir).unwrap(),
         TantivyIndex::in_memory().unwrap(),
         GitVcs::open_or_init(dir).unwrap(),
-    );
-    build_router(AppState::new(engine).with_token(TOKEN))
+    )
+}
+
+fn app(dir: &std::path::Path) -> axum::Router {
+    build_router(AppState::new(engine(dir)).with_token(TOKEN))
 }
 
 fn write_command(auth: Option<&str>) -> Request<Body> {
@@ -86,6 +90,16 @@ async fn query_also_requires_token() {
         .unwrap();
     let resp = app(tmp.path()).oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn no_token_configured_serves_without_auth() {
+    // The in-process/library default (`AppState::new`, no `with_token`) disables
+    // the gate: a `/command` with no Authorization header still succeeds.
+    let tmp = tempfile::tempdir().unwrap();
+    let app = build_router(AppState::new(engine(tmp.path())));
+    let resp = app.oneshot(write_command(None)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
 }
 
 #[tokio::test]
