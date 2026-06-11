@@ -24,6 +24,11 @@ const SNIPPET_MAX_CHARS: usize = 160;
 /// Smallest n-gram (and minimum useful query length).
 const NGRAM_MIN: usize = 2;
 
+/// Smallest query (in characters, after trimming) the n-gram index can match.
+/// Shorter queries match no n-gram and always return empty, so callers should
+/// surface a hint rather than a bare empty result (audit D11).
+pub const MIN_QUERY_CHARS: usize = NGRAM_MIN;
+
 /// A Tantivy full-text index over note bodies and paths.
 pub struct TantivyIndex {
     index: Index,
@@ -143,7 +148,7 @@ impl SearchIndex for TantivyIndex {
 
     fn search(&self, query: &str) -> Result<Vec<SearchHit>, PortError> {
         let q = query.trim();
-        if q.chars().count() < NGRAM_MIN {
+        if q.chars().count() < MIN_QUERY_CHARS {
             return Ok(Vec::new());
         }
         let searcher = self.reader.searcher();

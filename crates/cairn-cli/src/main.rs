@@ -6,7 +6,7 @@ use std::process::ExitCode;
 
 use cairn_app::{Engine, Event, EventSink};
 use cairn_contract::{Command as WireCommand, CommandResponse, Query as WireQuery, QueryResponse};
-use cairn_infra::{GitVcs, LocalFsStore, NotifyWatcher, TantivyIndex};
+use cairn_infra::{GitVcs, LocalFsStore, NotifyWatcher, TantivyIndex, MIN_QUERY_CHARS};
 use cairn_ports::Watcher;
 use cairn_service::{app_event_to_wire, dispatch_command, dispatch_query, run_watch_loop};
 use clap::{Parser, Subcommand};
@@ -128,6 +128,41 @@ enum Command {
     },
 }
 
+/// Whether a command needs the O(vault) startup reindex. `search` consults the
+/// full-text index it builds; `watch` seeds its dedup memo/stamps from it so a
+/// spurious first event on a pre-existing note is suppressed. Every other
+/// command reads the store or the lazy notes-cache directly, so we skip the
+/// full disk read for them — it is wasted on a one-shot `read`, `commit`, or
+/// `backlinks` (audit D2).
+fn needs_startup_reindex(command: &Command) -> bool {
+    matches!(command, Command::Search { .. } | Command::Watch { .. })
+}
+
+/// The message `init` prints. Distinguishes a freshly created cairn from a
+/// re-run on an existing one, so `init` is no longer silently a no-op that
+/// always reports success (audit D9).
+fn init_message(already: bool, root: &Path) -> String {
+    if already {
+        format!("already a cairn at {}", root.display())
+    } else {
+        format!("initialized cairn at {}", root.display())
+    }
+}
+
+/// A hint to print when a search query is too short for the n-gram index to
+/// match anything. `None` when the query is long enough. Mirrors the index's
+/// own `trim().chars().count()` rejection so the hint fires exactly when the
+/// index returns empty for being too short (audit D11).
+fn short_query_hint(query: &str) -> Option<String> {
+    if query.trim().chars().count() < MIN_QUERY_CHARS {
+        Some(format!(
+            "hint: query is shorter than the {MIN_QUERY_CHARS}-character minimum; no results"
+        ))
+    } else {
+        None
+    }
+}
+
 fn build_engine(root: &Path) -> Result<Engine<LocalFsStore, TantivyIndex, GitVcs>, String> {
     let store = LocalFsStore::open(root).map_err(|e| e.to_string())?;
     let vcs = GitVcs::open_or_init(root).map_err(|e| e.to_string())?;
@@ -143,7 +178,10 @@ fn run() -> Result<(), String> {
     // Only `init` may create a new cairn. Every other command requires an
     // existing one, so we never silently `git init` in the user's directory.
     // `.git` is a dir in a normal repo but a file in worktrees/submodules.
-    if !matches!(cli.command, Command::Init) && !root.join(".git").exists() {
+    // Capture this before `build_engine`'s `open_or_init` would create it, so
+    // `init` can tell a created cairn from a no-op (D9).
+    let is_cairn = root.join(".git").exists();
+    if !matches!(cli.command, Command::Init) && !is_cairn {
         return Err(format!(
             "not a cairn at {0} (run `cairn --cairn {0} init` first)",
             root.display()
@@ -151,12 +189,16 @@ fn run() -> Result<(), String> {
     }
 
     let mut engine = build_engine(&root)?;
-    // Always reindex on startup so queries see current content.
-    engine.reindex(&mut events).map_err(|e| e.to_string())?;
+    // Build the search index only for commands that need it (D2): a full
+    // reindex is O(vault) work and a full disk read, wasted on a one-shot
+    // `read`, `commit`, or `backlinks`.
+    if needs_startup_reindex(&cli.command) {
+        engine.reindex(&mut events).map_err(|e| e.to_string())?;
+    }
 
     match cli.command {
         Command::Init => {
-            println!("initialized cairn at {}", root.display());
+            println!("{}", init_message(is_cairn, &root));
         }
         Command::Write { path, contents } => {
             let resp = dispatch_command(
@@ -193,6 +235,9 @@ fn run() -> Result<(), String> {
             println!("renamed {from} -> {to}");
         }
         Command::Search { query } => {
+            if let Some(hint) = short_query_hint(&query) {
+                eprintln!("{hint}");
+            }
             if let QueryResponse::SearchResults { results } =
                 dispatch_query(&engine, &WireQuery::Search { query }).map_err(|e| e.to_string())?
             {
@@ -347,6 +392,45 @@ mod tests {
             ],
         );
         assert_eq!(out, "changed a.md\nremoved b.md\n");
+    }
+
+    #[test]
+    fn only_search_and_watch_need_the_startup_reindex() {
+        // D2: `search` consults the full-text index and `watch` seeds the
+        // dedup memo/stamps from it; every other command reads the store /
+        // notes-cache directly, so we skip the O(vault) build for them.
+        assert!(needs_startup_reindex(&Command::Search {
+            query: "x".into()
+        }));
+        assert!(needs_startup_reindex(&Command::Watch { json: false }));
+        assert!(!needs_startup_reindex(&Command::Read {
+            path: "a.md".into()
+        }));
+        assert!(!needs_startup_reindex(&Command::Commit {
+            message: "m".into()
+        }));
+        assert!(!needs_startup_reindex(&Command::Backlinks {
+            path: "a.md".into()
+        }));
+        assert!(!needs_startup_reindex(&Command::Init));
+    }
+
+    #[test]
+    fn init_message_distinguishes_fresh_from_existing() {
+        // D9: a fresh init and a re-run on an existing cairn read differently.
+        let p = Path::new("/tmp/v");
+        assert_eq!(init_message(false, p), "initialized cairn at /tmp/v");
+        assert_eq!(init_message(true, p), "already a cairn at /tmp/v");
+    }
+
+    #[test]
+    fn short_query_yields_hint() {
+        // D11: a sub-2-char or whitespace query gets a hint, not a silent empty.
+        assert!(short_query_hint("a").is_some());
+        assert!(short_query_hint("  ").is_some());
+        assert!(short_query_hint("").is_some());
+        assert!(short_query_hint("ab").is_none());
+        assert!(short_query_hint("hello").is_none());
     }
 
     #[test]
