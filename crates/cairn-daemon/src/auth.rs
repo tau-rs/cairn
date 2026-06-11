@@ -6,6 +6,8 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 
+use axum::http::{header, HeaderMap};
+
 /// Generate a fresh 64-char lowercase-hex bearer token, write it to
 /// `<cairn_root>/.cairn/token` with mode `0600` (truncating any prior token),
 /// and return it. Creates the `.cairn` directory if absent.
@@ -56,9 +58,64 @@ fn write_secret_file(path: &Path, contents: &str) -> io::Result<()> {
     fs::write(path, contents)
 }
 
+/// True if `headers` carry `Authorization: Bearer <token>` whose token equals
+/// `expected`. Missing, non-UTF-8, or non-`Bearer` headers are rejected
+/// (deny-by-default, mirroring the CORS/Origin gates).
+pub(crate) fn bearer_matches(headers: &HeaderMap, expected: &str) -> bool {
+    let Some(value) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return false;
+    };
+    let Some(token) = value.strip_prefix("Bearer ") else {
+        return false;
+    };
+    ct_eq(token.as_bytes(), expected.as_bytes())
+}
+
+/// Constant-time byte comparison. The length check leaks only the token length,
+/// which is fixed and public; the value comparison itself is timing-independent.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::{header, HeaderMap, HeaderValue};
+
+    fn headers_with(auth: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(header::AUTHORIZATION, HeaderValue::from_str(auth).unwrap());
+        h
+    }
+
+    #[test]
+    fn ct_eq_matches_and_rejects() {
+        assert!(ct_eq(b"abc", b"abc"));
+        assert!(!ct_eq(b"abc", b"abd"));
+        assert!(!ct_eq(b"abc", b"ab")); // differing length
+    }
+
+    #[test]
+    fn bearer_matches_accepts_correct_token() {
+        assert!(bearer_matches(&headers_with("Bearer secret"), "secret"));
+    }
+
+    #[test]
+    fn bearer_matches_rejects_wrong_scheme_value_and_missing() {
+        assert!(!bearer_matches(&headers_with("Bearer nope"), "secret"));
+        assert!(!bearer_matches(&headers_with("Basic secret"), "secret"));
+        assert!(!bearer_matches(&HeaderMap::new(), "secret"));
+    }
 
     #[cfg(unix)]
     #[test]
