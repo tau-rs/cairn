@@ -20,6 +20,38 @@ The companion session `01-cairn-rce` closes the *write-a-manifest* path
 that are legitimately present on disk: a present plugin must be **explicitly
 approved**, not blindly trusted.
 
+## Trust model: an approved plugin is fully-trusted code
+
+State this plainly, because it is easy to misread the allowlist as a sandbox:
+
+**An approved (trusted-listed) plugin is fully-trusted code. It runs as a child
+of the daemon, with the daemon's full operating-system privileges — the same
+user, filesystem, network, and process access the daemon itself has.** There is
+**no OS-level sandbox** around the spawned child (seccomp/landlock/sandbox-exec
+is a deferred follow-up, see below).
+
+The allowlist gates **whether a plugin runs, not what it can do.** Adding a
+directory name to `[plugins].trusted` is the act of granting that directory
+arbitrary-code-execution as the daemon user. Two things follow:
+
+- The manifest `capabilities` field constrains only the **host-callback RPC
+  surface** (`host/readNote`, `host/writeNote`, etc. — see
+  [the SDK design doc](2026-06-10-plugin-sdk-design.md) for the author-facing
+  callback API and [ADR-0008](../../decisions/0008-plugin-host.md) for the host
+  enforcement). It does **not** constrain what the spawned process does directly:
+  a plugin can open sockets, read and write any file the daemon user can reach,
+  and exec further binaries regardless of its declared capabilities. Capabilities
+  are a convenience boundary on the callback channel, not a security boundary on
+  the process.
+- Trusting a plugin is therefore a decision to trust its author and its exact
+  on-disk contents, by the same standard you would apply to any binary you run
+  yourself. Trust is anchored on the **directory name** (controlled by whoever
+  administers the cairn), not the self-declared manifest `id`.
+
+The allowlist exists so that *presence on disk* is no longer *permission to run*;
+it deliberately does not, and is not intended to, make an untrusted plugin safe
+to run.
+
 ## Scope of this PR (smallest viable increment)
 
 Add a **default-deny allowlist gate before spawn**. Out of scope (listed as
@@ -150,3 +182,5 @@ churn centralized).
 - OS-level sandbox for the spawned child (seccomp/landlock/sandbox-exec).
 - Interactive first-run approval + surfacing declared capabilities to the user.
 - Documentation: state explicitly that an approved plugin is fully trusted code.
+  *(Done — see "Trust model" above and the security note in
+  `crates/cairn-plugin-sdk/src/lib.rs`.)*

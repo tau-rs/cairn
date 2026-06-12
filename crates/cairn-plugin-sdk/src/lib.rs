@@ -27,6 +27,24 @@
 //!
 //! plugin.run(); // owns the stdio loop; returns only on stdin EOF
 //! ```
+//!
+//! # Trust and privileges
+//!
+//! A plugin the daemon agrees to run is **fully-trusted code**. It is spawned as
+//! a child of the daemon and runs with the daemon's full operating-system
+//! privileges — the same user, filesystem, network, and process access. There is
+//! **no OS-level sandbox** around the plugin process.
+//!
+//! The daemon's trusted-list (`[plugins].trusted` in `cairn.toml`) gates *whether*
+//! a plugin runs, not *what it can do*. The `capabilities` declared in a plugin's
+//! manifest constrain only the host-callback methods on [`Host`]
+//! (`read_note`/`write_note`/`search`/`list_notes`); they do **not** sandbox the
+//! process, which can use the network, filesystem, and exec directly regardless of
+//! what it declares. Approving a plugin is therefore equivalent to trusting its
+//! author and its exact on-disk contents to run as you. See the trust design doc
+//! (`docs/superpowers/specs/2026-06-11-cairn-plugin-trust-design.md`) and
+//! the SDK design doc
+//! (`docs/superpowers/specs/2026-06-10-plugin-sdk-design.md`).
 
 use std::io::{BufRead, Write};
 
