@@ -30,9 +30,37 @@ pub struct PluginsConfig {
     pub timeout_secs: Option<u64>,
     /// Plugin directory names the user trusts to spawn. Absent/empty ⇒ no plugin
     /// is spawned (default-deny). The name must match the plugin's directory
-    /// under `<cairn>/.cairn/plugins/`.
+    /// under `<cairn>/.cairn/plugins/`. Each entry may be a bare string
+    /// (legacy/shorthand) or a `[[plugins.trusted]]` table with optional `hash`.
     #[serde(default)]
-    pub trusted: Vec<String>,
+    pub trusted: Vec<TrustedEntry>,
+}
+
+/// One entry in `[plugins].trusted`. Parsed untagged so both the legacy bare
+/// string form (`trusted = ["name"]`) and the table form
+/// (`[[plugins.trusted]] dir = "name" hash = "sha256:..."`) are accepted. A
+/// bare string and a table with `hash` omitted both mean "trusted, unpinned".
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum TrustedEntry {
+    /// Legacy / shorthand: trust by directory name, no pin.
+    Name(String),
+    /// Table form: directory name plus an optional pinned content hash.
+    Pinned {
+        dir: String,
+        #[serde(default)]
+        hash: Option<String>,
+    },
+}
+
+impl TrustedEntry {
+    /// Reduce to `(dir_name, optional_pin_string)` for `TrustedPlugins`.
+    pub fn normalize(&self) -> (String, Option<String>) {
+        match self {
+            TrustedEntry::Name(dir) => (dir.clone(), None),
+            TrustedEntry::Pinned { dir, hash } => (dir.clone(), hash.clone()),
+        }
+    }
 }
 
 /// On-disk index persistence settings.
@@ -161,9 +189,30 @@ mod tests {
     }
 
     #[test]
-    fn plugins_trusted_parses() {
+    fn plugins_trusted_legacy_strings_parse() {
         let c: Config = toml::from_str("[plugins]\ntrusted = [\"a\", \"b\"]").unwrap();
-        assert_eq!(c.plugins.trusted, vec!["a".to_string(), "b".to_string()]);
+        let entries: Vec<_> = c.plugins.trusted.iter().map(|e| e.normalize()).collect();
+        assert_eq!(
+            entries,
+            vec![("a".to_string(), None), ("b".to_string(), None)]
+        );
+    }
+
+    #[test]
+    fn plugins_trusted_table_with_hash_parses() {
+        let pin = format!("sha256:{}", "a".repeat(64));
+        let toml = format!("[[plugins.trusted]]\ndir = \"a\"\nhash = \"{pin}\"\n");
+        let c: Config = toml::from_str(&toml).unwrap();
+        assert_eq!(
+            c.plugins.trusted[0].normalize(),
+            ("a".to_string(), Some(pin))
+        );
+    }
+
+    #[test]
+    fn plugins_trusted_table_without_hash_parses() {
+        let c: Config = toml::from_str("[[plugins.trusted]]\ndir = \"a\"\n").unwrap();
+        assert_eq!(c.plugins.trusted[0].normalize(), ("a".to_string(), None));
     }
 
     #[test]
@@ -173,7 +222,7 @@ mod tests {
             .plugins
             .trusted
             .is_empty());
-        assert!(toml::from_str::<Config>("[plugins]\n")
+        assert!(toml::from_str::<Config>("[plugins]\ntimeout_secs = 5")
             .unwrap()
             .plugins
             .trusted

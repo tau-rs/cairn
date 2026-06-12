@@ -87,7 +87,9 @@ async fn run() -> Result<(), String> {
     // Load engine plugins from <cairn>/.cairn/plugins (absent dir => none).
     // Default-deny: only directories listed in [plugins].trusted are spawned.
     let plugins_dir = cli.cairn.join(".cairn").join("plugins");
-    let trusted = cairn_infra::TrustedPlugins::from_ids(config.plugins.trusted.clone());
+    let trusted = cairn_infra::TrustedPlugins::from_ids(
+        config.plugins.trusted.iter().map(|e| e.normalize().0),
+    );
     if config.plugins.trusted.is_empty() {
         tracing::info!(
             "plugins: none trusted (add [plugins].trusted = [\"<dir>\"] to {}/cairn.toml to enable)",
