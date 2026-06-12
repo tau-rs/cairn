@@ -456,7 +456,9 @@ impl ProcessPluginHost {
                     );
                     continue;
                 }
-                Some(_) => {} // pinned and matches: spawn below
+                // The guard arm above consumed the mismatch, so reaching here
+                // means computed == expected — pinned and verified: spawn below.
+                Some(_) => {}
                 None => {
                     eprintln!(
                         "plugin: {dir_name} is trusted but unpinned; pin it by setting \
