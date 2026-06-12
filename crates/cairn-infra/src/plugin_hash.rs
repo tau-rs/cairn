@@ -60,6 +60,7 @@ mod tests {
         assert!(PinnedHash::parse(&"a".repeat(64)).is_err()); // no prefix
         assert!(PinnedHash::parse("sha256:abc").is_err()); // too short
         assert!(PinnedHash::parse(&format!("sha256:{}", "a".repeat(63))).is_err()); // 63
+        assert!(PinnedHash::parse(&format!("sha256:{}", "a".repeat(65))).is_err()); // 65
         assert!(PinnedHash::parse(&format!("sha256:{}", "A".repeat(64))).is_err()); // uppercase
         assert!(PinnedHash::parse(&format!("sha256:{}", "g".repeat(64))).is_err()); // non-hex
         assert!(PinnedHash::parse(&format!("blake3:{}", "a".repeat(64))).is_err());
