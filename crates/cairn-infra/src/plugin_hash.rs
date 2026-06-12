@@ -112,6 +112,8 @@ fn collect_files(
         if ft.is_dir() {
             collect_files(root, &path, out)?;
         } else if ft.is_file() {
+            // Infallible by construction (`path` is always under `root`); the
+            // guard is defensive and keeps `rel` total.
             let rel = path.strip_prefix(root).map_err(|_| {
                 PortError::Adapter(format!("path {} escaped plugin dir", path.display()).into())
             })?;
@@ -120,7 +122,7 @@ fn collect_files(
             for comp in rel.components() {
                 let part = comp.as_os_str().to_str().ok_or_else(|| {
                     PortError::Adapter(
-                        format!("non-UTF-8 path under {}; refusing", root.display()).into(),
+                        format!("non-UTF-8 path component in {}; refusing", path.display()).into(),
                     )
                 })?;
                 if !norm.is_empty() {
@@ -203,11 +205,19 @@ mod tests {
         std::fs::create_dir(tmp.path().join("sub")).unwrap();
         std::fs::write(tmp.path().join("sub").join("b.txt"), b"world").unwrap();
 
+        // `hash_files` sorts internally, so the input order here is irrelevant;
+        // the nested file's `/`-joined relative path is what `of_dir` must emit.
         let expected = hash_files(vec![
             ("a.txt".to_string(), b"hello".to_vec()),
             ("sub/b.txt".to_string(), b"world".to_vec()),
         ]);
         assert_eq!(PinnedHash::of_dir(tmp.path()).unwrap(), expected);
+    }
+
+    #[test]
+    fn of_dir_empty_dir_is_valid() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(PinnedHash::of_dir(tmp.path()).is_ok());
     }
 
     #[test]
