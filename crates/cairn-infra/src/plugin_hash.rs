@@ -6,7 +6,9 @@
 //! wrong-compare. The hashing construction under the `sha256:` prefix is a
 //! stability contract and must not change once pins exist in the wild.
 
-use cairn_ports::PortError;
+use std::path::Path;
+
+use cairn_ports::{AdapterError, PortError};
 use sha2::{Digest, Sha256};
 
 const PREFIX: &str = "sha256:";
@@ -17,6 +19,22 @@ const HEX_LEN: usize = 64; // 32 bytes of SHA-256, lowercase hex
 pub struct PinnedHash(String);
 
 impl PinnedHash {
+    /// Hash a plugin directory tree (every regular file, recursively).
+    ///
+    /// Relative paths are normalized to `/` separators so the pin is stable
+    /// across platforms. Symlinks and other non-regular files are **refused**
+    /// (not followed): following one would re-open the directory-escape hole
+    /// this feature closes.
+    ///
+    /// # Errors
+    /// [`PortError::Adapter`] on a symlink/non-regular file, a non-UTF-8 path,
+    /// or any IO error reading the tree.
+    pub fn of_dir(dir: &Path) -> Result<Self, PortError> {
+        let mut files = Vec::new();
+        collect_files(dir, dir, &mut files)?;
+        Ok(hash_files(files))
+    }
+
     /// Parse a stored pin. Rejects unknown prefixes, wrong length, non-hex.
     ///
     /// # Errors
@@ -53,7 +71,6 @@ impl std::fmt::Display for PinnedHash {
 /// separator (cannot appear in a path), the byte length as little-endian u64,
 /// and the bytes. The separator + length framing makes the serialization
 /// unambiguous, so no two distinct trees share a hash.
-#[allow(dead_code)] // called by the forthcoming `PinnedHash::of_dir`
 fn hash_files(mut files: Vec<(String, Vec<u8>)>) -> PinnedHash {
     files.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
     let mut hasher = Sha256::new();
@@ -71,6 +88,55 @@ fn hash_files(mut files: Vec<(String, Vec<u8>)>) -> PinnedHash {
         let _ = write!(hex, "{byte:02x}");
     }
     PinnedHash(hex)
+}
+
+/// Recursively gather `(relative_path, bytes)` under `root`. `current` is the
+/// directory presently being walked. Refuses symlinks and non-regular files.
+fn collect_files(
+    root: &Path,
+    current: &Path,
+    out: &mut Vec<(String, Vec<u8>)>,
+) -> Result<(), PortError> {
+    let adapt = |e: std::io::Error| PortError::Adapter(AdapterError::new(e));
+    for entry in std::fs::read_dir(current).map_err(adapt)? {
+        let entry = entry.map_err(adapt)?;
+        let path = entry.path();
+        // `file_type()` from `read_dir` does NOT follow symlinks, so this
+        // detects a symlink itself rather than its target.
+        let ft = entry.file_type().map_err(adapt)?;
+        if ft.is_symlink() {
+            return Err(PortError::Adapter(
+                format!("contains a symlink ({}); refusing", path.display()).into(),
+            ));
+        }
+        if ft.is_dir() {
+            collect_files(root, &path, out)?;
+        } else if ft.is_file() {
+            let rel = path.strip_prefix(root).map_err(|_| {
+                PortError::Adapter(format!("path {} escaped plugin dir", path.display()).into())
+            })?;
+            // Join components with `/` for a platform-stable relative path.
+            let mut norm = String::new();
+            for comp in rel.components() {
+                let part = comp.as_os_str().to_str().ok_or_else(|| {
+                    PortError::Adapter(
+                        format!("non-UTF-8 path under {}; refusing", root.display()).into(),
+                    )
+                })?;
+                if !norm.is_empty() {
+                    norm.push('/');
+                }
+                norm.push_str(part);
+            }
+            let bytes = std::fs::read(&path).map_err(adapt)?;
+            out.push((norm, bytes));
+        } else {
+            return Err(PortError::Adapter(
+                format!("contains a non-regular file ({}); refusing", path.display()).into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -128,5 +194,39 @@ mod tests {
         let a = vec![("f".to_string(), b"one".to_vec())];
         let b = vec![("f".to_string(), b"two".to_vec())];
         assert_ne!(hash_files(a), hash_files(b));
+    }
+
+    #[test]
+    fn of_dir_matches_manual_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), b"hello").unwrap();
+        std::fs::create_dir(tmp.path().join("sub")).unwrap();
+        std::fs::write(tmp.path().join("sub").join("b.txt"), b"world").unwrap();
+
+        let expected = hash_files(vec![
+            ("a.txt".to_string(), b"hello".to_vec()),
+            ("sub/b.txt".to_string(), b"world".to_vec()),
+        ]);
+        assert_eq!(PinnedHash::of_dir(tmp.path()).unwrap(), expected);
+    }
+
+    #[test]
+    fn of_dir_detects_content_drift() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), b"before").unwrap();
+        let h1 = PinnedHash::of_dir(tmp.path()).unwrap();
+        std::fs::write(tmp.path().join("a.txt"), b"after").unwrap();
+        let h2 = PinnedHash::of_dir(tmp.path()).unwrap();
+        assert_ne!(h1, h2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn of_dir_refuses_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("real.txt"), b"x").unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("real.txt"), tmp.path().join("link.txt"))
+            .unwrap();
+        assert!(PinnedHash::of_dir(tmp.path()).is_err());
     }
 }
