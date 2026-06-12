@@ -429,12 +429,40 @@ impl ProcessPluginHost {
             let Some(dir_name) = dir_name.filter(|n| !n.is_empty()) else {
                 continue; // unnameable in a trust list; never spawn it
             };
-            if trusted.get(dir_name).is_none() {
-                eprintln!(
-                    "plugin: skipping {dir_name} (not in [plugins] trusted; \
-                     add \"{dir_name}\" to cairn.toml to enable)"
-                );
-                continue;
+            let pin = match trusted.get(dir_name) {
+                None => {
+                    eprintln!(
+                        "plugin: skipping {dir_name} (not in [plugins] trusted; \
+                         add \"{dir_name}\" to cairn.toml to enable)"
+                    );
+                    continue;
+                }
+                Some(pin) => pin,
+            };
+            // Trusted: hash the directory tree before spawning. A symlink /
+            // non-regular file / IO error here is a refusal, not a panic.
+            let computed = match PinnedHash::of_dir(&plugin_dir) {
+                Ok(h) => h,
+                Err(e) => {
+                    eprintln!("plugin: refusing {dir_name}: {e}");
+                    continue;
+                }
+            };
+            match pin {
+                Some(expected) if &computed != expected => {
+                    eprintln!(
+                        "plugin: refusing {dir_name}: contents changed (pinned {expected}, \
+                         found {computed}); re-approve by updating hash in cairn.toml"
+                    );
+                    continue;
+                }
+                Some(_) => {} // pinned and matches: spawn below
+                None => {
+                    eprintln!(
+                        "plugin: {dir_name} is trusted but unpinned; pin it by setting \
+                         hash = \"{computed}\" in cairn.toml"
+                    );
+                }
             }
             match Self::spawn_plugin(&plugin_dir, timeout) {
                 Ok(p) => loaded.push(p),
