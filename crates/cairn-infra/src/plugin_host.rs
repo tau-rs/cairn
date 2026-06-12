@@ -1,6 +1,6 @@
 //! `PluginHost` backed by child processes speaking JSON-RPC/NDJSON over stdio.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -8,6 +8,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use crate::PinnedHash;
 use cairn_plugin_protocol::{
     write_message, CairnEvent, CairnEventKind, CommandDecl, DeleteNoteParams, Incoming,
     InitializeParams, InitializeResult, InvokeParams, ListNotesResult, Manifest, NoteSummaryDto,
@@ -56,27 +57,47 @@ fn required_cap(method: &str) -> Option<&'static str> {
     }
 }
 
-/// The set of plugin **directory names** the user has explicitly trusted. A
-/// plugin under `<cairn>/.cairn/plugins/<dir>` is spawned only if `<dir>` is in
-/// this set — the directory name is the trust anchor because the user controls
-/// it, unlike the manifest's self-declared `id`. An empty set trusts nothing.
+/// The set of plugin **directory names** the user has explicitly trusted, each
+/// with an optional pinned content hash. A plugin under
+/// `<cairn>/.cairn/plugins/<dir>` is spawned only if `<dir>` is a key here; if
+/// its value is `Some(pin)`, the directory's contents must hash to `pin` or it
+/// is refused (drift). `None` = trusted but unpinned (spawns with a warning).
+/// An empty map trusts nothing.
 #[derive(Debug, Default, Clone)]
-pub struct TrustedPlugins(HashSet<String>);
+pub struct TrustedPlugins(HashMap<String, Option<PinnedHash>>);
 
 impl TrustedPlugins {
-    /// A set that trusts no plugin (default-deny).
+    /// A map that trusts no plugin (default-deny).
     pub fn none() -> Self {
         Self::default()
     }
 
-    /// Build from an iterator of trusted directory names.
+    /// Build from directory names, all unpinned. Retained for callers (and
+    /// tests) that only express name trust.
     pub fn from_ids<I: IntoIterator<Item = String>>(ids: I) -> Self {
-        Self(ids.into_iter().collect())
+        Self(ids.into_iter().map(|id| (id, None)).collect())
     }
 
-    /// Is this plugin directory name trusted?
-    pub fn contains(&self, dir_name: &str) -> bool {
-        self.0.contains(dir_name)
+    /// Build from `(dir_name, optional_pin_string)` pairs, parsing each pin.
+    ///
+    /// # Errors
+    /// [`PortError::Adapter`] if any pin string is malformed (fail-fast: a
+    /// typo'd pin must not silently degrade to "unpinned").
+    pub fn from_entries<I: IntoIterator<Item = (String, Option<String>)>>(
+        entries: I,
+    ) -> Result<Self, PortError> {
+        let mut map = HashMap::new();
+        for (dir, pin) in entries {
+            let parsed = pin.map(|p| PinnedHash::parse(&p)).transpose()?;
+            map.insert(dir, parsed);
+        }
+        Ok(Self(map))
+    }
+
+    /// Trust + pin for a directory name. Outer `None` ⇒ not trusted; inner
+    /// `None` ⇒ trusted but unpinned; `Some(&pin)` ⇒ pinned.
+    pub fn get(&self, dir_name: &str) -> Option<&Option<PinnedHash>> {
+        self.0.get(dir_name)
     }
 }
 
@@ -408,7 +429,7 @@ impl ProcessPluginHost {
             let Some(dir_name) = dir_name.filter(|n| !n.is_empty()) else {
                 continue; // unnameable in a trust list; never spawn it
             };
-            if !trusted.contains(dir_name) {
+            if trusted.get(dir_name).is_none() {
                 eprintln!(
                     "plugin: skipping {dir_name} (not in [plugins] trusted; \
                      add \"{dir_name}\" to cairn.toml to enable)"
@@ -632,11 +653,25 @@ mod tests {
     }
 
     #[test]
-    fn trusted_set_membership() {
+    fn from_ids_yields_unpinned_entries() {
         let trusted = TrustedPlugins::from_ids(["a".to_string(), "b".to_string()]);
-        assert!(trusted.contains("a"));
-        assert!(trusted.contains("b"));
-        assert!(!trusted.contains("c"));
-        assert!(!TrustedPlugins::none().contains("a"));
+        assert!(matches!(trusted.get("a"), Some(None)));
+        assert!(matches!(trusted.get("b"), Some(None)));
+        assert!(trusted.get("c").is_none());
+        assert!(TrustedPlugins::none().get("a").is_none());
+    }
+
+    #[test]
+    fn from_entries_parses_pins_and_rejects_bad() {
+        let good = TrustedPlugins::from_entries([(
+            "a".to_string(),
+            Some(format!("sha256:{}", "a".repeat(64))),
+        )])
+        .unwrap();
+        assert!(matches!(good.get("a"), Some(Some(_))));
+
+        assert!(
+            TrustedPlugins::from_entries([("a".to_string(), Some("bogus".to_string()))]).is_err()
+        );
     }
 }
