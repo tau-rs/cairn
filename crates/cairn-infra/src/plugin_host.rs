@@ -409,7 +409,7 @@ impl ProcessPluginHost {
                 continue; // unnameable in a trust list; never spawn it
             };
             if !trusted.contains(dir_name) {
-                eprintln!(
+                tracing::warn!(
                     "plugin: skipping {dir_name} (not in [plugins] trusted; \
                      add \"{dir_name}\" to cairn.toml to enable)"
                 );
@@ -417,7 +417,7 @@ impl ProcessPluginHost {
             }
             match Self::spawn_plugin(&plugin_dir, timeout) {
                 Ok(p) => loaded.push(p),
-                Err(e) => eprintln!("plugin: skipping {}: {e}", plugin_dir.display()),
+                Err(e) => tracing::warn!("plugin: skipping {}: {e}", plugin_dir.display()),
             }
         }
         Ok(Self { loaded })

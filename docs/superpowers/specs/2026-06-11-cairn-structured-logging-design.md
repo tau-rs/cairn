@@ -128,6 +128,8 @@ gap the finding describes).
 | file watcher disabled | `eprintln!` | `warn!` |
 | fatal `error: {e}` in `main` | `eprintln!` | `error!` |
 | `lib.rs` watch `apply_change failed` | `eprintln!` | `warn!` |
+| plugin host: skipping untrusted dir | `eprintln!` | `warn!` |
+| plugin host: skipping plugin that failed to spawn | `eprintln!` | `warn!` |
 
 ## Testing & verification
 
