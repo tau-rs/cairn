@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -19,7 +19,7 @@ use cairn_plugin_protocol::{
 };
 use cairn_ports::{
     AdapterError, EventDispatchError, PluginCallbacks, PluginCommand, PluginEvent, PluginHost,
-    PluginInfo, PortError,
+    PluginInfo, PortError, Sandbox,
 };
 
 /// Map a ports event to its wire form for delivery to plugins.
@@ -395,8 +395,12 @@ impl ProcessPluginHost {
     ///
     /// # Errors
     /// [`PortError::Adapter`] only on an unexpected IO error reading the dir.
-    pub fn load(dir: &Path, trusted: &TrustedPlugins) -> Result<Self, PortError> {
-        Self::load_with_timeout(dir, DEFAULT_PLUGIN_TIMEOUT, trusted)
+    pub fn load(
+        dir: &Path,
+        trusted: &TrustedPlugins,
+        sandbox: &dyn Sandbox,
+    ) -> Result<Self, PortError> {
+        Self::load_with_timeout(dir, DEFAULT_PLUGIN_TIMEOUT, trusted, sandbox)
     }
 
     /// Like [`Self::load`] but with an explicit per-message read `timeout` (used by
@@ -408,6 +412,7 @@ impl ProcessPluginHost {
         dir: &Path,
         timeout: Duration,
         trusted: &TrustedPlugins,
+        sandbox: &dyn Sandbox,
     ) -> Result<Self, PortError> {
         let mut loaded = Vec::new();
         let entries = match std::fs::read_dir(dir) {
@@ -466,15 +471,19 @@ impl ProcessPluginHost {
                     );
                 }
             }
-            match Self::spawn_plugin(&plugin_dir, timeout) {
+            match Self::spawn_plugin(&plugin_dir, timeout, sandbox) {
                 Ok(p) => loaded.push(p),
-                Err(e) => tracing::warn!("plugin: skipping {}: {e}", plugin_dir.display()),
+                Err(e) => tracing::warn!("plugin: refusing {}: {e}", plugin_dir.display()),
             }
         }
         Ok(Self { loaded })
     }
 
-    fn spawn_plugin(plugin_dir: &Path, timeout: Duration) -> Result<LoadedPlugin, PortError> {
+    fn spawn_plugin(
+        plugin_dir: &Path,
+        timeout: Duration,
+        sandbox: &dyn Sandbox,
+    ) -> Result<LoadedPlugin, PortError> {
         let raw = std::fs::read_to_string(plugin_dir.join("manifest.toml")).map_err(adapt)?;
         let manifest: Manifest = toml::from_str(&raw).map_err(adapt)?;
 
@@ -503,8 +512,10 @@ impl ProcessPluginHost {
                 plugin_dir.join(p)
             }
         };
-        let mut child = Command::new(&cmd_path)
-            .args(&manifest.engine.args)
+        let mut command = sandbox
+            .wrap(plugin_dir, &cmd_path, &manifest.engine.args)
+            .map_err(adapt)?;
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -627,6 +638,20 @@ impl PluginHost for ProcessPluginHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sandbox::RefusingSandbox;
+    use cairn_ports::SandboxError;
+    use std::process::Command;
+
+    /// Test double: spawns the command verbatim (no OS jail) so the spawn path
+    /// is exercised on every platform without Seatbelt.
+    struct PermissiveSandbox;
+    impl Sandbox for PermissiveSandbox {
+        fn wrap(&self, _dir: &Path, cmd: &Path, args: &[String]) -> Result<Command, SandboxError> {
+            let mut c = Command::new(cmd);
+            c.args(args);
+            Ok(c)
+        }
+    }
 
     /// Write `<root>/<dir_name>/manifest.toml` declaring `id` and a non-spawnable
     /// command.
@@ -647,7 +672,9 @@ mod tests {
     fn load_absent_dir_is_empty() {
         let tmp = tempfile::tempdir().unwrap();
         let trusted = TrustedPlugins::from_ids(["anything".to_string()]);
-        let host = ProcessPluginHost::load(&tmp.path().join("missing"), &trusted).unwrap();
+        let host =
+            ProcessPluginHost::load(&tmp.path().join("missing"), &trusted, &PermissiveSandbox)
+                .unwrap();
         assert!(host.plugins().is_empty());
     }
 
@@ -657,7 +684,7 @@ mod tests {
         write_plugin(tmp.path(), "broken", "broken");
         let trusted = TrustedPlugins::from_ids(["broken".to_string()]);
         // Trusted but the command can't spawn: load succeeds, plugin absent.
-        let host = ProcessPluginHost::load(tmp.path(), &trusted).unwrap();
+        let host = ProcessPluginHost::load(tmp.path(), &trusted, &PermissiveSandbox).unwrap();
         assert!(host.plugins().is_empty());
     }
 
@@ -666,7 +693,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_plugin(tmp.path(), "rogue", "rogue");
         // Empty trust set => default-deny.
-        let host = ProcessPluginHost::load(tmp.path(), &TrustedPlugins::none()).unwrap();
+        let host = ProcessPluginHost::load(tmp.path(), &TrustedPlugins::none(), &PermissiveSandbox)
+            .unwrap();
         assert!(host.plugins().is_empty());
     }
 
@@ -678,7 +706,18 @@ mod tests {
         let pdir = tmp.path().join("rogue");
         std::fs::create_dir_all(&pdir).unwrap();
         std::fs::write(pdir.join("manifest.toml"), "this is not valid toml {{{").unwrap();
-        let host = ProcessPluginHost::load(tmp.path(), &TrustedPlugins::none()).unwrap();
+        let host = ProcessPluginHost::load(tmp.path(), &TrustedPlugins::none(), &PermissiveSandbox)
+            .unwrap();
+        assert!(host.plugins().is_empty());
+    }
+
+    #[test]
+    fn unavailable_sandbox_refuses_spawn() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_plugin(tmp.path(), "p", "p");
+        let trusted = TrustedPlugins::from_ids(["p".to_string()]);
+        // RefusingSandbox => the plugin is refused, never spawned.
+        let host = ProcessPluginHost::load(tmp.path(), &trusted, &RefusingSandbox).unwrap();
         assert!(host.plugins().is_empty());
     }
 

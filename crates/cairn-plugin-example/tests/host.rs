@@ -1,7 +1,19 @@
 use cairn_domain::{Note, NotePath};
 use cairn_infra::{PinnedHash, ProcessPluginHost, TrustedPlugins};
-use cairn_ports::{PluginCallbacks, PluginHost, PortError, SearchHit};
+use cairn_ports::{PluginCallbacks, PluginHost, PortError, Sandbox, SandboxError, SearchHit};
 use std::collections::HashMap;
+use std::path::Path;
+use std::process::Command;
+
+/// Test double: spawns the command verbatim (no OS jail).
+struct PermissiveSandbox;
+impl Sandbox for PermissiveSandbox {
+    fn wrap(&self, _dir: &Path, cmd: &Path, args: &[String]) -> Result<Command, SandboxError> {
+        let mut c = Command::new(cmd);
+        c.args(args);
+        Ok(c)
+    }
+}
 
 fn write_manifest(pdir: &std::path::Path, bin: &str, caps: &str) {
     std::fs::create_dir_all(pdir).unwrap();
@@ -27,7 +39,12 @@ fn setup_example_dir(tmp: &std::path::Path) -> std::path::PathBuf {
 /// Load a host from `<tmp>/.cairn/plugins`, trusting the `example` plugin.
 fn load_example(tmp: &std::path::Path) -> ProcessPluginHost {
     let dir = tmp.join(".cairn").join("plugins");
-    ProcessPluginHost::load(&dir, &TrustedPlugins::from_ids(["example".to_string()])).unwrap()
+    ProcessPluginHost::load(
+        &dir,
+        &TrustedPlugins::from_ids(["example".to_string()]),
+        &PermissiveSandbox,
+    )
+    .unwrap()
 }
 
 /// Like `load_example` but with an explicit per-message timeout.
@@ -40,6 +57,7 @@ fn load_example_with_timeout(
         &dir,
         timeout,
         &TrustedPlugins::from_ids(["example".to_string()]),
+        &PermissiveSandbox,
     )
     .unwrap()
 }
@@ -434,9 +452,12 @@ fn approved_plugin_is_spawned_unapproved_is_not() {
     write_manifest(&plugins.join("example"), bin, "");
     write_manifest(&plugins.join("rogue"), bin, "");
     // Only `example` is trusted; `rogue` must be skipped by the trust gate.
-    let host =
-        ProcessPluginHost::load(&plugins, &TrustedPlugins::from_ids(["example".to_string()]))
-            .unwrap();
+    let host = ProcessPluginHost::load(
+        &plugins,
+        &TrustedPlugins::from_ids(["example".to_string()]),
+        &PermissiveSandbox,
+    )
+    .unwrap();
     let ids: Vec<String> = host.plugins().into_iter().map(|p| p.id).collect();
     assert_eq!(ids, vec!["example".to_string()]);
 }
@@ -447,7 +468,8 @@ fn default_deny_spawns_nothing() {
     let tmp = tempfile::tempdir().unwrap();
     let plugins = tmp.path().join(".cairn").join("plugins");
     write_manifest(&plugins.join("example"), bin, "");
-    let host = ProcessPluginHost::load(&plugins, &TrustedPlugins::none()).unwrap();
+    let host =
+        ProcessPluginHost::load(&plugins, &TrustedPlugins::none(), &PermissiveSandbox).unwrap();
     assert!(host.plugins().is_empty());
 }
 
@@ -458,7 +480,7 @@ fn pinned_matching_hash_spawns() {
     let pin = PinnedHash::of_dir(&pdir).unwrap().to_string();
     let dir = tmp.path().join(".cairn").join("plugins");
     let trusted = TrustedPlugins::from_entries([("example".to_string(), Some(pin))]).unwrap();
-    let host = ProcessPluginHost::load(&dir, &trusted).unwrap();
+    let host = ProcessPluginHost::load(&dir, &trusted, &PermissiveSandbox).unwrap();
     assert_eq!(host.plugins().len(), 1);
 }
 
@@ -471,7 +493,7 @@ fn drifted_hash_refuses() {
     std::fs::write(pdir.join("evil.txt"), b"tampered").unwrap();
     let dir = tmp.path().join(".cairn").join("plugins");
     let trusted = TrustedPlugins::from_entries([("example".to_string(), Some(pin))]).unwrap();
-    let host = ProcessPluginHost::load(&dir, &trusted).unwrap();
+    let host = ProcessPluginHost::load(&dir, &trusted, &PermissiveSandbox).unwrap();
     assert!(host.plugins().is_empty());
 }
 
@@ -481,7 +503,7 @@ fn unpinned_trusted_spawns() {
     setup_example_dir(tmp.path());
     let dir = tmp.path().join(".cairn").join("plugins");
     let trusted = TrustedPlugins::from_ids(["example".to_string()]);
-    let host = ProcessPluginHost::load(&dir, &trusted).unwrap();
+    let host = ProcessPluginHost::load(&dir, &trusted, &PermissiveSandbox).unwrap();
     assert_eq!(host.plugins().len(), 1);
 }
 
@@ -493,7 +515,7 @@ fn symlink_in_trusted_dir_refuses() {
     std::os::unix::fs::symlink(pdir.join("manifest.toml"), pdir.join("link.toml")).unwrap();
     let dir = tmp.path().join(".cairn").join("plugins");
     let trusted = TrustedPlugins::from_ids(["example".to_string()]);
-    let host = ProcessPluginHost::load(&dir, &trusted).unwrap();
+    let host = ProcessPluginHost::load(&dir, &trusted, &PermissiveSandbox).unwrap();
     assert!(host.plugins().is_empty());
 }
 
@@ -510,9 +532,12 @@ fn trusted_dir_with_mismatched_manifest_id_is_rejected() {
         format!("id=\"evil\"\nname=\"E\"\nversion=\"0\"\n[engine]\ncommand='{bin}'\n"),
     )
     .unwrap();
-    let host =
-        ProcessPluginHost::load(&plugins, &TrustedPlugins::from_ids(["example".to_string()]))
-            .unwrap();
+    let host = ProcessPluginHost::load(
+        &plugins,
+        &TrustedPlugins::from_ids(["example".to_string()]),
+        &PermissiveSandbox,
+    )
+    .unwrap();
     assert!(
         host.plugins().is_empty(),
         "id-mismatched plugin must not load"
