@@ -73,11 +73,13 @@ pub struct InitializeParams {
 }
 
 /// Result of `initialize`: the plugin's identity + declared commands.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InitializeResult {
     pub name: String,
     pub version: String,
     pub commands: Vec<CommandDecl>,
+    #[serde(default)]
+    pub contributions: Vec<PluginContribution>,
 }
 
 /// A command the plugin declares it can handle.
@@ -85,6 +87,75 @@ pub struct InitializeResult {
 pub struct CommandDecl {
     pub id: String,
     pub title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginIcon {
+    Tag,
+    Search,
+    Note,
+    Folder,
+    Link,
+    Star,
+    Info,
+    Play,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum PluginSlot {
+    #[serde(rename = "sidebar.section")]
+    SidebarSection,
+    #[serde(rename = "topbar.action")]
+    TopbarAction,
+    #[serde(rename = "command")]
+    Command,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PluginListItem {
+    pub id: String,
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon: Option<PluginIcon>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub args: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PluginWidget {
+    Text {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        muted: Option<bool>,
+    },
+    Action {
+        label: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        icon: Option<PluginIcon>,
+        command: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        args: Option<serde_json::Value>,
+    },
+    List {
+        items: Vec<PluginListItem>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PluginContribution {
+    pub id: String,
+    pub slot: PluginSlot,
+    pub widget: PluginWidget,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon: Option<PluginIcon>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub order: Option<i32>,
 }
 
 /// Params of the `invokeCommand` method.
@@ -276,6 +347,7 @@ mod tests {
                 id: "echo".into(),
                 title: "Echo".into(),
             }],
+            contributions: vec![],
         };
         let mut buf = Vec::new();
         write_message(&mut buf, &init).unwrap();

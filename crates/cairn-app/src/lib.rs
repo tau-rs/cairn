@@ -1172,6 +1172,7 @@ mod tests {
                 name: "cb".into(),
                 version: "0".into(),
                 commands: Vec::new(),
+                contributions: vec![],
             }]
         }
         fn invoke(
@@ -1229,6 +1230,7 @@ mod tests {
                 name: "d".into(),
                 version: "0".into(),
                 commands: Vec::new(),
+                contributions: vec![],
             }]
         }
         fn invoke(
@@ -1276,6 +1278,7 @@ mod tests {
                 name: "w".into(),
                 version: "0".into(),
                 commands: Vec::new(),
+                contributions: vec![],
             }]
         }
         fn invoke(
@@ -1567,6 +1570,7 @@ mod tests {
                 name: "boom".into(),
                 version: "0".into(),
                 commands: Vec::new(),
+                contributions: vec![],
             }]
         }
         fn invoke(

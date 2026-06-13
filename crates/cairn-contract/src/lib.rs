@@ -147,8 +147,87 @@ pub enum CommandResponse {
     },
 }
 
-/// A loaded plugin and its commands (response to `ListPlugins`).
+/// An icon a plugin may reference by name. Closed set — never a string/URL/SVG.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginIcon {
+    Tag,
+    Search,
+    Note,
+    Folder,
+    Link,
+    Star,
+    Info,
+    Play,
+}
+
+/// A named shell slot a contribution targets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub enum PluginSlot {
+    #[serde(rename = "sidebar.section")]
+    SidebarSection,
+    #[serde(rename = "topbar.action")]
+    TopbarAction,
+    #[serde(rename = "command")]
+    Command,
+}
+
+/// One row inside a `list` widget.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PluginListItem {
+    pub id: String,
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon: Option<PluginIcon>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub args: Option<serde_json::Value>,
+}
+
+/// A host-renderable widget. Closed vocabulary; first cut: text / action / list.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PluginWidget {
+    Text {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        muted: Option<bool>,
+    },
+    Action {
+        label: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        icon: Option<PluginIcon>,
+        command: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        args: Option<serde_json::Value>,
+    },
+    List {
+        items: Vec<PluginListItem>,
+    },
+}
+
+/// One placement of one widget into one slot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PluginContribution {
+    pub id: String,
+    pub slot: PluginSlot,
+    pub widget: PluginWidget,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon: Option<PluginIcon>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub order: Option<i32>,
+}
+
+/// A loaded plugin and its commands (response to `ListPlugins`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct PluginSummary {
     /// Manifest id.
@@ -159,6 +238,9 @@ pub struct PluginSummary {
     pub version: String,
     /// Declared commands.
     pub commands: Vec<PluginCommandSummary>,
+    /// UI contributions (Tier-2). Empty for plugins that declare none.
+    #[serde(default)]
+    pub contributions: Vec<PluginContribution>,
 }
 
 /// A command a plugin handles.
@@ -417,6 +499,7 @@ mod tests {
                     id: "echo".into(),
                     title: "Echo".into(),
                 }],
+                contributions: vec![],
             }],
         };
         let j = serde_json::to_string(&resp).unwrap();
@@ -444,5 +527,61 @@ mod tests {
         let j = serde_json::to_string(&q).unwrap();
         assert!(j.contains("\"type\":\"notes_by_tag\""));
         assert_eq!(serde_json::from_str::<Query>(&j).unwrap(), q);
+    }
+
+    #[test]
+    fn plugin_value_arrays_match_enums() {
+        use serde_json::to_value;
+        // Each enum variant's serialized string must appear in the .ts arrays below.
+        let slots = [
+            PluginSlot::SidebarSection,
+            PluginSlot::TopbarAction,
+            PluginSlot::Command,
+        ];
+        let slot_strs: Vec<String> = slots
+            .iter()
+            .map(|s| to_value(s).unwrap().as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(slot_strs, ["sidebar.section", "topbar.action", "command"]);
+
+        let icons = [
+            PluginIcon::Tag,
+            PluginIcon::Search,
+            PluginIcon::Note,
+            PluginIcon::Folder,
+            PluginIcon::Link,
+            PluginIcon::Star,
+            PluginIcon::Info,
+            PluginIcon::Play,
+        ];
+        let icon_strs: Vec<String> = icons
+            .iter()
+            .map(|s| to_value(s).unwrap().as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            icon_strs,
+            ["tag", "search", "note", "folder", "link", "star", "info", "play"]
+        );
+
+        // Widget kinds are the serde `tag` discriminants:
+        let kinds: Vec<String> = [
+            to_value(PluginWidget::Text {
+                text: "x".into(),
+                muted: None,
+            })
+            .unwrap(),
+            to_value(PluginWidget::Action {
+                label: "x".into(),
+                icon: None,
+                command: "c".into(),
+                args: None,
+            })
+            .unwrap(),
+            to_value(PluginWidget::List { items: vec![] }).unwrap(),
+        ]
+        .iter()
+        .map(|v| v["kind"].as_str().unwrap().to_string())
+        .collect();
+        assert_eq!(kinds, ["text", "action", "list"]);
     }
 }

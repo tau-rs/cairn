@@ -498,6 +498,22 @@ fn symlink_in_trusted_dir_refuses() {
 }
 
 #[test]
+fn example_declares_contributions_at_initialize() {
+    let tmp = tempfile::tempdir().unwrap();
+    setup_example_dir(tmp.path());
+    let host = load_example(tmp.path());
+    let plugins = host.plugins();
+    let contribs = &plugins[0].contributions;
+    assert_eq!(contribs.len(), 2);
+    assert!(contribs
+        .iter()
+        .any(|c| matches!(c.slot, cairn_plugin_protocol::PluginSlot::SidebarSection)));
+    assert!(contribs
+        .iter()
+        .any(|c| matches!(c.slot, cairn_plugin_protocol::PluginSlot::TopbarAction)));
+}
+
+#[test]
 fn trusted_dir_with_mismatched_manifest_id_is_rejected() {
     let bin = env!("CARGO_BIN_EXE_cairn-plugin-example");
     let tmp = tempfile::tempdir().unwrap();
