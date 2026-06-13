@@ -252,6 +252,7 @@ pub fn dispatch_query(engine: &Engine, query: &Query) -> Result<QueryResponse, S
                             title: c.title,
                         })
                         .collect(),
+                    contributions: vec![],
                 })
                 .collect();
             Ok(QueryResponse::Plugins { plugins })

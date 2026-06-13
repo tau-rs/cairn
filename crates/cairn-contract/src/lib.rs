@@ -147,8 +147,87 @@ pub enum CommandResponse {
     },
 }
 
-/// A loaded plugin and its commands (response to `ListPlugins`).
+/// An icon a plugin may reference by name. Closed set — never a string/URL/SVG.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginIcon {
+    Tag,
+    Search,
+    Note,
+    Folder,
+    Link,
+    Star,
+    Info,
+    Play,
+}
+
+/// A named shell slot a contribution targets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub enum PluginSlot {
+    #[serde(rename = "sidebar.section")]
+    SidebarSection,
+    #[serde(rename = "topbar.action")]
+    TopbarAction,
+    #[serde(rename = "command")]
+    Command,
+}
+
+/// One row inside a `list` widget.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PluginListItem {
+    pub id: String,
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon: Option<PluginIcon>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub args: Option<serde_json::Value>,
+}
+
+/// A host-renderable widget. Closed vocabulary; first cut: text / action / list.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PluginWidget {
+    Text {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        muted: Option<bool>,
+    },
+    Action {
+        label: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        icon: Option<PluginIcon>,
+        command: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        args: Option<serde_json::Value>,
+    },
+    List {
+        items: Vec<PluginListItem>,
+    },
+}
+
+/// One placement of one widget into one slot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PluginContribution {
+    pub id: String,
+    pub slot: PluginSlot,
+    pub widget: PluginWidget,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon: Option<PluginIcon>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub order: Option<i32>,
+}
+
+/// A loaded plugin and its commands (response to `ListPlugins`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct PluginSummary {
     /// Manifest id.
@@ -159,6 +238,9 @@ pub struct PluginSummary {
     pub version: String,
     /// Declared commands.
     pub commands: Vec<PluginCommandSummary>,
+    /// UI contributions (Tier-2). Empty for plugins that declare none.
+    #[serde(default)]
+    pub contributions: Vec<PluginContribution>,
 }
 
 /// A command a plugin handles.
@@ -417,6 +499,7 @@ mod tests {
                     id: "echo".into(),
                     title: "Echo".into(),
                 }],
+                contributions: vec![],
             }],
         };
         let j = serde_json::to_string(&resp).unwrap();
