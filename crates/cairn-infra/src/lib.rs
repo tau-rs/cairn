@@ -16,5 +16,8 @@ pub use localfs::{ensure_cairn_dir, LocalFsStore};
 pub use notify_watcher::NotifyWatcher;
 pub use plugin_hash::PinnedHash;
 pub use plugin_host::{ProcessPluginHost, TrustedPlugins, DEFAULT_PLUGIN_TIMEOUT};
+#[cfg(target_os = "macos")]
+pub use sandbox::MacSeatbeltSandbox;
+pub use sandbox::{platform_sandbox, RefusingSandbox};
 pub use seams::{BlockingExecutor, NoCollab, NoopWatcher, NullRuntime};
 pub use tantivy_index::{TantivyIndex, MIN_QUERY_CHARS};
