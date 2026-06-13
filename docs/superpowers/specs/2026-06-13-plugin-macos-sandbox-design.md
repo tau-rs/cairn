@@ -29,8 +29,10 @@ reachable **only** through the already-gated host-callback channel.
   as follow-up issues opened on merge.
 - **Fixed minimal jail (model A):** one static SBPL profile. Capabilities remain
   an RPC-only boundary; the sandbox is a blanket deny of direct fs-write,
-  network, and further exec. Deriving the profile from declared capabilities
-  (model B) is a deferred follow-up, not built here.
+  network, and further exec, plus a deny of direct reads of the vault (reads are
+  otherwise allowed so the binary can link — see the profile section for why a
+  curated read-allowlist failed on macOS 26). Deriving the profile from declared
+  capabilities (model B) is a deferred follow-up, not built here.
 - **Hard secure default (choice B):** a trusted plugin spawns **only** if a
   working sandbox is applied. On a platform with no backend (Linux/Windows) or
   if `sandbox-exec` is missing/fails, the plugin is **refused**, never spawned
@@ -56,20 +58,21 @@ A new trait in `cairn-ports/src/lib.rs`, alongside `PluginHost`/`Watcher`/`Vcs`
 /// cannot confine on this platform refuses, so the host never spawns unjailed.
 pub trait Sandbox {
     /// Return a `Command` that runs `cmd` (with `args`) under an OS sandbox that
-    /// permits read of `plugin_dir` + the runtime libraries needed to exec, and
-    /// denies direct file-write, network, and further `exec`. Stdio is wired by
-    /// the caller after wrapping.
+    /// allows reads broadly (so the binary can link) but denies direct reads of
+    /// `vault_root` — re-allowing the plugin's own `plugin_dir` — and denies
+    /// direct file-write, network, and further `exec`. Stdio is wired by the
+    /// caller after wrapping.
     ///
     /// # Errors
     /// `SandboxError::Unavailable` when this platform/host cannot sandbox (no
     /// backend, or `sandbox-exec` absent) — the caller treats this as a refusal.
-    fn wrap(&self, plugin_dir: &Path, cmd: &Path, args: &[String])
+    fn wrap(&self, vault_root: &Path, plugin_dir: &Path, cmd: &Path, args: &[String])
         -> Result<Command, SandboxError>;
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum SandboxError {
-    #[error("no OS sandbox available on this platform: {0}")]
+    #[error("no OS sandbox available: {0}")]
     Unavailable(String),
 }
 ```
@@ -81,10 +84,12 @@ leading args — it does not touch the pipe setup.
 
 ### Backends in `cairn-infra`
 
-- **`MacSeatbeltSandbox`** (`#[cfg(target_os = "macos")]` body): builds
-  `Command::new("/usr/bin/sandbox-exec")` with `-p <profile> -- <cmd> <args...>`.
-  If `/usr/bin/sandbox-exec` is not present (or not executable), returns
-  `Unavailable`.
+- **`MacSeatbeltSandbox`** (defined unconditionally — *not* cfg-gated, so
+  `seatbelt_profile` and the SBPL-string unit tests stay live on every platform;
+  only the lib.rs re-export and the live-spawn tests are `#[cfg(target_os =
+  "macos")]`): builds `Command::new("/usr/bin/sandbox-exec")` with
+  `-p <profile> -- <cmd> <args...>`. If `/usr/bin/sandbox-exec` is not present
+  (or not executable), returns `Unavailable`.
 - **`RefusingSandbox`**: `wrap` always returns `Unavailable("no backend for
   <os>")`. Used on non-macOS targets and in unit tests that assert refusal.
 - **One factory:** `pub fn platform_sandbox() -> Box<dyn Sandbox>` returns
@@ -94,46 +99,74 @@ leading args — it does not touch the pipe setup.
 
 ### The SBPL profile (static, model-A jail)
 
-Inline string, parameterized only by `plugin_dir` and the resolved `cmd` path:
+Inline string, parameterized by `vault_root`, `plugin_dir`, and the resolved `cmd`:
 
 ```scheme
 (version 1)
 (deny default)
 (allow process-fork)
-(allow file-read*
-    (subpath "/usr/lib")
-    (subpath "/System")
-    (subpath "/Library/Frameworks")
-    (literal "<cmd-path>")
-    (subpath "<plugin-dir>"))
+(allow file-read*)
+(deny file-read* (subpath "<vault-root>"))
+(allow file-read* (subpath "<plugin-dir>"))
 (deny file-write*)
 (deny network*)
 (deny process-exec*)
+(allow process-exec (literal "<cmd-path>"))
 ```
 
+> **Read posture — revised during implementation (the original failed on
+> macOS 26).** This spec first proposed a curated read-*allow*list
+> (`/usr/lib`, `/System`, `/Library/Frameworks`, the plugin dir, the command).
+> Empirically that **bricks every plugin on macOS 26**: the dyld shared cache
+> that every dynamically-linked binary must map at launch now lives behind the
+> Preboot **cryptex** mount and is *not* covered even by `(subpath "/System")`,
+> so the linker `SIGABRT`s before the plugin runs. Curating the exact read set
+> is brittle (the cryptex path is UUID-versioned and moves across macOS
+> releases / differs from the CI runner). The shipped profile instead allows
+> reads **broadly**, then **denies the vault root** and **re-allows the
+> plugin's own dir** (last-match-wins SBPL). Net security posture is unchanged
+> for what matters: the user's notes are unreadable except through the gated
+> host-RPC channel, and `file-write*` / `network*` / `process-exec*` stay
+> denied — so even a read a plugin *can* perform off-vault cannot be
+> exfiltrated. Validated end-to-end against the live macOS 26 kernel
+> (see the integration tests). Reads of non-vault files (e.g. `~/.ssh`) are
+> permitted but inert under the write/network/exec denial; tightening those is
+> deferred to the model-B follow-up.
+
 Notes:
+- Rule **order is load-bearing**: `(allow file-read*)` → `(deny … vault)` →
+  `(allow … plugin-dir)`. A note under the vault but outside the plugin dir
+  matches the deny last → denied; a file under the plugin dir matches the final
+  allow → readable.
+- `vault_root`, `plugin_dir`, and `cmd` are all **canonicalized** before
+  interpolation (Seatbelt matches resolved paths; on macOS `/tmp` → `/private/tmp`,
+  etc.), so the deny and re-allow subpaths match the kernel's view.
 - Stdin/stdout/stderr are inherited file descriptors; Seatbelt governs new
   `open`/`socket` calls, not fds the child already holds, so the host-RPC pipes
-  keep working with no explicit allow.
-- The interplay between `(deny process-exec*)` and `sandbox-exec` exec'ing the
-  target binary is the one mechanism risk. The integration test (below) is the
-  source of truth: if the target fails to exec under a blanket `process-exec`
-  deny, the profile gains a narrow `(allow process-exec (literal "<cmd-path>"))`
-  and nothing broader. The plan pins this down empirically rather than by
-  assumption.
+  keep working with no explicit allow — this is *why* denying direct vault reads
+  does not break a plugin's legitimate note access (it reads notes over the
+  pipe, not off disk).
+- `(deny process-exec*)` followed by `(allow process-exec (literal "<cmd-path>"))`
+  permits only the plugin binary to exec; confirmed by the integration test that
+  the target launches under the jail.
 - The profile is built by a small pure helper
-  (`fn seatbelt_profile(plugin_dir: &Path, cmd: &Path) -> String`) that is
-  unit-tested for correct path interpolation and shell-safe quoting independent
-  of any spawn.
+  (`fn seatbelt_profile(vault_root: &Path, plugin_dir: &Path, cmd: &Path) -> String`)
+  that is unit-tested for correct path interpolation and SBPL-safe quoting
+  (escaping `\`, `"`, `\n`, `\r`) independent of any spawn.
 
 ### Wiring into `ProcessPluginHost`
 
 `load`, `load_with_timeout`, and `spawn_plugin` gain a `sandbox: &dyn Sandbox`
 parameter (threaded from the daemon/CLI construction site, which calls
-`platform_sandbox()`). In `spawn_plugin`, after the manifest/id check:
+`platform_sandbox()`). The public `load`/`load_with_timeout` signatures gain
+only `sandbox`; the **vault root** the profile needs is derived *internally*
+once in `load_with_timeout` (the plugins dir is always `<vault>/.cairn/plugins`,
+so the vault root is its grandparent; a degenerate shallow layout falls back to
+the plugins dir with a loud `tracing::warn!`) and threaded into `spawn_plugin`.
+In `spawn_plugin`, after the manifest/id check:
 
 ```rust
-let mut cmd = match sandbox.wrap(plugin_dir, &cmd_path, &manifest.engine.args) {
+let mut cmd = match sandbox.wrap(vault_root, plugin_dir, &cmd_path, &manifest.engine.args) {
     Ok(c) => c,
     Err(e) => return Err(adapt(/* SandboxError */ e)),  // -> refusal in load loop
 };
