@@ -361,6 +361,7 @@ version = "0.0.0"
 dependencies = [
  "cairn-domain",
  "cairn-infra",
+ "cairn-plugin-protocol",
  "cairn-plugin-sdk",
  "cairn-ports",
  "serde",
@@ -391,6 +392,7 @@ name = "cairn-ports"
 version = "0.0.0"
 dependencies = [
  "cairn-domain",
+ "cairn-plugin-protocol",
  "serde_json",
  "thiserror",
 ]
@@ -403,6 +405,7 @@ dependencies = [
  "cairn-contract",
  "cairn-domain",
  "cairn-infra",
+ "cairn-plugin-protocol",
  "cairn-ports",
  "serde_json",
  "tempfile",
