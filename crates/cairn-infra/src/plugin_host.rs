@@ -552,6 +552,7 @@ impl ProcessPluginHost {
                 name: manifest.name.clone(),
                 version: manifest.version.clone(),
                 commands: Vec::new(),
+                contributions: Vec::new(),
             },
             next_id: 0,
             capabilities: manifest.engine.capabilities.clone(),
@@ -569,6 +570,7 @@ impl ProcessPluginHost {
             .collect();
         plugin.info.name = init.name;
         plugin.info.version = init.version;
+        plugin.info.contributions = init.contributions;
         Ok(plugin)
     }
 }

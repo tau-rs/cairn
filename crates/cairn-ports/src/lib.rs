@@ -268,7 +268,7 @@ pub trait AgentRuntime {
 }
 
 /// A loaded plugin and the commands it declared at handshake.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PluginInfo {
     /// Manifest id.
     pub id: String,
@@ -278,6 +278,8 @@ pub struct PluginInfo {
     pub version: String,
     /// Commands the plugin handles.
     pub commands: Vec<PluginCommand>,
+    /// UI contributions declared at handshake (Tier-2).
+    pub contributions: Vec<cairn_plugin_protocol::PluginContribution>,
 }
 
 /// A command a plugin can handle.
