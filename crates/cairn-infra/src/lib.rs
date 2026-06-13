@@ -6,6 +6,7 @@ pub mod localfs;
 pub mod notify_watcher;
 mod plugin_hash;
 mod plugin_host;
+pub mod sandbox;
 pub mod seams;
 mod tantivy_index;
 
