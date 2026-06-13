@@ -8,7 +8,13 @@ use std::process::Command;
 /// Test double: spawns the command verbatim (no OS jail).
 struct PermissiveSandbox;
 impl Sandbox for PermissiveSandbox {
-    fn wrap(&self, _dir: &Path, cmd: &Path, args: &[String]) -> Result<Command, SandboxError> {
+    fn wrap(
+        &self,
+        _vault_root: &Path,
+        _dir: &Path,
+        cmd: &Path,
+        args: &[String],
+    ) -> Result<Command, SandboxError> {
         let mut c = Command::new(cmd);
         c.args(args);
         Ok(c)

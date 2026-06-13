@@ -420,6 +420,26 @@ impl ProcessPluginHost {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
             Err(e) => return Err(adapt(e)),
         };
+        // The vault root is the user's cairn directory. The plugins dir is always
+        // `<vault>/.cairn/plugins`, so the vault root is its grandparent. The
+        // sandbox denies direct reads of it (plugins reach notes only via the
+        // gated host channel). The daemon always passes `<vault>/.cairn/plugins`,
+        // so the grandparent is derivable in practice.
+        let vault_root = match dir.parent().and_then(|p| p.parent()) {
+            Some(root) => root.to_path_buf(),
+            None => {
+                // Degenerate layout (e.g. a top-level plugins dir): we cannot
+                // locate the vault root, so we cannot guarantee that vault notes
+                // above `dir` are denied. Fall back to denying `dir` itself and
+                // warn loudly rather than silently running with a weaker boundary.
+                tracing::warn!(
+                    "plugin: cannot derive vault root from {} (unexpected layout); \
+                     vault-read protection may be incomplete",
+                    dir.display()
+                );
+                dir.to_path_buf()
+            }
+        };
         for entry in entries {
             let plugin_dir = match entry {
                 Ok(e) if e.path().is_dir() => e.path(),
@@ -471,7 +491,7 @@ impl ProcessPluginHost {
                     );
                 }
             }
-            match Self::spawn_plugin(&plugin_dir, timeout, sandbox) {
+            match Self::spawn_plugin(&plugin_dir, timeout, sandbox, &vault_root) {
                 Ok(p) => loaded.push(p),
                 Err(e) => tracing::warn!("plugin: refusing {}: {e}", plugin_dir.display()),
             }
@@ -483,6 +503,7 @@ impl ProcessPluginHost {
         plugin_dir: &Path,
         timeout: Duration,
         sandbox: &dyn Sandbox,
+        vault_root: &Path,
     ) -> Result<LoadedPlugin, PortError> {
         let raw = std::fs::read_to_string(plugin_dir.join("manifest.toml")).map_err(adapt)?;
         let manifest: Manifest = toml::from_str(&raw).map_err(adapt)?;
@@ -513,7 +534,7 @@ impl ProcessPluginHost {
             }
         };
         let mut command = sandbox
-            .wrap(plugin_dir, &cmd_path, &manifest.engine.args)
+            .wrap(vault_root, plugin_dir, &cmd_path, &manifest.engine.args)
             .map_err(adapt)?;
         let mut child = command
             .stdin(Stdio::piped())
@@ -646,7 +667,13 @@ mod tests {
     /// is exercised on every platform without Seatbelt.
     struct PermissiveSandbox;
     impl Sandbox for PermissiveSandbox {
-        fn wrap(&self, _dir: &Path, cmd: &Path, args: &[String]) -> Result<Command, SandboxError> {
+        fn wrap(
+            &self,
+            _vault_root: &Path,
+            _dir: &Path,
+            cmd: &Path,
+            args: &[String],
+        ) -> Result<Command, SandboxError> {
             let mut c = Command::new(cmd);
             c.args(args);
             Ok(c)

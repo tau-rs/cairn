@@ -415,8 +415,10 @@ pub enum SandboxError {
 /// `Unavailable`), so the host never falls back to spawning an unjailed plugin.
 pub trait Sandbox {
     /// Build a [`Command`] that runs `cmd` (with `args`) under an OS sandbox
-    /// permitting read of `plugin_dir` and the runtime libraries needed to
-    /// exec, while denying direct file-write, network, and further `exec`.
+    /// that allows reads broadly but denies direct reads of `vault_root` (the
+    /// user's cairn/vault directory — plugins must use the gated host channel
+    /// instead), re-allows reads of the plugin's own `plugin_dir`, and denies
+    /// direct file-write, network, and further `exec`.
     ///
     /// The returned `Command` has **no stdio configured** — the caller wires
     /// stdin/stdout/stderr after wrapping.
@@ -430,8 +432,13 @@ pub trait Sandbox {
     /// [`SandboxError::Unavailable`] when this platform/host cannot sandbox
     /// (no backend, or the sandbox tool is absent / the paths can't be
     /// resolved). The caller treats this as a refusal to spawn.
-    fn wrap(&self, plugin_dir: &Path, cmd: &Path, args: &[String])
-        -> Result<Command, SandboxError>;
+    fn wrap(
+        &self,
+        vault_root: &Path,
+        plugin_dir: &Path,
+        cmd: &Path,
+        args: &[String],
+    ) -> Result<Command, SandboxError>;
 }
 
 #[cfg(test)]
