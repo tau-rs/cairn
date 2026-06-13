@@ -3,6 +3,7 @@
 //! `echo` returns its args; `noteLen`/`writeNote`/`noteCount`/`find`/`deleteNote`
 //! call back to the host.
 
+use cairn_plugin_protocol::{PluginContribution, PluginListItem, PluginSlot, PluginWidget};
 use cairn_plugin_sdk::{CairnEvent, Host, Plugin};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -71,6 +72,36 @@ fn main() {
     plugin.command("hang", "Hang", |_args: Value, _host: &mut Host| {
         std::thread::sleep(std::time::Duration::from_secs(86_400));
         Ok(json!(null))
+    });
+
+    plugin.contribution(PluginContribution {
+        id: "note-count".into(),
+        slot: PluginSlot::SidebarSection,
+        title: Some("Example".into()),
+        icon: None,
+        order: Some(0),
+        widget: PluginWidget::List {
+            items: vec![PluginListItem {
+                id: "count".into(),
+                label: "Run noteCount".into(),
+                icon: None,
+                command: Some("noteCount".into()), // fires the existing host-callback command
+                args: None,
+            }],
+        },
+    });
+    plugin.contribution(PluginContribution {
+        id: "echo-action".into(),
+        slot: PluginSlot::TopbarAction,
+        title: None,
+        icon: None,
+        order: None,
+        widget: PluginWidget::Action {
+            label: "Echo".into(),
+            icon: Some(cairn_plugin_protocol::PluginIcon::Play),
+            command: "echo".into(),
+            args: None,
+        },
     });
 
     plugin.run();
