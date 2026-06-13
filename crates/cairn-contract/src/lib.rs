@@ -528,4 +528,60 @@ mod tests {
         assert!(j.contains("\"type\":\"notes_by_tag\""));
         assert_eq!(serde_json::from_str::<Query>(&j).unwrap(), q);
     }
+
+    #[test]
+    fn plugin_value_arrays_match_enums() {
+        use serde_json::to_value;
+        // Each enum variant's serialized string must appear in the .ts arrays below.
+        let slots = [
+            PluginSlot::SidebarSection,
+            PluginSlot::TopbarAction,
+            PluginSlot::Command,
+        ];
+        let slot_strs: Vec<String> = slots
+            .iter()
+            .map(|s| to_value(s).unwrap().as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(slot_strs, ["sidebar.section", "topbar.action", "command"]);
+
+        let icons = [
+            PluginIcon::Tag,
+            PluginIcon::Search,
+            PluginIcon::Note,
+            PluginIcon::Folder,
+            PluginIcon::Link,
+            PluginIcon::Star,
+            PluginIcon::Info,
+            PluginIcon::Play,
+        ];
+        let icon_strs: Vec<String> = icons
+            .iter()
+            .map(|s| to_value(s).unwrap().as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            icon_strs,
+            ["tag", "search", "note", "folder", "link", "star", "info", "play"]
+        );
+
+        // Widget kinds are the serde `tag` discriminants:
+        let kinds: Vec<String> = [
+            to_value(PluginWidget::Text {
+                text: "x".into(),
+                muted: None,
+            })
+            .unwrap(),
+            to_value(PluginWidget::Action {
+                label: "x".into(),
+                icon: None,
+                command: "c".into(),
+                args: None,
+            })
+            .unwrap(),
+            to_value(PluginWidget::List { items: vec![] }).unwrap(),
+        ]
+        .iter()
+        .map(|v| v["kind"].as_str().unwrap().to_string())
+        .collect();
+        assert_eq!(kinds, ["text", "action", "list"]);
+    }
 }
