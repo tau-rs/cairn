@@ -322,6 +322,7 @@ impl Plugin {
                             title: c.title.clone(),
                         })
                         .collect(),
+                    contributions: vec![],
                 };
                 resp.result = Some(serde_json::to_value(init).unwrap_or(Value::Null));
             }
