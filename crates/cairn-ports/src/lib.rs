@@ -1,6 +1,9 @@
 //! Port traits for Cairn. The application depends only on these; adapters
 //! in `cairn-infra` (and future plugins) implement them.
 
+use std::path::Path;
+use std::process::Command;
+
 use cairn_domain::{Note, NotePath};
 
 /// Errors any port may surface to the application.
@@ -243,7 +246,7 @@ pub trait Watcher {
     ///
     /// # Errors
     /// Returns [`PortError`] if the OS watcher cannot be created.
-    fn watch(&self, root: &std::path::Path) -> Result<WatchHandle, PortError>;
+    fn watch(&self, root: &Path) -> Result<WatchHandle, PortError>;
 }
 
 /// Runs background/parallel work. Seam: `BlockingExecutor` runs inline.
@@ -399,6 +402,45 @@ impl PluginHost for NoopPluginHost {
     ) -> Result<serde_json::Value, PortError> {
         Err(PortError::NotFound(format!("plugin {plugin}")))
     }
+}
+
+/// Why a [`Sandbox`] could not confine a child.
+#[derive(Debug, thiserror::Error)]
+pub enum SandboxError {
+    /// No working OS sandbox on this platform/host; the plugin must not spawn.
+    #[error("no OS sandbox available: {0}")]
+    Unavailable(String),
+}
+
+/// Confines a plugin's spawned child process at the OS level. An adapter that
+/// cannot confine on the current platform/host **refuses** (returns
+/// `Unavailable`), so the host never falls back to spawning an unjailed plugin.
+pub trait Sandbox {
+    /// Build a [`Command`] that runs `cmd` (with `args`) under an OS sandbox
+    /// that allows reads broadly but denies direct reads of `vault_root` (the
+    /// user's cairn/vault directory — plugins must use the gated host channel
+    /// instead), re-allows reads of the plugin's own `plugin_dir`, and denies
+    /// direct file-write, network, and further `exec`.
+    ///
+    /// The returned `Command` has **no stdio configured** — the caller wires
+    /// stdin/stdout/stderr after wrapping.
+    ///
+    /// `args` is `&[String]` rather than a generic or `&[&str]` intentionally:
+    /// the sole caller forwards the plugin manifest's argument list, which is
+    /// already a `Vec<String>`, and because `Sandbox` is used as `&dyn Sandbox`
+    /// the method must remain object-safe (no generic type parameters).
+    ///
+    /// # Errors
+    /// [`SandboxError::Unavailable`] when this platform/host cannot sandbox
+    /// (no backend, or the sandbox tool is absent / the paths can't be
+    /// resolved). The caller treats this as a refusal to spawn.
+    fn wrap(
+        &self,
+        vault_root: &Path,
+        plugin_dir: &Path,
+        cmd: &Path,
+        args: &[String],
+    ) -> Result<Command, SandboxError>;
 }
 
 #[cfg(test)]
