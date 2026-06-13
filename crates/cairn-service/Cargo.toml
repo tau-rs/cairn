@@ -10,6 +10,7 @@ cairn-domain = { path = "../cairn-domain" }
 cairn-ports = { path = "../cairn-ports" }
 cairn-app = { path = "../cairn-app" }
 cairn-contract = { path = "../cairn-contract" }
+cairn-plugin-protocol = { path = "../cairn-plugin-protocol" }
 thiserror = { workspace = true }
 
 [dev-dependencies]

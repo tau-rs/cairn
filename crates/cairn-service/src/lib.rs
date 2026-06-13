@@ -252,11 +252,79 @@ pub fn dispatch_query(engine: &Engine, query: &Query) -> Result<QueryResponse, S
                             title: c.title,
                         })
                         .collect(),
-                    contributions: vec![],
+                    contributions: p.contributions.into_iter().map(map_contribution).collect(),
                 })
                 .collect();
             Ok(QueryResponse::Plugins { plugins })
         }
+    }
+}
+
+fn map_contribution(
+    c: cairn_plugin_protocol::PluginContribution,
+) -> cairn_contract::PluginContribution {
+    cairn_contract::PluginContribution {
+        id: c.id,
+        slot: map_slot(c.slot),
+        widget: map_widget(c.widget),
+        title: c.title,
+        icon: c.icon.map(map_icon),
+        order: c.order,
+    }
+}
+
+fn map_slot(s: cairn_plugin_protocol::PluginSlot) -> cairn_contract::PluginSlot {
+    match s {
+        cairn_plugin_protocol::PluginSlot::SidebarSection => {
+            cairn_contract::PluginSlot::SidebarSection
+        }
+        cairn_plugin_protocol::PluginSlot::TopbarAction => cairn_contract::PluginSlot::TopbarAction,
+        cairn_plugin_protocol::PluginSlot::Command => cairn_contract::PluginSlot::Command,
+    }
+}
+
+fn map_icon(i: cairn_plugin_protocol::PluginIcon) -> cairn_contract::PluginIcon {
+    match i {
+        cairn_plugin_protocol::PluginIcon::Tag => cairn_contract::PluginIcon::Tag,
+        cairn_plugin_protocol::PluginIcon::Search => cairn_contract::PluginIcon::Search,
+        cairn_plugin_protocol::PluginIcon::Note => cairn_contract::PluginIcon::Note,
+        cairn_plugin_protocol::PluginIcon::Folder => cairn_contract::PluginIcon::Folder,
+        cairn_plugin_protocol::PluginIcon::Link => cairn_contract::PluginIcon::Link,
+        cairn_plugin_protocol::PluginIcon::Star => cairn_contract::PluginIcon::Star,
+        cairn_plugin_protocol::PluginIcon::Info => cairn_contract::PluginIcon::Info,
+        cairn_plugin_protocol::PluginIcon::Play => cairn_contract::PluginIcon::Play,
+    }
+}
+
+fn map_list_item(li: cairn_plugin_protocol::PluginListItem) -> cairn_contract::PluginListItem {
+    cairn_contract::PluginListItem {
+        id: li.id,
+        label: li.label,
+        icon: li.icon.map(map_icon),
+        command: li.command,
+        args: li.args,
+    }
+}
+
+fn map_widget(w: cairn_plugin_protocol::PluginWidget) -> cairn_contract::PluginWidget {
+    match w {
+        cairn_plugin_protocol::PluginWidget::Text { text, muted } => {
+            cairn_contract::PluginWidget::Text { text, muted }
+        }
+        cairn_plugin_protocol::PluginWidget::Action {
+            label,
+            icon,
+            command,
+            args,
+        } => cairn_contract::PluginWidget::Action {
+            label,
+            icon: icon.map(map_icon),
+            command,
+            args,
+        },
+        cairn_plugin_protocol::PluginWidget::List { items } => cairn_contract::PluginWidget::List {
+            items: items.into_iter().map(map_list_item).collect(),
+        },
     }
 }
 
@@ -813,5 +881,59 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, ServiceError::InvalidRequest(_)));
+    }
+
+    #[test]
+    fn list_plugins_maps_contributions_protocol_to_contract() {
+        use cairn_ports::{PluginCallbacks, PluginHost, PluginInfo, PortError};
+
+        struct FakeHost;
+
+        impl PluginHost for FakeHost {
+            fn plugins(&self) -> Vec<PluginInfo> {
+                vec![PluginInfo {
+                    id: "fake".into(),
+                    name: "Fake".into(),
+                    version: "0.1.0".into(),
+                    commands: vec![],
+                    contributions: vec![cairn_plugin_protocol::PluginContribution {
+                        id: "fake.sidebar".into(),
+                        slot: cairn_plugin_protocol::PluginSlot::SidebarSection,
+                        widget: cairn_plugin_protocol::PluginWidget::Text {
+                            text: "hello".into(),
+                            muted: None,
+                        },
+                        title: Some("Fake Section".into()),
+                        icon: None,
+                        order: None,
+                    }],
+                }]
+            }
+
+            fn invoke(
+                &mut self,
+                _plugin: &str,
+                _command: &str,
+                _args: &serde_json::Value,
+                _callbacks: &mut dyn PluginCallbacks,
+            ) -> Result<serde_json::Value, PortError> {
+                Ok(serde_json::Value::Null)
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        eng.set_plugin_host(Box::new(FakeHost));
+
+        match dispatch_query(&eng, &Query::ListPlugins).unwrap() {
+            QueryResponse::Plugins { plugins } => {
+                assert_eq!(plugins[0].contributions.len(), 1);
+                assert_eq!(
+                    plugins[0].contributions[0].slot,
+                    cairn_contract::PluginSlot::SidebarSection
+                );
+            }
+            other => panic!("expected Plugins, got {other:?}"),
+        }
     }
 }
