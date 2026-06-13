@@ -46,11 +46,20 @@ pub enum TrustedEntry {
     /// Legacy / shorthand: trust by directory name, no pin.
     Name(String),
     /// Table form: directory name plus an optional pinned content hash.
-    Pinned {
-        dir: String,
-        #[serde(default)]
-        hash: Option<String>,
-    },
+    Pinned(PinnedEntry),
+}
+
+/// The table form of a [`TrustedEntry`]. `deny_unknown_fields` is essential:
+/// without it a typo'd `hsah = "..."` would silently drop the pin and the
+/// plugin would run unpinned, so a user who believes they pinned a plugin would
+/// be unprotected. (The deny lives on this inner struct, not on the untagged
+/// enum, where serde ignores it.)
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PinnedEntry {
+    dir: String,
+    #[serde(default)]
+    hash: Option<String>,
 }
 
 impl TrustedEntry {
@@ -58,7 +67,7 @@ impl TrustedEntry {
     pub fn normalize(&self) -> (String, Option<String>) {
         match self {
             TrustedEntry::Name(dir) => (dir.clone(), None),
-            TrustedEntry::Pinned { dir, hash } => (dir.clone(), hash.clone()),
+            TrustedEntry::Pinned(p) => (p.dir.clone(), p.hash.clone()),
         }
     }
 }
@@ -213,6 +222,14 @@ mod tests {
     fn plugins_trusted_table_without_hash_parses() {
         let c: Config = toml::from_str("[[plugins.trusted]]\ndir = \"a\"\n").unwrap();
         assert_eq!(c.plugins.trusted[0].normalize(), ("a".to_string(), None));
+    }
+
+    #[test]
+    fn plugins_trusted_table_rejects_unknown_key() {
+        // A typo'd `hsah` must NOT silently parse as unpinned — a user who
+        // believes they pinned a plugin would otherwise run it unprotected.
+        let toml = "[[plugins.trusted]]\ndir = \"a\"\nhsah = \"sha256:x\"\n";
+        assert!(toml::from_str::<Config>(toml).is_err());
     }
 
     #[test]
