@@ -431,7 +431,7 @@ impl ProcessPluginHost {
             };
             let pin = match trusted.get(dir_name) {
                 None => {
-                    eprintln!(
+                    tracing::warn!(
                         "plugin: skipping {dir_name} (not in [plugins] trusted; \
                          add \"{dir_name}\" to cairn.toml to enable)"
                     );
@@ -444,13 +444,13 @@ impl ProcessPluginHost {
             let computed = match PinnedHash::of_dir(&plugin_dir) {
                 Ok(h) => h,
                 Err(e) => {
-                    eprintln!("plugin: refusing {dir_name}: {e}");
+                    tracing::warn!("plugin: refusing {dir_name}: {e}");
                     continue;
                 }
             };
             match pin {
                 Some(expected) if &computed != expected => {
-                    eprintln!(
+                    tracing::warn!(
                         "plugin: refusing {dir_name}: contents changed (pinned {expected}, \
                          found {computed}); re-approve by updating hash in cairn.toml"
                     );
@@ -460,7 +460,7 @@ impl ProcessPluginHost {
                 // means computed == expected — pinned and verified: spawn below.
                 Some(_) => {}
                 None => {
-                    eprintln!(
+                    tracing::warn!(
                         "plugin: {dir_name} is trusted but unpinned; pin it by setting \
                          hash = \"{computed}\" in cairn.toml"
                     );
@@ -468,7 +468,7 @@ impl ProcessPluginHost {
             }
             match Self::spawn_plugin(&plugin_dir, timeout) {
                 Ok(p) => loaded.push(p),
-                Err(e) => eprintln!("plugin: skipping {}: {e}", plugin_dir.display()),
+                Err(e) => tracing::warn!("plugin: skipping {}: {e}", plugin_dir.display()),
             }
         }
         Ok(Self { loaded })
