@@ -226,6 +226,7 @@ pub struct Plugin {
     version: String,
     commands: Vec<RegisteredCommand>,
     event_handler: Option<ErasedEventHandler>,
+    contributions: Vec<cairn_plugin_protocol::PluginContribution>,
 }
 
 impl Plugin {
@@ -236,6 +237,7 @@ impl Plugin {
             version: version.into(),
             commands: Vec::new(),
             event_handler: None,
+            contributions: Vec::new(),
         }
     }
 
@@ -274,6 +276,11 @@ impl Plugin {
             title: title.into(),
             handler: boxed,
         });
+    }
+
+    /// Declare a UI contribution surfaced to the shell at `initialize`.
+    pub fn contribution(&mut self, c: cairn_plugin_protocol::PluginContribution) {
+        self.contributions.push(c);
     }
 
     /// Run the stdio loop until stdin EOF, using real stdin/stdout.
@@ -322,7 +329,7 @@ impl Plugin {
                             title: c.title.clone(),
                         })
                         .collect(),
-                    contributions: vec![],
+                    contributions: self.contributions.clone(),
                 };
                 resp.result = Some(serde_json::to_value(init).unwrap_or(Value::Null));
             }
@@ -544,6 +551,27 @@ mod run_tests {
                 .collect::<Vec<_>>(),
             vec!["a", "b"]
         );
+    }
+
+    #[test]
+    fn initialize_includes_declared_contributions() {
+        use cairn_plugin_protocol::{PluginContribution, PluginSlot, PluginWidget};
+        let mut p = Plugin::new("t", "0.1.0");
+        p.contribution(PluginContribution {
+            id: "s".into(),
+            slot: PluginSlot::SidebarSection,
+            widget: PluginWidget::Text {
+                text: "hi".into(),
+                muted: None,
+            },
+            title: None,
+            icon: None,
+            order: None,
+        });
+        let out = drive(p, &request_line(1, METHOD_INITIALIZE, Value::Null));
+        let init: InitializeResult =
+            serde_json::from_value(out[0].result.clone().unwrap()).unwrap();
+        assert_eq!(init.contributions.len(), 1);
     }
 
     #[test]
