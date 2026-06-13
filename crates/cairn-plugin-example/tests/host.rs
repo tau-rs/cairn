@@ -1,5 +1,5 @@
 use cairn_domain::{Note, NotePath};
-use cairn_infra::{ProcessPluginHost, TrustedPlugins};
+use cairn_infra::{PinnedHash, ProcessPluginHost, TrustedPlugins};
 use cairn_ports::{PluginCallbacks, PluginHost, PortError, SearchHit};
 use std::collections::HashMap;
 
@@ -13,6 +13,15 @@ fn write_manifest(pdir: &std::path::Path, bin: &str, caps: &str) {
         ),
     )
     .unwrap();
+}
+
+/// Populate `<tmp>/.cairn/plugins/example` with a valid manifest (absolute
+/// command) and return that plugin dir. Mirrors the existing test setup.
+fn setup_example_dir(tmp: &std::path::Path) -> std::path::PathBuf {
+    let bin = env!("CARGO_BIN_EXE_cairn-plugin-example");
+    let pdir = tmp.join(".cairn").join("plugins").join("example");
+    write_manifest(&pdir, bin, "");
+    pdir
 }
 
 /// Load a host from `<tmp>/.cairn/plugins`, trusting the `example` plugin.
@@ -439,6 +448,52 @@ fn default_deny_spawns_nothing() {
     let plugins = tmp.path().join(".cairn").join("plugins");
     write_manifest(&plugins.join("example"), bin, "");
     let host = ProcessPluginHost::load(&plugins, &TrustedPlugins::none()).unwrap();
+    assert!(host.plugins().is_empty());
+}
+
+#[test]
+fn pinned_matching_hash_spawns() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pdir = setup_example_dir(tmp.path());
+    let pin = PinnedHash::of_dir(&pdir).unwrap().to_string();
+    let dir = tmp.path().join(".cairn").join("plugins");
+    let trusted = TrustedPlugins::from_entries([("example".to_string(), Some(pin))]).unwrap();
+    let host = ProcessPluginHost::load(&dir, &trusted).unwrap();
+    assert_eq!(host.plugins().len(), 1);
+}
+
+#[test]
+fn drifted_hash_refuses() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pdir = setup_example_dir(tmp.path());
+    let pin = PinnedHash::of_dir(&pdir).unwrap().to_string();
+    // Tamper: add a file so the tree no longer matches the pin.
+    std::fs::write(pdir.join("evil.txt"), b"tampered").unwrap();
+    let dir = tmp.path().join(".cairn").join("plugins");
+    let trusted = TrustedPlugins::from_entries([("example".to_string(), Some(pin))]).unwrap();
+    let host = ProcessPluginHost::load(&dir, &trusted).unwrap();
+    assert!(host.plugins().is_empty());
+}
+
+#[test]
+fn unpinned_trusted_spawns() {
+    let tmp = tempfile::tempdir().unwrap();
+    setup_example_dir(tmp.path());
+    let dir = tmp.path().join(".cairn").join("plugins");
+    let trusted = TrustedPlugins::from_ids(["example".to_string()]);
+    let host = ProcessPluginHost::load(&dir, &trusted).unwrap();
+    assert_eq!(host.plugins().len(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_in_trusted_dir_refuses() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pdir = setup_example_dir(tmp.path());
+    std::os::unix::fs::symlink(pdir.join("manifest.toml"), pdir.join("link.toml")).unwrap();
+    let dir = tmp.path().join(".cairn").join("plugins");
+    let trusted = TrustedPlugins::from_ids(["example".to_string()]);
+    let host = ProcessPluginHost::load(&dir, &trusted).unwrap();
     assert!(host.plugins().is_empty());
 }
 
