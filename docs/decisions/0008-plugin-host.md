@@ -88,3 +88,19 @@ mid-invoke), broadcast-to-WS unchanged and non-recursive. SDK adds `Plugin::on_e
 Synchronous (a hanging handler blocks the daemon — the standing no-timeout
 limitation); async/decoupled delivery and per-kind subscriptions are future work. See
 `docs/superpowers/specs/2026-06-10-plugin-cairn-events-design.md`.
+
+**Update (#40, 2026-06-14): capability vocabulary rework.** The three host-RPC
+capabilities (`fs:read`, `fs:write`, `events`) were promoted from free-form strings
+to a typed, closed `Capability` enum (`vault:read`, `vault:write`, `vault:events`);
+the shared `CAP_FS_READ`/`CAP_FS_WRITE`/`CAP_EVENTS` constants were removed and the
+enum's `wire()` method replaces them. An unrecognised capability now fails the
+manifest parse (fail-closed) rather than being silently ignored. Three new sandbox
+capabilities — `net` (outbound network), `exec` (spawn subprocesses), `fs:read`
+(filesystem reads beyond the vault) — are declared in the manifest and surfaced to
+the user at first-run approval; they are **not yet enforced** (the fixed OS jail still
+applies). Their enforcement is the capability-derived sandbox profile tracked in
+issue #63; this vocabulary is its keystone. A new CLI surface, `cairn plugin list` /
+`cairn plugin trust <dir>`, inspects plugins read-only and prints the
+`[[plugins.trusted]]` entry for the user to paste into `cairn.toml` (it never writes
+config itself). See
+`docs/superpowers/specs/2026-06-14-plugin-capability-vocabulary-approval-design.md`.
