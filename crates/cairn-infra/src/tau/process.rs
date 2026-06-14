@@ -33,8 +33,28 @@ impl TauServe {
             .spawn()
             .map_err(|e| PortError::Adapter(AdapterError::new(e)))?;
 
+        // Any failure after the process exists must reap it: `std::process::Child`
+        // has no killing `Drop`, so a bare `?` here would orphan `tau serve`.
+        match Self::connect(&mut child) {
+            Ok(client) => Ok(Self { child, client }),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                Err(e)
+            }
+        }
+    }
+
+    /// Read the readiness line, take the stdio pipes, and handshake. Borrows the
+    /// child so [`spawn`](Self::spawn) can reap it if any step fails.
+    fn connect(
+        child: &mut Child,
+    ) -> Result<ServeClient<BufReader<ChildStdout>, ChildStdin>, PortError> {
         // Block until tau writes its readiness marker to stderr (the
-        // `--ready-on-stderr` flag keeps it off the NDJSON stdout channel).
+        // `--ready-on-stderr` flag keeps it off the NDJSON stdout channel). Any
+        // non-empty line counts as the marker.
+        // TODO(v1.1): bound this read with a timeout so a started-but-silent tau
+        // cannot hang `spawn` forever (matters once the daemon supervises it).
         let stderr = child.stderr.take().ok_or_else(|| missing("no stderr"))?;
         let mut err = BufReader::new(stderr);
         let mut line = String::new();
@@ -50,7 +70,7 @@ impl TauServe {
         let stdout = child.stdout.take().ok_or_else(|| missing("no stdout"))?;
         let mut client = ServeClient::new(BufReader::new(stdout), stdin);
         client.handshake()?;
-        Ok(Self { child, client })
+        Ok(client)
     }
 
     /// Run `agent` over `prompt`, streaming into `sink`.
@@ -66,6 +86,9 @@ impl TauServe {
 
 impl Drop for TauServe {
     fn drop(&mut self) {
+        // v1: immediate SIGKILL + reap — a one-shot `tau serve` holds no unflushed
+        // state. TODO(v1.1): graceful shutdown (close stdin → wait-with-grace →
+        // kill) per the spec, once the daemon owns a long-lived sidecar.
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
