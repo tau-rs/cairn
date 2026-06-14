@@ -101,6 +101,32 @@ pub(crate) fn bwrap_args(vault_root: &Path, plugin_dir: &Path, cmd: &Path) -> Ve
     ]
 }
 
+/// Build the argv (after the launcher program) that asks `cairn-sandbox-win`
+/// to run `cmd` (with `args`) inside an AppContainer that can read `plugin_dir`
+/// but not the vault. The testable analogue of `bwrap_args`.
+///
+/// `--` separates the launcher's own flags from the inner command, so an inner
+/// argument starting with `-` is unambiguous. Paths are emitted as distinct
+/// `OsString` argv entries, so no quoting is required and a non-UTF-8 path
+/// survives intact. The vault is not named here: AppContainer denies it
+/// structurally (deny-by-default — it is simply never granted).
+// Called by WindowsAppContainerSandbox::wrap in the next task (issue #62).
+#[allow(dead_code)]
+pub(crate) fn windows_launcher_args(
+    plugin_dir: &Path,
+    cmd: &Path,
+    args: &[String],
+) -> Vec<OsString> {
+    let mut v = vec![
+        OsString::from("--plugin-dir"),
+        plugin_dir.as_os_str().to_os_string(),
+        OsString::from("--"),
+        cmd.as_os_str().to_os_string(),
+    ];
+    v.extend(args.iter().map(OsString::from));
+    v
+}
+
 /// macOS Seatbelt backend: runs the plugin under `sandbox-exec -p <profile>`.
 pub struct MacSeatbeltSandbox {
     /// Path to the `sandbox-exec` binary (overridable in tests).
@@ -333,6 +359,27 @@ mod tests {
             .wrap(Path::new("/"), Path::new("/"), Path::new("/bin/echo"), &[])
             .unwrap_err();
         assert!(matches!(err, SandboxError::Unavailable(_)));
+    }
+
+    #[test]
+    fn windows_launcher_args_passes_plugin_dir_then_cmd_and_args() {
+        let a = windows_launcher_args(
+            Path::new(r"C:\cairn\.cairn\plugins\p"),
+            Path::new(r"C:\cairn\.cairn\plugins\p\plugin.exe"),
+            &["--flag".to_string(), "value".to_string()],
+        );
+        let s: Vec<String> = a.iter().map(|o| o.to_string_lossy().into_owned()).collect();
+        assert_eq!(
+            s,
+            vec![
+                "--plugin-dir",
+                r"C:\cairn\.cairn\plugins\p",
+                "--",
+                r"C:\cairn\.cairn\plugins\p\plugin.exe",
+                "--flag",
+                "value",
+            ]
+        );
     }
 
     #[test]
