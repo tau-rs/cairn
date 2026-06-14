@@ -78,3 +78,37 @@ async fn ask_streams_sources_then_text_then_completed() {
         "missing delta text:\n{body}"
     );
 }
+
+#[tokio::test]
+async fn ask_without_token_is_401() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = build_router(
+        AppState::new(engine(tmp.path()))
+            .with_token(TOKEN)
+            .with_runtime(Arc::new(StubRuntime)),
+    );
+    let resp = app.oneshot(ask_request(None, "q")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn ask_with_null_runtime_emits_failed_frame() {
+    let tmp = tempfile::tempdir().unwrap();
+    // No `.with_runtime(...)` → AppState defaults to NullRuntime.
+    let app = build_router(AppState::new(engine(tmp.path())).with_token(TOKEN));
+    let resp = app.oneshot(ask_request(Some(TOKEN), "q")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK); // stream opened; failure is in-band
+    let body = body_string(resp).await;
+    assert!(
+        body.contains("\"type\":\"sources\""),
+        "expected sources frame:\n{body}"
+    );
+    assert!(
+        body.contains("\"type\":\"failed\""),
+        "expected failed frame:\n{body}"
+    );
+    assert!(
+        body.contains("TAU_BIN"),
+        "failed message should name TAU_BIN:\n{body}"
+    );
+}
