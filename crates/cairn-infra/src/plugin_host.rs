@@ -118,7 +118,7 @@ pub enum TrustStatus {
 }
 
 /// The manifest fields surfaced at approval time (read-only view; no spawn).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InspectedManifest {
     pub id: String,
     pub name: String,
@@ -960,5 +960,13 @@ mod tests {
             inspect_plugins(tmp.path(), &TrustedPlugins::from_ids(["p".to_string()])).unwrap();
         assert_eq!(got[0].status, TrustStatus::Unreadable);
         assert!(got[0].manifest.is_none());
+    }
+
+    #[test]
+    fn inspect_skips_non_dir_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("stray.txt"), "noise").unwrap();
+        let got = inspect_plugins(tmp.path(), &TrustedPlugins::none()).unwrap();
+        assert!(got.is_empty());
     }
 }
