@@ -40,17 +40,32 @@ fn sbpl_quote(p: &Path) -> String {
 /// explicitly listed), but the vault root is denied so plugins cannot directly
 /// read the user's notes — they must use the gated host-RPC channel instead.
 /// The plugin's own directory is re-allowed after the vault deny so plugins can
-/// still read their own bundled files. Write, network, and exec (other than the
-/// plugin command itself) remain denied. Rule ordering is last-match-wins.
+/// still read their own bundled files. Write and exec (other than the plugin
+/// command itself) remain denied. Rule ordering is last-match-wins.
+///
+/// Network: denied by default (`(deny network*)`). When `caps.net` is true,
+/// outbound network is permitted instead: `(allow network-outbound)` +
+/// `(allow system-socket)` (required for TCP under Seatbelt) + an mDNSResponder
+/// mach-lookup so DNS resolution works inside the jail.
 pub(crate) fn seatbelt_profile(
     vault_root: &Path,
     plugin_dir: &Path,
     cmd: &Path,
-    _caps: SandboxCapabilities,
+    caps: SandboxCapabilities,
 ) -> String {
     let vault = sbpl_quote(vault_root);
     let dir = sbpl_quote(plugin_dir);
     let cmd = sbpl_quote(cmd);
+    let net = if caps.net {
+        // Outbound only (no inbound bind). `system-socket` + the mDNSResponder
+        // mach-lookup are required for DNS resolution under Seatbelt; without
+        // them a `net` plugin could open sockets but never resolve a hostname.
+        "(allow network-outbound)\n\
+         (allow system-socket)\n\
+         (allow mach-lookup (global-name \"com.apple.mDNSResponder\"))\n"
+    } else {
+        "(deny network*)\n"
+    };
     format!(
         "(version 1)\n\
          (deny default)\n\
@@ -59,7 +74,7 @@ pub(crate) fn seatbelt_profile(
          (deny file-read* (subpath {vault}))\n\
          (allow file-read* (subpath {dir}))\n\
          (deny file-write*)\n\
-         (deny network*)\n\
+         {net}\
          (deny process-exec*)\n\
          (allow process-exec (literal {cmd}))\n"
     )
@@ -309,6 +324,37 @@ mod tests {
     use super::*;
     use cairn_ports::{Sandbox, SandboxCapabilities, SandboxError};
     use std::path::PathBuf;
+
+    #[test]
+    fn seatbelt_denies_network_without_net_cap() {
+        let p = seatbelt_profile(
+            &PathBuf::from("/cairn"),
+            &PathBuf::from("/cairn/.cairn/plugins/p"),
+            &PathBuf::from("/cairn/.cairn/plugins/p/bin"),
+            SandboxCapabilities::default(),
+        );
+        assert!(p.contains("(deny network*)"));
+        assert!(!p.contains("network-outbound"));
+    }
+
+    #[test]
+    fn seatbelt_allows_outbound_network_with_net_cap() {
+        let p = seatbelt_profile(
+            &PathBuf::from("/cairn"),
+            &PathBuf::from("/cairn/.cairn/plugins/p"),
+            &PathBuf::from("/cairn/.cairn/plugins/p/bin"),
+            SandboxCapabilities { net: true },
+        );
+        assert!(p.contains("(allow network-outbound)"));
+        assert!(
+            p.contains("com.apple.mDNSResponder"),
+            "DNS resolution must be permitted"
+        );
+        assert!(
+            !p.contains("(deny network*)"),
+            "the blanket network deny must be gone"
+        );
+    }
 
     #[test]
     fn profile_denies_write_network_and_interpolates_paths() {
