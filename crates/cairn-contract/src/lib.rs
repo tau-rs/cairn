@@ -262,6 +262,9 @@ pub struct PluginSummary {
     /// UI contributions (Tier-2). Empty for plugins that declare none.
     #[serde(default)]
     pub contributions: Vec<PluginContribution>,
+    /// Capabilities a Tier-3 plugin requests. None for plugins that declare none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<Vec<PluginCapability>>,
 }
 
 /// A command a plugin handles.
@@ -521,6 +524,7 @@ mod tests {
                     title: "Echo".into(),
                 }],
                 contributions: vec![],
+                capabilities: None,
             }],
         };
         let j = serde_json::to_string(&resp).unwrap();
@@ -635,5 +639,26 @@ mod tests {
         })
         .unwrap();
         assert_eq!(iframe_kind["kind"].as_str().unwrap(), "iframe");
+    }
+
+    #[test]
+    fn plugin_summary_capabilities_round_trip() {
+        // Tier-2 payloads (no `capabilities` key) must still deserialize.
+        let legacy = r#"{"id":"p","name":"P","version":"1","commands":[],"contributions":[]}"#;
+        let s: PluginSummary = serde_json::from_str(legacy).unwrap();
+        assert_eq!(s.capabilities, None);
+
+        // Round-trip with capabilities present.
+        let s2 = PluginSummary {
+            id: "p".into(),
+            name: "P".into(),
+            version: "1".into(),
+            commands: vec![],
+            contributions: vec![],
+            capabilities: Some(vec![PluginCapability::NotesRead]),
+        };
+        let j = serde_json::to_string(&s2).unwrap();
+        assert!(j.contains("\"capabilities\":[\"notes.read\"]"));
+        assert_eq!(serde_json::from_str::<PluginSummary>(&j).unwrap(), s2);
     }
 }
