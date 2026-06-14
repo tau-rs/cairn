@@ -364,23 +364,43 @@ async fn ask_handler(State(state): State<AppState>, Json(req): Json<AskRequest>)
     // 2. Stream the agent run, lock-free.
     let (tx, rx) = tokio::sync::mpsc::channel::<AnswerEvent>(64);
     let runtime = state.runtime.clone();
-    tokio::task::spawn_blocking(move || {
+    let producer = tokio::task::spawn_blocking(move || {
         let _ = tx.blocking_send(AnswerEvent::Sources { paths: cited });
         let mut sink = AnswerStreamSink { tx };
+        // A run that starts then fails reports via AgentEvent::Failed on the sink;
+        // an Err means it failed before any event (e.g. NullRuntime) — surface it
+        // through the same mapping path rather than touching the channel directly.
         if let Err(e) = runtime.answer(&prompt, &mut sink) {
-            let _ = sink.tx.blocking_send(AnswerEvent::Failed {
+            sink.emit(AgentEvent::Failed {
                 message: e.to_string(),
             });
         }
     });
 
-    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
-        let ev = rx.recv().await?;
-        let frame = SseEvent::default()
-            .json_data(&ev)
-            .unwrap_or_else(|_| SseEvent::default().comment("serialize error"));
-        Some((Ok::<_, std::convert::Infallible>(frame), rx))
-    });
+    // Carry the producer handle in the stream state so its completion is observed:
+    // a panic in the detached blocking task would otherwise be silently swallowed
+    // (unlike command/query handlers, which await their worker via service_response).
+    let stream =
+        futures_util::stream::unfold((rx, Some(producer)), |(mut rx, mut producer)| async move {
+            match rx.recv().await {
+                Some(ev) => {
+                    let frame = SseEvent::default()
+                        .json_data(&ev)
+                        .unwrap_or_else(|_| SseEvent::default().comment("serialize error"));
+                    Some((Ok::<_, std::convert::Infallible>(frame), (rx, producer)))
+                }
+                None => {
+                    // Channel closed: the producer finished. Drive its handle once
+                    // to surface a panic, then end the stream.
+                    if let Some(handle) = producer.take() {
+                        if let Err(e) = handle.await {
+                            tracing::error!(error = %e, "ask: answer producer task failed");
+                        }
+                    }
+                    None
+                }
+            }
+        });
     Sse::new(stream)
         .keep_alive(KeepAlive::new())
         .into_response()
