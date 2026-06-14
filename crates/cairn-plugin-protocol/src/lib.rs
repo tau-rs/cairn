@@ -31,6 +31,84 @@ pub const CAP_FS_WRITE: &str = "fs:write";
 /// Capability: receive pushed cairn events.
 pub const CAP_EVENTS: &str = "events";
 
+/// A capability a plugin declares in its manifest's `[engine].capabilities`.
+///
+/// Two enforcement domains:
+/// - `vault:*` gate the **host-callback RPC** surface (`host/readNote`, …) and
+///   are enforced today by the host (`cairn-infra` `service_callback`).
+/// - `net` / `exec` / `fs:read` gate the **OS sandbox** around the spawned
+///   child. They are declared and surfaced to the user now, and enforced by the
+///   capability-derived sandbox profile (issue #63); until then the fixed jail
+///   is stricter-or-equal, so declaring them never grants more than today.
+///
+/// The enum is **closed**: serde rejects any unknown string, so a typo or a
+/// capability from a newer manifest fails the manifest parse (fail-closed) and
+/// the host refuses the plugin rather than silently under-granting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Capability {
+    /// Read/search/list notes via the host channel.
+    #[serde(rename = "vault:read")]
+    VaultRead,
+    /// Create/overwrite/delete notes via the host channel.
+    #[serde(rename = "vault:write")]
+    VaultWrite,
+    /// Receive pushed cairn change events.
+    #[serde(rename = "vault:events")]
+    VaultEvents,
+    /// Make outbound network connections (sandbox; enforced by #63).
+    #[serde(rename = "net")]
+    Net,
+    /// Spawn subprocesses (sandbox; enforced by #63).
+    #[serde(rename = "exec")]
+    Exec,
+    /// Read real files outside the vault, broadly (sandbox; enforced by #63).
+    #[serde(rename = "fs:read")]
+    FsRead,
+}
+
+impl Capability {
+    /// The manifest/wire string for this capability (e.g. `"vault:read"`).
+    pub fn wire(&self) -> &'static str {
+        match self {
+            Capability::VaultRead => "vault:read",
+            Capability::VaultWrite => "vault:write",
+            Capability::VaultEvents => "vault:events",
+            Capability::Net => "net",
+            Capability::Exec => "exec",
+            Capability::FsRead => "fs:read",
+        }
+    }
+
+    /// A plain-English line for the first-run approval screen.
+    pub fn summary(&self) -> &'static str {
+        match self {
+            Capability::VaultRead => "read and search your notes",
+            Capability::VaultWrite => "create, overwrite, and delete your notes",
+            Capability::VaultEvents => "be notified when your notes change",
+            Capability::Net => "make outbound network connections",
+            Capability::Exec => "run other programs",
+            Capability::FsRead => "read files on your computer outside your notes",
+        }
+    }
+
+    /// Whether this capability is actually enforced by the current build. The
+    /// three `vault:*` caps gate the live host-RPC channel (`true`); the three
+    /// sandbox caps are declared now and enforced by #63 (`false`). Drives the
+    /// "enforced in a future release" label on the approval screen.
+    pub fn enforced_today(&self) -> bool {
+        matches!(
+            self,
+            Capability::VaultRead | Capability::VaultWrite | Capability::VaultEvents
+        )
+    }
+}
+
+impl std::fmt::Display for Capability {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.wire())
+    }
+}
+
 /// JSON-RPC error code: the host refused a callback (capability not declared, or
 /// unknown host method).
 pub const CALLBACK_DENIED: i64 = -32001;
@@ -479,5 +557,46 @@ mod tests {
             path: "b.md".into(),
         };
         assert_eq!(serde_json::to_value(&del).unwrap()["kind"], "noteDeleted");
+    }
+
+    #[test]
+    fn capability_roundtrips_via_wire_string() {
+        for cap in [
+            Capability::VaultRead,
+            Capability::VaultWrite,
+            Capability::VaultEvents,
+            Capability::Net,
+            Capability::Exec,
+            Capability::FsRead,
+        ] {
+            let v = serde_json::to_value(cap).unwrap();
+            assert_eq!(v, serde_json::Value::String(cap.wire().to_string()));
+            let back: Capability = serde_json::from_value(v).unwrap();
+            assert_eq!(back, cap);
+        }
+    }
+
+    #[test]
+    fn unknown_capability_is_rejected() {
+        // typo, and an old name that no longer exists -> hard error (fail-closed)
+        assert!(serde_json::from_value::<Capability>(serde_json::json!("net:outbund")).is_err());
+        assert!(serde_json::from_value::<Capability>(serde_json::json!("fs:write")).is_err());
+        assert!(serde_json::from_value::<Capability>(serde_json::json!("events")).is_err());
+    }
+
+    #[test]
+    fn enforced_today_only_for_vault_caps() {
+        assert!(Capability::VaultRead.enforced_today());
+        assert!(Capability::VaultWrite.enforced_today());
+        assert!(Capability::VaultEvents.enforced_today());
+        assert!(!Capability::Net.enforced_today());
+        assert!(!Capability::Exec.enforced_today());
+        assert!(!Capability::FsRead.enforced_today());
+    }
+
+    #[test]
+    fn capability_displays_as_wire_string() {
+        assert_eq!(Capability::VaultRead.to_string(), "vault:read");
+        assert_eq!(Capability::FsRead.to_string(), "fs:read");
     }
 }
