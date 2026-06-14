@@ -639,6 +639,14 @@ mod tests {
         })
         .unwrap();
         assert_eq!(iframe_kind["kind"].as_str().unwrap(), "iframe");
+
+        // A present height serializes as a bare number (not stringified/wrapped).
+        let iframe_sized = to_value(PluginWidget::Iframe {
+            html: "<p>x</p>".into(),
+            height: Some(240),
+        })
+        .unwrap();
+        assert_eq!(iframe_sized["height"].as_u64().unwrap(), 240);
     }
 
     #[test]
