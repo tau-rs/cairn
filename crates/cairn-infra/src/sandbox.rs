@@ -1,6 +1,7 @@
 //! OS-level sandboxing for spawned plugins. macOS uses Seatbelt via
-//! `sandbox-exec`; Linux uses bubblewrap via `bwrap`; other platforms refuse
-//! (no backend yet — see issues #40, #62).
+//! `sandbox-exec`; Linux uses bubblewrap via `bwrap`; Windows uses an
+//! AppContainer set up by the `cairn-sandbox-win` launcher; other platforms
+//! refuse (no backend).
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -110,8 +111,6 @@ pub(crate) fn bwrap_args(vault_root: &Path, plugin_dir: &Path, cmd: &Path) -> Ve
 /// `OsString` argv entries, so no quoting is required and a non-UTF-8 path
 /// survives intact. The vault is not named here: AppContainer denies it
 /// structurally (deny-by-default — it is simply never granted).
-// Called by WindowsAppContainerSandbox::wrap in the next task (issue #62).
-#[allow(dead_code)]
 pub(crate) fn windows_launcher_args(
     plugin_dir: &Path,
     cmd: &Path,
@@ -273,8 +272,97 @@ impl Sandbox for LinuxBwrapSandbox {
     }
 }
 
-/// Backend for platforms with no OS sandbox yet: always refuses, so the host
-/// never spawns an unjailed plugin (the Windows backend is issue #62).
+/// One-time probe confirming AppContainer can actually be set up on this host.
+/// Runs `<launcher> --probe`, which creates (or confirms) the AppContainer
+/// profile and exits 0 on success. A host where AppContainer is disabled then
+/// yields a clean refusal from `wrap()` instead of a confusing spawn-time error
+/// — the Windows analogue of the bwrap userns probe.
+fn appcontainer_probe(exec: &Path) -> Result<(), String> {
+    let out = Command::new(exec)
+        .arg("--probe")
+        .output()
+        .map_err(|e| format!("spawn {}: {e}", exec.display()))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "AppContainer unavailable: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+    }
+}
+
+/// Discover the launcher binary next to the running host executable.
+fn default_launcher_path() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("cairn-sandbox-win.exe")))
+        .unwrap_or_else(|| PathBuf::from("cairn-sandbox-win.exe"))
+}
+
+/// Windows AppContainer backend: runs the plugin under the `cairn-sandbox-win`
+/// launcher, which confines it in an AppContainer (no host writes, no network,
+/// vault unreadable). Mirrors how `MacSeatbeltSandbox` uses `sandbox-exec`.
+pub struct WindowsAppContainerSandbox {
+    /// Path to the `cairn-sandbox-win` launcher (overridable in tests).
+    exec: PathBuf,
+    /// Cached result of the one-time AppContainer probe.
+    probe: OnceLock<Result<(), String>>,
+}
+
+impl Default for WindowsAppContainerSandbox {
+    fn default() -> Self {
+        Self {
+            exec: default_launcher_path(),
+            probe: OnceLock::new(),
+        }
+    }
+}
+
+impl WindowsAppContainerSandbox {
+    /// Construct with an explicit launcher path (tests).
+    pub fn with_exec(exec: PathBuf) -> Self {
+        Self {
+            exec,
+            probe: OnceLock::new(),
+        }
+    }
+}
+
+impl Sandbox for WindowsAppContainerSandbox {
+    fn wrap(
+        &self,
+        _vault_root: &Path,
+        plugin_dir: &Path,
+        cmd: &Path,
+        args: &[String],
+    ) -> Result<Command, SandboxError> {
+        if !self.exec.exists() {
+            return Err(SandboxError::Unavailable(format!(
+                "{} not found",
+                self.exec.display()
+            )));
+        }
+        if let Err(e) = self.probe.get_or_init(|| appcontainer_probe(&self.exec)) {
+            return Err(SandboxError::Unavailable(e.clone()));
+        }
+        // The launcher grants the AppContainer read on the canonical plugin dir
+        // and execs the canonical command. The vault is denied structurally
+        // (never granted), so `_vault_root` needs no action here.
+        let dir = plugin_dir
+            .canonicalize()
+            .map_err(|e| SandboxError::Unavailable(format!("canonicalize plugin dir: {e}")))?;
+        let cmd_abs = cmd
+            .canonicalize()
+            .map_err(|e| SandboxError::Unavailable(format!("canonicalize command: {e}")))?;
+        let mut c = Command::new(&self.exec);
+        c.args(windows_launcher_args(&dir, &cmd_abs, args));
+        Ok(c)
+    }
+}
+
+/// Backend for platforms with no OS sandbox: always refuses, so the host
+/// never spawns an unjailed plugin (no backend for this target).
 pub struct RefusingSandbox;
 
 impl Sandbox for RefusingSandbox {
@@ -293,7 +381,7 @@ impl Sandbox for RefusingSandbox {
 }
 
 /// The sandbox for the current platform: Seatbelt on macOS, bubblewrap on
-/// Linux, refusing elsewhere.
+/// Linux, AppContainer on Windows, refusing elsewhere.
 pub fn platform_sandbox() -> Box<dyn Sandbox> {
     #[cfg(target_os = "macos")]
     {
@@ -303,7 +391,11 @@ pub fn platform_sandbox() -> Box<dyn Sandbox> {
     {
         Box::new(LinuxBwrapSandbox::default())
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        Box::new(WindowsAppContainerSandbox::default())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         Box::new(RefusingSandbox)
     }
@@ -411,6 +503,17 @@ mod tests {
                 "/cairn/.cairn/plugins/p/bin",
             ]
         );
+    }
+
+    #[test]
+    fn windows_sandbox_missing_launcher_is_unavailable() {
+        let s = WindowsAppContainerSandbox::with_exec(PathBuf::from(
+            r"C:\nonexistent\cairn-sandbox-win.exe",
+        ));
+        let err = s
+            .wrap(Path::new("."), Path::new("."), Path::new("cmd.exe"), &[])
+            .unwrap_err();
+        assert!(matches!(err, SandboxError::Unavailable(_)));
     }
 
     #[test]
