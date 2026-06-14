@@ -7,7 +7,8 @@ use std::process::ExitCode;
 use cairn_app::{Event, EventSink};
 use cairn_contract::{Command as WireCommand, CommandResponse, Query as WireQuery, QueryResponse};
 use cairn_infra::{
-    inspect_plugins, NotifyWatcher, PluginInspection, TrustStatus, TrustedPlugins, MIN_QUERY_CHARS,
+    inspect_plugins, InspectedManifest, NotifyWatcher, PinnedHash, PluginInspection, TrustStatus,
+    TrustedPlugins, MIN_QUERY_CHARS,
 };
 use cairn_ports::Watcher;
 use cairn_service::{app_event_to_wire, dispatch_command, dispatch_query, run_watch_loop};
@@ -285,7 +286,7 @@ fn run_plugin_trust(inspections: &[PluginInspection], dir: &str) -> Result<(), S
         .as_ref()
         .ok_or_else(|| format!("plugin {dir:?} could not be hashed; cannot trust it"))?;
 
-    print_approval_screen(manifest, &hash.to_string());
+    print_approval_screen(manifest, hash);
 
     if !confirm_yes("  Approve and trust this exact version? [y/N]: ")? {
         println!("  Not trusted.");
@@ -302,13 +303,11 @@ fn run_plugin_trust(inspections: &[PluginInspection], dir: &str) -> Result<(), S
 }
 
 /// Render the first-run approval screen for a plugin under review.
-fn print_approval_screen(m: &cairn_infra::InspectedManifest, hash: &str) {
+fn print_approval_screen(m: &InspectedManifest, hash: &PinnedHash) {
     println!();
     println!("  Plugin:   {}  ({}  v{})", m.id, m.name, m.version);
-    println!(
-        "  Command:  {}          (runs as a sandboxed child of the daemon)",
-        m.command
-    );
+    println!("  Command:  {}", m.command);
+    println!("            (runs as a sandboxed child of the daemon)");
     println!("  Content:  {hash}");
     println!();
     if m.capabilities.is_empty() {
