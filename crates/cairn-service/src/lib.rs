@@ -274,6 +274,23 @@ pub fn augmented_answer(
     sink: &mut dyn AgentSink,
     top_k: usize,
 ) -> Result<Vec<String>, ServiceError> {
+    let (prompt, cited) = gather_answer_context(engine, query, top_k)?;
+    runtime.answer(&prompt, sink)?;
+    Ok(cited)
+}
+
+/// The engine-touching half of an answer: search the top `top_k` hits, read them
+/// into context, and build the agent prompt. Returns `(prompt, cited_paths)`.
+/// Pull this out so a transport can run it under the engine lock and then stream
+/// the (long, lock-free) agent run separately.
+///
+/// # Errors
+/// [`ServiceError`] if a search/read dispatch fails.
+pub fn gather_answer_context(
+    engine: &Engine,
+    query: &str,
+    top_k: usize,
+) -> Result<(String, Vec<String>), ServiceError> {
     let cited: Vec<String> = match dispatch_query(
         engine,
         &Query::Search {
@@ -300,8 +317,29 @@ pub fn augmented_answer(
     }
 
     let prompt = build_answer_prompt(&context, query);
-    runtime.answer(&prompt, sink)?;
-    Ok(cited)
+    Ok((prompt, cited))
+}
+
+/// Map a port [`AgentEvent`] to its wire [`AnswerEvent`]. `None` for kinds with
+/// no wire form — `AgentEvent` is `#[non_exhaustive]`, so unknown upstream kinds
+/// are skipped rather than panicking (mirroring the CLI's wildcard arm).
+///
+/// Does not produce [`AnswerEvent::Sources`]: it has no `AgentEvent` counterpart.
+/// Callers emit that leading frame themselves from the `cited` paths returned by
+/// [`gather_answer_context`].
+#[must_use]
+pub fn agent_event_to_wire(e: cairn_ports::AgentEvent) -> Option<cairn_contract::AnswerEvent> {
+    use cairn_contract::AnswerEvent as W;
+    use cairn_ports::AgentEvent as A;
+    Some(match e {
+        A::TextDelta(text) => W::TextDelta { text },
+        A::ToolStarted { tool } => W::ToolStarted { tool },
+        A::ToolCompleted { tool, ok } => W::ToolCompleted { tool, ok },
+        A::TurnCompleted => W::TurnCompleted,
+        A::Completed => W::Completed,
+        A::Failed { message } => W::Failed { message },
+        _ => return None,
+    })
 }
 
 /// Assemble the agent prompt from retrieved `context` and the user `query`.
@@ -1058,5 +1096,66 @@ mod augmented_answer_tests {
         let p = build_answer_prompt("", "what is x");
         assert!(!p.contains("Notes:"));
         assert!(p.contains("Question: what is x"));
+    }
+
+    #[test]
+    fn gather_returns_prompt_with_context_and_cited_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut events: Vec<Event> = Vec::new();
+        let mut engine = cairn_startup::build_engine(dir.path()).unwrap();
+        dispatch_command(
+            &mut engine,
+            &Command::WriteNote {
+                path: "a.md".into(),
+                contents: "ownership moves by default".into(),
+            },
+            &mut events,
+        )
+        .unwrap();
+        engine.reindex(&mut events).unwrap();
+
+        let (prompt, cited) = gather_answer_context(&engine, "ownership", 5).unwrap();
+        assert_eq!(cited, vec!["a.md".to_string()]);
+        assert!(prompt.contains("ownership moves by default"));
+        assert!(prompt.contains("Question: ownership"));
+    }
+
+    #[test]
+    fn agent_event_maps_every_variant_to_wire() {
+        use cairn_contract::AnswerEvent;
+        assert_eq!(
+            agent_event_to_wire(AgentEvent::TextDelta("hi".into())),
+            Some(AnswerEvent::TextDelta { text: "hi".into() })
+        );
+        assert_eq!(
+            agent_event_to_wire(AgentEvent::ToolStarted { tool: "g".into() }),
+            Some(AnswerEvent::ToolStarted { tool: "g".into() })
+        );
+        assert_eq!(
+            agent_event_to_wire(AgentEvent::ToolCompleted {
+                tool: "g".into(),
+                ok: false
+            }),
+            Some(AnswerEvent::ToolCompleted {
+                tool: "g".into(),
+                ok: false
+            })
+        );
+        assert_eq!(
+            agent_event_to_wire(AgentEvent::TurnCompleted),
+            Some(AnswerEvent::TurnCompleted)
+        );
+        assert_eq!(
+            agent_event_to_wire(AgentEvent::Completed),
+            Some(AnswerEvent::Completed)
+        );
+        assert_eq!(
+            agent_event_to_wire(AgentEvent::Failed {
+                message: "x".into()
+            }),
+            Some(AnswerEvent::Failed {
+                message: "x".into()
+            })
+        );
     }
 }
