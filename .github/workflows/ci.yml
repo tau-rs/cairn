@@ -83,6 +83,9 @@ jobs:
           with-sccache: true
           with-mold: true
           with-just: true
+      - name: Install bubblewrap (Linux sandbox backend)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
       - run: just test
 
   doc-tests:
