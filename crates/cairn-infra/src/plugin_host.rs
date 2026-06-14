@@ -1082,4 +1082,17 @@ mod tests {
         .unwrap();
         assert!(TrustedPlugins::from_cairn_toml(tmp.path()).is_err());
     }
+
+    #[test]
+    fn from_cairn_toml_rejects_unknown_field_in_pin_table() {
+        // A typo'd key in a [[plugins.trusted]] table must fail loudly, not
+        // silently drop the pin and run the plugin unpinned.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("cairn.toml"),
+            "[[plugins.trusted]]\ndir = \"a\"\nhsah = \"sha256:x\"\n",
+        )
+        .unwrap();
+        assert!(TrustedPlugins::from_cairn_toml(tmp.path()).is_err());
+    }
 }

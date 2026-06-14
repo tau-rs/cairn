@@ -5,7 +5,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-pub use cairn_infra::TrustedEntry;
+use cairn_infra::TrustedEntry;
 
 /// Daemon configuration.
 #[derive(Debug, Default, Deserialize)]
