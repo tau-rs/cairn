@@ -3,4 +3,5 @@
 //! `docs/superpowers/specs/2026-06-14-tau-augmented-answer-design.md`.
 
 pub mod client;
+pub mod config;
 pub mod wire;
