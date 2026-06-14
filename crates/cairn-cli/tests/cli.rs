@@ -329,6 +329,64 @@ fn history_show_restore_subcommands() {
 }
 
 #[test]
+fn plugin_trust_yes_prints_snippet() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    cairn(dir).arg("init").assert().success();
+    write_plugin_manifest(
+        dir,
+        "fetch-bot",
+        "id=\"fetch-bot\"\nname=\"Fetch Bot\"\nversion=\"1.0.0\"\n\
+         [engine]\ncommand=\"./fetch-bot\"\ncapabilities=[\"vault:read\",\"net\"]\n",
+    );
+    cairn(dir)
+        .args(["plugin", "trust", "fetch-bot"])
+        .write_stdin("y\n")
+        .assert()
+        .success()
+        .stdout(
+            contains("vault:read")
+                .and(contains("enforced in a future release")) // net's label
+                .and(contains("[[plugins.trusted]]"))
+                .and(contains("dir = \"fetch-bot\""))
+                .and(contains("hash = \"sha256:")),
+        );
+}
+
+#[test]
+fn plugin_trust_declined_prints_no_snippet() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    cairn(dir).arg("init").assert().success();
+    write_plugin_manifest(
+        dir,
+        "fetch-bot",
+        "id=\"fetch-bot\"\nname=\"Fetch Bot\"\nversion=\"1.0.0\"\n\
+         [engine]\ncommand=\"./fetch-bot\"\ncapabilities=[]\n",
+    );
+    // Empty stdin == EOF == non-interactive == refuse.
+    cairn(dir)
+        .args(["plugin", "trust", "fetch-bot"])
+        .write_stdin("")
+        .assert()
+        .success()
+        .stdout(contains("Not trusted").and(contains("[[plugins.trusted]]").not()));
+}
+
+#[test]
+fn plugin_trust_unknown_dir_errors() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    cairn(dir).arg("init").assert().success();
+    cairn(dir)
+        .args(["plugin", "trust", "ghost"])
+        .write_stdin("y\n")
+        .assert()
+        .failure()
+        .stderr(contains("ghost"));
+}
+
+#[test]
 fn tags_and_tagged_subcommands() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();

@@ -271,8 +271,84 @@ fn print_plugin_list(inspections: &[PluginInspection]) {
     }
 }
 
-fn run_plugin_trust(_inspections: &[PluginInspection], _dir: &str) -> Result<(), String> {
-    Err("not yet implemented".to_string())
+fn run_plugin_trust(inspections: &[PluginInspection], dir: &str) -> Result<(), String> {
+    let insp = inspections
+        .iter()
+        .find(|i| i.dir_name == dir)
+        .ok_or_else(|| format!("no plugin directory named {dir:?} under .cairn/plugins"))?;
+    let manifest = insp
+        .manifest
+        .as_ref()
+        .ok_or_else(|| format!("plugin {dir:?} has an unreadable manifest; cannot trust it"))?;
+    let hash = insp
+        .computed_hash
+        .as_ref()
+        .ok_or_else(|| format!("plugin {dir:?} could not be hashed; cannot trust it"))?;
+
+    print_approval_screen(manifest, &hash.to_string());
+
+    if !confirm_yes("  Approve and trust this exact version? [y/N]: ")? {
+        println!("  Not trusted.");
+        return Ok(());
+    }
+
+    println!();
+    println!("  Add this to your cairn.toml to trust {dir}:");
+    println!();
+    println!("      [[plugins.trusted]]");
+    println!("      dir = \"{dir}\"");
+    println!("      hash = \"{hash}\"");
+    Ok(())
+}
+
+/// Render the first-run approval screen for a plugin under review.
+fn print_approval_screen(m: &cairn_infra::InspectedManifest, hash: &str) {
+    println!();
+    println!("  Plugin:   {}  ({}  v{})", m.id, m.name, m.version);
+    println!(
+        "  Command:  {}          (runs as a sandboxed child of the daemon)",
+        m.command
+    );
+    println!("  Content:  {hash}");
+    println!();
+    if m.capabilities.is_empty() {
+        println!("  This plugin declares no capabilities.");
+    } else {
+        println!("  Capabilities this plugin declares:");
+        for cap in &m.capabilities {
+            let suffix = if cap.enforced_today() {
+                ""
+            } else {
+                "   (enforced in a future release)"
+            };
+            println!(
+                "    \u{2022} {:<13} {}{}",
+                cap.wire(),
+                cap.summary(),
+                suffix
+            );
+        }
+    }
+    println!();
+}
+
+/// Prompt on stdout and read a yes/no answer from stdin. Empty input, EOF
+/// (non-interactive pipe), or anything other than y/yes is treated as **no** —
+/// a scripted pipe must never silently approve a plugin.
+fn confirm_yes(prompt: &str) -> Result<bool, String> {
+    print!("{prompt}");
+    std::io::stdout().flush().map_err(|e| e.to_string())?;
+    let mut line = String::new();
+    let n = std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| e.to_string())?;
+    if n == 0 {
+        return Ok(false); // EOF: non-interactive
+    }
+    Ok(matches!(
+        line.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
 }
 
 fn run() -> Result<(), String> {
