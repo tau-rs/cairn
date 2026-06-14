@@ -27,6 +27,7 @@ fn plugin_list_shows_status_and_capabilities() {
         .stdout(
             contains("fetch-bot")
                 .and(contains("untrusted"))
+                .and(contains("Fetch Bot"))
                 .and(contains("vault:read"))
                 .and(contains("net")),
         );

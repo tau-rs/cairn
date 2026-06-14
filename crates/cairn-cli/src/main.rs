@@ -247,9 +247,18 @@ fn print_plugin_list(inspections: &[PluginInspection]) {
         return;
     }
     for insp in inspections {
-        let (name, version) = match &insp.manifest {
-            Some(m) => (m.name.as_str(), m.version.as_str()),
-            None => ("?", "?"),
+        let (name, version, caps) = match &insp.manifest {
+            Some(m) if !m.capabilities.is_empty() => (
+                m.name.as_str(),
+                m.version.as_str(),
+                m.capabilities
+                    .iter()
+                    .map(|c| c.wire())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+            Some(m) => (m.name.as_str(), m.version.as_str(), "(none)".to_string()),
+            None => ("?", "?", "(unknown)".to_string()),
         };
         println!(
             "{}  v{}  [{}]  {}",
@@ -258,16 +267,6 @@ fn print_plugin_list(inspections: &[PluginInspection]) {
             status_label(insp.status),
             name
         );
-        let caps = match &insp.manifest {
-            Some(m) if !m.capabilities.is_empty() => m
-                .capabilities
-                .iter()
-                .map(|c| c.wire())
-                .collect::<Vec<_>>()
-                .join(", "),
-            Some(_) => "(none)".to_string(),
-            None => "(unknown)".to_string(),
-        };
         println!("  capabilities: {caps}");
     }
 }
@@ -540,6 +539,9 @@ mod tests {
             path: "a.md".into()
         }));
         assert!(!needs_startup_reindex(&Command::Init));
+        assert!(!needs_startup_reindex(&Command::Plugin {
+            action: PluginAction::List
+        }));
     }
 
     #[test]
