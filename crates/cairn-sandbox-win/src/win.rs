@@ -5,8 +5,8 @@ use std::os::windows::ffi::OsStrExt;
 use std::process::ExitCode;
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, LocalFree, ERROR_ALREADY_EXISTS, GENERIC_EXECUTE, GENERIC_READ, HANDLE, S_OK,
-    WAIT_OBJECT_0,
+    CloseHandle, GetLastError, LocalFree, ERROR_ALREADY_EXISTS, GENERIC_EXECUTE, GENERIC_READ,
+    HANDLE, S_OK, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Security::Authorization::{
     GetNamedSecurityInfoW, SetEntriesInAclW, SetNamedSecurityInfoW, EXPLICIT_ACCESS_W,
@@ -50,44 +50,58 @@ fn wide_path(p: &std::ffi::OsStr) -> Vec<u16> {
     p.encode_wide().chain(std::iter::once(0)).collect()
 }
 
-/// Create-or-confirm the AppContainer profile and return its package SID.
-/// `CreateAppContainerProfile` returns `HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS)`
-/// if the profile exists; in that case we derive the SID instead.
+/// Ensure the AppContainer profile is registered and return its package SID.
+///
+/// Profile registration is best-effort and idempotent. Under parallel launches
+/// (e.g. concurrent test processes registering the same profile name) the
+/// registry op can transiently fail with `HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS)`
+/// (a peer already registered it — success) or `0x800703FA`
+/// (`ERROR_KEY_DELETED` — the key is mid-mutation by a peer), so we retry the
+/// transient case briefly. The SID itself comes from
+/// `DeriveAppContainerSidFromAppContainerName`, a pure name→SID derivation that
+/// touches no registry and therefore never races — making it the authoritative,
+/// stable source regardless of how the registration attempts interleaved.
 fn ensure_app_container_sid() -> Result<PSID, String> {
     let name = wide(PROFILE_NAME);
     let display = wide("Cairn Plugin Sandbox");
     let desc = wide("Confines trusted cairn plugins");
-    let mut sid: PSID = std::ptr::null_mut();
-    // SAFETY: all pointers reference live local buffers for the duration of the
-    // call; `sid` is an out-param populated on success.
-    let hr = unsafe {
-        CreateAppContainerProfile(
-            name.as_ptr(),
-            display.as_ptr(),
-            desc.as_ptr(),
-            std::ptr::null(),
-            0,
-            &mut sid,
-        )
-    };
-    if hr == S_OK {
-        // The SID is intentionally not freed: the launcher process is
-        // short-lived and exits right after the child does.
-        return Ok(sid);
-    }
-    // HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS) == 0x800700B7
+    // HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS) == 0x800700B7.
     let already = (0x8007_0000u32 | (ERROR_ALREADY_EXISTS & 0xFFFF)) as i32;
-    if hr == already {
-        // SAFETY: out-param `sid` populated on success; `name` is live.
-        let dhr = unsafe { DeriveAppContainerSidFromAppContainerName(name.as_ptr(), &mut sid) };
-        if dhr == S_OK {
-            return Ok(sid);
+    for _ in 0..10 {
+        let mut created: PSID = std::ptr::null_mut();
+        // SAFETY: all pointers reference live local buffers; `created` is an
+        // out-param. We do not use `created` — the authoritative SID is derived
+        // below — and intentionally do not free it (short-lived process).
+        let hr = unsafe {
+            CreateAppContainerProfile(
+                name.as_ptr(),
+                display.as_ptr(),
+                desc.as_ptr(),
+                std::ptr::null(),
+                0,
+                &mut created,
+            )
+        };
+        if hr == S_OK || hr == already {
+            break;
         }
-        return Err(format!(
-            "DeriveAppContainerSidFromAppContainerName failed: 0x{dhr:08X}"
-        ));
+        // Transient registry contention from a concurrent registration of the
+        // same profile (notably 0x800703FA). Back off and retry; the profile is
+        // typically registered by whichever peer wins.
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    Err(format!("CreateAppContainerProfile failed: 0x{hr:08X}"))
+    // Authoritative, race-free SID: a pure derivation from the name, no registry.
+    let mut sid: PSID = std::ptr::null_mut();
+    // SAFETY: out-param `sid` populated on success; `name` is live. The SID is
+    // intentionally not freed (short-lived process).
+    let dhr = unsafe { DeriveAppContainerSidFromAppContainerName(name.as_ptr(), &mut sid) };
+    if dhr == S_OK {
+        Ok(sid)
+    } else {
+        Err(format!(
+            "DeriveAppContainerSidFromAppContainerName failed: 0x{dhr:08X}"
+        ))
+    }
 }
 
 /// Entry point dispatched from `main`.
@@ -241,6 +255,12 @@ fn confine_and_run(args: &[OsString]) -> Result<u8, String> {
     }
     let mut cmdline_w = wide(&cmdline);
 
+    // Run the child with its working directory set to the (granted) plugin dir.
+    // Otherwise the AppContainer child inherits the launcher's CWD, which it has
+    // no read access to — and a process whose CWD is inaccessible can fail to
+    // start or initialise. The plugin dir is granted read+execute below.
+    let cwd_w = wide_path(plugin_dir.as_os_str());
+
     // SECURITY_CAPABILITIES with the package SID and NO capabilities → the
     // built-in WFP filter blocks all sockets (no network).
     let mut caps = SECURITY_CAPABILITIES {
@@ -317,7 +337,7 @@ fn confine_and_run(args: &[OsString]) -> Result<u8, String> {
             1, // bInheritHandles = TRUE → inherit stdio
             EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
             std::ptr::null(),
-            std::ptr::null(),
+            cwd_w.as_ptr(),
             &si.StartupInfo,
             &mut pi,
         )
@@ -325,11 +345,14 @@ fn confine_and_run(args: &[OsString]) -> Result<u8, String> {
     // SAFETY: attribute list no longer needed once the process is created.
     unsafe { DeleteProcThreadAttributeList(si.lpAttributeList) };
     if created == 0 {
+        // SAFETY: reads the calling thread's last-error set by CreateProcessW.
+        let err = unsafe { GetLastError() };
         // SAFETY: `job` is a valid handle.
         unsafe { CloseHandle(job) };
-        return Err(
-            "CreateProcessW failed (is the command inside an AppContainer-readable path?)".into(),
-        );
+        return Err(format!(
+            "CreateProcessW failed (GetLastError=0x{err:08X}); is the command inside an \
+             AppContainer-readable path?"
+        ));
     }
 
     // Assign to the job BEFORE resuming so the child cannot escape confinement.

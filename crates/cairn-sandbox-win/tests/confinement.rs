@@ -35,11 +35,15 @@ fn exec_and_pipe_stdout() {
         eprintln!("skipping: AppContainer unavailable");
         return;
     }
-    let tmp = std::env::temp_dir();
+    // A unique, isolated plugin dir — never the shared %TEMP% root, so parallel
+    // tests don't contend on the same directory's ACL.
+    let base = std::env::temp_dir().join(format!("cairn_sbx_x_{}", std::process::id()));
+    let plugin_dir = base.join("plugin");
+    std::fs::create_dir_all(&plugin_dir).unwrap();
     let cmd = PathBuf::from(r"C:\Windows\System32\cmd.exe");
     let out = Command::new(launcher())
         .arg("--plugin-dir")
-        .arg(&tmp)
+        .arg(&plugin_dir)
         .arg("--")
         .arg(&cmd)
         .arg("/c")
@@ -48,12 +52,13 @@ fn exec_and_pipe_stdout() {
         .expect("spawn launcher");
     assert!(
         out.status.success(),
-        "the plugin command must be allowed to exec"
+        "the plugin command must be allowed to exec: {out:?}"
     );
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("hi"),
         "stdout must pipe through the jail: {out:?}"
     );
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 #[test]
@@ -117,9 +122,12 @@ fn denies_vault_read_but_allows_plugin_dir() {
         .expect("spawn");
     assert!(
         allowed.status.success(),
-        "reading the plugin's own dir must be allowed"
+        "reading the plugin's own dir must be allowed: {allowed:?}"
     );
-    assert!(String::from_utf8_lossy(&allowed.stdout).contains("OWN"));
+    assert!(
+        String::from_utf8_lossy(&allowed.stdout).contains("OWN"),
+        "plugin-dir read must return the file contents: {allowed:?}"
+    );
 
     let secret = vault.join("secret.md");
     let denied = Command::new(launcher())
@@ -146,7 +154,10 @@ fn network_is_denied() {
     // Listen on an ephemeral loopback port from the (unconfined) test process.
     let _listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = _listener.local_addr().unwrap().port();
-    let plugin_dir = std::env::temp_dir();
+    // A unique, isolated plugin dir (not the shared %TEMP% root).
+    let base = std::env::temp_dir().join(format!("cairn_sbx_n_{}", std::process::id()));
+    let plugin_dir = base.join("plugin");
+    std::fs::create_dir_all(&plugin_dir).unwrap();
     let cmd = PathBuf::from(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe");
     // PowerShell connect attempt: exit 0 on success, 1 on failure.
     let script = format!(
@@ -167,4 +178,5 @@ fn network_is_denied() {
         !status.success(),
         "an AppContainer with no network capability must not connect"
     );
+    let _ = std::fs::remove_dir_all(&base);
 }
