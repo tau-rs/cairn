@@ -41,6 +41,11 @@ pub const CAP_EVENTS: &str = "events";
 ///   capability-derived sandbox profile (issue #63); until then the fixed jail
 ///   is stricter-or-equal, so declaring them never grants more than today.
 ///
+/// These `vault:*` names intentionally supersede the legacy `CAP_FS_READ` /
+/// `CAP_FS_WRITE` / `CAP_EVENTS` string constants (notably `"events"` →
+/// `"vault:events"`); the host gate migrates off those string consts in a
+/// follow-up task.
+///
 /// The enum is **closed**: serde rejects any unknown string, so a typo or a
 /// capability from a newer manifest fails the manifest parse (fail-closed) and
 /// the host refuses the plugin rather than silently under-granting.
@@ -68,6 +73,8 @@ pub enum Capability {
 
 impl Capability {
     /// The manifest/wire string for this capability (e.g. `"vault:read"`).
+    // Each arm must match the #[serde(rename = "...")] above; the roundtrip
+    // test (`capability_roundtrips_via_wire_string`) guards this.
     pub fn wire(&self) -> &'static str {
         match self {
             Capability::VaultRead => "vault:read",
