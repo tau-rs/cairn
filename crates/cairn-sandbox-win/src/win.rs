@@ -26,7 +26,7 @@ use windows_sys::Win32::System::JobObjects::{
 };
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
-    InitializeProcThreadAttributeList, ResumeThread, UpdateProcThreadAttribute,
+    InitializeProcThreadAttributeList, ResumeThread, TerminateProcess, UpdateProcThreadAttribute,
     WaitForSingleObject, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
     EXTENDED_STARTUPINFO_PRESENT, INFINITE, PROCESS_INFORMATION,
     PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, STARTUPINFOEXW,
@@ -290,13 +290,18 @@ fn confine_and_run(args: &[OsString]) -> Result<u8, String> {
     let mut jli: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
     jli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     // SAFETY: `jli` is live and correctly sized.
-    unsafe {
+    let set_ok = unsafe {
         SetInformationJobObject(
             job,
             JobObjectExtendedLimitInformation,
             &mut jli as *mut _ as _,
             std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-        );
+        )
+    };
+    if set_ok == 0 {
+        // SAFETY: `job` is a valid handle.
+        unsafe { CloseHandle(job) };
+        return Err("SetInformationJobObject failed".into());
     }
 
     // SAFETY: zeroed PROCESS_INFORMATION is a valid initial state.
@@ -327,12 +332,22 @@ fn confine_and_run(args: &[OsString]) -> Result<u8, String> {
         );
     }
 
-    // Assign to the job, then resume.
-    // SAFETY: both handles valid from CreateProcessW.
-    unsafe {
-        AssignProcessToJobObject(job, pi.hProcess);
-        ResumeThread(pi.hThread);
+    // Assign to the job BEFORE resuming so the child cannot escape confinement.
+    // SAFETY: both handles are valid from CreateProcessW.
+    let assigned = unsafe { AssignProcessToJobObject(job, pi.hProcess) };
+    if assigned == 0 {
+        // SAFETY: the child is still suspended; terminate it rather than let it
+        // run outside the job, then release all handles.
+        unsafe {
+            TerminateProcess(pi.hProcess, 1);
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            CloseHandle(job);
+        }
+        return Err("AssignProcessToJobObject failed".into());
     }
+    // SAFETY: assign succeeded; release the child to run inside the job.
+    unsafe { ResumeThread(pi.hThread) };
 
     // Wait and collect the exit code.
     // SAFETY: `pi.hProcess` valid until we CloseHandle it.
