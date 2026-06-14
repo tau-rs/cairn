@@ -30,6 +30,11 @@ pub const CAP_FS_READ: &str = "fs:read";
 pub const CAP_FS_WRITE: &str = "fs:write";
 /// Capability: receive pushed cairn events.
 pub const CAP_EVENTS: &str = "events";
+/// Capability: direct outbound network access from the plugin process.
+/// Unlike `fs:read`/`fs:write`/`events` (which gate host-RPC callbacks), `net`
+/// is consumed by the OS sandbox to open the network in the jail — it gates no
+/// host-callback method (see `cairn-infra` `sandbox.rs`).
+pub const CAP_NET: &str = "net";
 
 /// JSON-RPC error code: the host refused a callback (capability not declared, or
 /// unknown host method).
@@ -462,6 +467,11 @@ mod tests {
         };
         let v = serde_json::to_value(&dp).unwrap();
         assert_eq!(serde_json::from_value::<DeleteNoteParams>(v).unwrap(), dp);
+    }
+
+    #[test]
+    fn cap_net_is_the_net_string() {
+        assert_eq!(CAP_NET, "net");
     }
 
     #[test]
