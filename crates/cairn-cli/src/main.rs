@@ -6,7 +6,9 @@ use std::process::ExitCode;
 
 use cairn_app::{Event, EventSink};
 use cairn_contract::{Command as WireCommand, CommandResponse, Query as WireQuery, QueryResponse};
-use cairn_infra::{NotifyWatcher, MIN_QUERY_CHARS};
+use cairn_infra::{
+    inspect_plugins, NotifyWatcher, PluginInspection, TrustStatus, TrustedPlugins, MIN_QUERY_CHARS,
+};
 use cairn_ports::Watcher;
 use cairn_service::{app_event_to_wire, dispatch_command, dispatch_query, run_watch_loop};
 use cairn_startup::{build_engine, ensure_cairn};
@@ -159,6 +161,22 @@ enum Command {
         /// A git revspec to restore from.
         revision: String,
     },
+    /// Inspect and approve engine plugins.
+    Plugin {
+        #[command(subcommand)]
+        action: PluginAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum PluginAction {
+    /// List discovered plugins, their trust status, and declared capabilities.
+    List,
+    /// Review a plugin and print the cairn.toml entry needed to trust it.
+    Trust {
+        /// The plugin's directory name under `.cairn/plugins/`.
+        dir: String,
+    },
 }
 
 /// Whether a command needs the O(vault) startup reindex. `search` consults the
@@ -199,6 +217,65 @@ fn short_query_hint(query: &str) -> Option<String> {
     }
 }
 
+fn run_plugin(root: &Path, action: &PluginAction) -> Result<(), String> {
+    let plugins_dir = root.join(".cairn").join("plugins");
+    let trusted = TrustedPlugins::from_cairn_toml(root).map_err(|e| e.to_string())?;
+    let inspections = inspect_plugins(&plugins_dir, &trusted).map_err(|e| e.to_string())?;
+    match action {
+        PluginAction::List => {
+            print_plugin_list(&inspections);
+            Ok(())
+        }
+        PluginAction::Trust { dir } => run_plugin_trust(&inspections, dir),
+    }
+}
+
+/// Human label for a trust status.
+fn status_label(status: TrustStatus) -> &'static str {
+    match status {
+        TrustStatus::Untrusted => "untrusted",
+        TrustStatus::TrustedUnpinned => "trusted (unpinned)",
+        TrustStatus::Pinned => "trusted (pinned)",
+        TrustStatus::Drift => "DRIFT — contents changed since pinned",
+        TrustStatus::Unreadable => "unreadable manifest",
+    }
+}
+
+fn print_plugin_list(inspections: &[PluginInspection]) {
+    if inspections.is_empty() {
+        println!("no plugins found under .cairn/plugins");
+        return;
+    }
+    for insp in inspections {
+        let (name, version) = match &insp.manifest {
+            Some(m) => (m.name.as_str(), m.version.as_str()),
+            None => ("?", "?"),
+        };
+        println!(
+            "{}  v{}  [{}]  {}",
+            insp.dir_name,
+            version,
+            status_label(insp.status),
+            name
+        );
+        let caps = match &insp.manifest {
+            Some(m) if !m.capabilities.is_empty() => m
+                .capabilities
+                .iter()
+                .map(|c| c.wire())
+                .collect::<Vec<_>>()
+                .join(", "),
+            Some(_) => "(none)".to_string(),
+            None => "(unknown)".to_string(),
+        };
+        println!("  capabilities: {caps}");
+    }
+}
+
+fn run_plugin_trust(_inspections: &[PluginInspection], _dir: &str) -> Result<(), String> {
+    Err("not yet implemented".to_string())
+}
+
 fn run() -> Result<(), String> {
     let cli = Cli::parse();
     let root = cli.cairn;
@@ -211,6 +288,12 @@ fn run() -> Result<(), String> {
     let is_cairn = cairn_startup::is_cairn(&root);
     if !matches!(cli.command, Command::Init) {
         ensure_cairn(&root).map_err(|e| e.to_string())?;
+    }
+
+    // Plugin inspection/approval needs only the plugins dir + cairn.toml, not
+    // the engine — handle it before the (potentially expensive) engine build.
+    if let Command::Plugin { action } = &cli.command {
+        return run_plugin(&root, action);
     }
 
     let mut engine = build_engine(&root).map_err(|e| e.to_string())?;
@@ -390,6 +473,8 @@ fn run() -> Result<(), String> {
                 }
             });
         }
+        // Dispatched early (before build_engine); unreachable here.
+        Command::Plugin { .. } => unreachable!("plugin commands handled before engine build"),
     }
     Ok(())
 }

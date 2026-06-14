@@ -2,6 +2,36 @@ use assert_cmd::Command;
 use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 
+/// Create `<dir>/.cairn/plugins/<name>/manifest.toml` with the given body.
+fn write_plugin_manifest(dir: &std::path::Path, name: &str, body: &str) {
+    let pdir = dir.join(".cairn").join("plugins").join(name);
+    std::fs::create_dir_all(&pdir).unwrap();
+    std::fs::write(pdir.join("manifest.toml"), body).unwrap();
+}
+
+#[test]
+fn plugin_list_shows_status_and_capabilities() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    cairn(dir).arg("init").assert().success();
+    write_plugin_manifest(
+        dir,
+        "fetch-bot",
+        "id=\"fetch-bot\"\nname=\"Fetch Bot\"\nversion=\"1.0.0\"\n\
+         [engine]\ncommand=\"./fetch-bot\"\ncapabilities=[\"vault:read\",\"net\"]\n",
+    );
+    cairn(dir)
+        .args(["plugin", "list"])
+        .assert()
+        .success()
+        .stdout(
+            contains("fetch-bot")
+                .and(contains("untrusted"))
+                .and(contains("vault:read"))
+                .and(contains("net")),
+        );
+}
+
 /// A `cairn` invocation pre-pointed at `dir` via `--cairn`.
 fn cairn(dir: &std::path::Path) -> Command {
     let mut cmd = Command::cargo_bin("cairn").unwrap();
