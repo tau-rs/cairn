@@ -11,17 +11,17 @@ pub const JSONRPC_VERSION: &str = "2.0";
 pub const METHOD_INITIALIZE: &str = "initialize";
 pub const METHOD_INVOKE: &str = "invokeCommand";
 
-/// Plugin -> host: read a note's raw contents. Requires the `fs:read` capability.
+/// Plugin -> host: read a note's raw contents. Requires the `vault:read` capability.
 pub const METHOD_READ_NOTE: &str = "host/readNote";
-/// Plugin -> host: create/overwrite a note. Requires the `fs:write` capability.
+/// Plugin -> host: create/overwrite a note. Requires the `vault:write` capability.
 pub const METHOD_WRITE_NOTE: &str = "host/writeNote";
-/// Plugin -> host: ranked full-text search. Requires the `fs:read` capability.
+/// Plugin -> host: ranked full-text search. Requires the `vault:read` capability.
 pub const METHOD_SEARCH: &str = "host/search";
-/// Plugin -> host: list all notes (path + title). Requires the `fs:read` capability.
+/// Plugin -> host: list all notes (path + title). Requires the `vault:read` capability.
 pub const METHOD_LIST_NOTES: &str = "host/listNotes";
-/// Plugin -> host: delete a note. Requires the `fs:write` capability.
+/// Plugin -> host: delete a note. Requires the `vault:write` capability.
 pub const METHOD_DELETE_NOTE: &str = "host/deleteNote";
-/// Host -> plugin: a cairn change event. Delivered to plugins declaring `events`.
+/// Host -> plugin: a cairn change event. Delivered to plugins declaring `vault:events`.
 pub const METHOD_CAIRN_EVENT: &str = "cairn/event";
 
 /// A capability a plugin declares in its manifest's `[engine].capabilities`.
@@ -34,10 +34,8 @@ pub const METHOD_CAIRN_EVENT: &str = "cairn/event";
 ///   capability-derived sandbox profile (issue #63); until then the fixed jail
 ///   is stricter-or-equal, so declaring them never grants more than today.
 ///
-/// These `vault:*` names intentionally supersede the legacy `CAP_FS_READ` /
-/// `CAP_FS_WRITE` / `CAP_EVENTS` string constants (notably `"events"` →
-/// `"vault:events"`); the host gate migrates off those string consts in a
-/// follow-up task.
+/// The `vault:*` names supersede the legacy `CAP_FS_READ` / `CAP_FS_WRITE` /
+/// `CAP_EVENTS` string constants, which have been removed.
 ///
 /// The enum is **closed**: serde rejects any unknown string, so a typo or a
 /// capability from a newer manifest fails the manifest parse (fail-closed) and

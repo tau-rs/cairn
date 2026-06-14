@@ -139,7 +139,7 @@ impl Host<'_> {
             .ok_or_else(|| PluginError::new("empty callback response"))
     }
 
-    /// Read a note's raw contents (`host/readNote`, requires `fs:read`).
+    /// Read a note's raw contents (`host/readNote`, requires `vault:read`).
     ///
     /// # Errors
     /// [`PluginError`] if the host denies/fails the callback.
@@ -152,7 +152,7 @@ impl Host<'_> {
         Ok(rn.contents)
     }
 
-    /// Create or overwrite a note (`host/writeNote`, requires `fs:write`).
+    /// Create or overwrite a note (`host/writeNote`, requires `vault:write`).
     ///
     /// # Errors
     /// [`PluginError`] if the host denies/fails the callback.
@@ -166,7 +166,7 @@ impl Host<'_> {
         Ok(())
     }
 
-    /// Delete a note (`host/deleteNote`, requires `fs:write`).
+    /// Delete a note (`host/deleteNote`, requires `vault:write`).
     ///
     /// # Errors
     /// [`PluginError`] if the host denies/fails the callback.
@@ -179,7 +179,7 @@ impl Host<'_> {
         Ok(())
     }
 
-    /// Ranked full-text search (`host/search`, requires `fs:read`).
+    /// Ranked full-text search (`host/search`, requires `vault:read`).
     ///
     /// # Errors
     /// [`PluginError`] if the host denies/fails the callback.
@@ -192,7 +192,7 @@ impl Host<'_> {
         Ok(sr.hits)
     }
 
-    /// List all notes (`host/listNotes`, requires `fs:read`).
+    /// List all notes (`host/listNotes`, requires `vault:read`).
     ///
     /// # Errors
     /// [`PluginError`] if the host denies/fails the callback.
