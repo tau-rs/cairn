@@ -9,6 +9,7 @@ mod plugin_host;
 pub mod sandbox;
 pub mod seams;
 mod tantivy_index;
+pub mod tau;
 
 pub use git::GitVcs;
 pub use index::InMemoryIndex;
