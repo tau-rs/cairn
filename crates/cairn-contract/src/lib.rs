@@ -225,6 +225,11 @@ pub enum PluginWidget {
     List {
         items: Vec<PluginListItem>,
     },
+    Iframe {
+        html: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        height: Option<u32>,
+    },
 }
 
 /// One placement of one widget into one slot.
@@ -622,5 +627,13 @@ mod tests {
                 "command.invoke"
             ]
         );
+
+        // The Iframe widget kind serializes to "iframe".
+        let iframe_kind = to_value(PluginWidget::Iframe {
+            html: "<p>x</p>".into(),
+            height: None,
+        })
+        .unwrap();
+        assert_eq!(iframe_kind["kind"].as_str().unwrap(), "iframe");
     }
 }
