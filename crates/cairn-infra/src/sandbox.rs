@@ -655,6 +655,68 @@ mod tests {
         assert_eq!(allowed.stdout, b"OWN");
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_behavioral_denies_network_without_net_cap() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let vault = tempfile::tempdir().unwrap();
+        let plugin_dir = vault.path().join(".cairn/plugins/p");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+
+        let status = MacSeatbeltSandbox::default()
+            .wrap(
+                vault.path(),
+                &plugin_dir,
+                Path::new("/bin/bash"),
+                &[
+                    "-c".to_string(),
+                    format!("exec 3<>/dev/tcp/127.0.0.1/{port}"),
+                ],
+                SandboxCapabilities::default(),
+            )
+            .expect("sandbox-exec present")
+            .status()
+            .expect("spawn under sandbox");
+        assert!(
+            !status.success(),
+            "no-net jail must deny the loopback connect"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_behavioral_allows_network_with_net_cap() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let _ = listener.accept();
+        });
+        let vault = tempfile::tempdir().unwrap();
+        let plugin_dir = vault.path().join(".cairn/plugins/p");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+
+        let status = MacSeatbeltSandbox::default()
+            .wrap(
+                vault.path(),
+                &plugin_dir,
+                Path::new("/bin/bash"),
+                &[
+                    "-c".to_string(),
+                    format!("exec 3<>/dev/tcp/127.0.0.1/{port}"),
+                ],
+                SandboxCapabilities { net: true },
+            )
+            .expect("sandbox-exec present")
+            .status()
+            .expect("spawn under sandbox");
+        let _ = handle.join();
+        assert!(
+            status.success(),
+            "net jail must permit the outbound loopback connect"
+        );
+    }
+
     #[cfg(target_os = "linux")]
     fn linux_bwrap_usable() -> bool {
         let exec = Path::new("/usr/bin/bwrap");
@@ -782,5 +844,75 @@ mod tests {
             "reading the plugin's own dir must be allowed"
         );
         assert_eq!(allowed.stdout, b"OWN");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bwrap_denies_network_without_net_cap() {
+        if !linux_bwrap_usable() {
+            eprintln!("skipping: bwrap/userns unavailable");
+            return;
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let vault = tempfile::tempdir().unwrap();
+        let plugin_dir = vault.path().join(".cairn/plugins/p");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+
+        let status = LinuxBwrapSandbox::default()
+            .wrap(
+                vault.path(),
+                &plugin_dir,
+                Path::new("/bin/bash"),
+                &[
+                    "-c".to_string(),
+                    format!("exec 3<>/dev/tcp/127.0.0.1/{port}"),
+                ],
+                SandboxCapabilities::default(),
+            )
+            .expect("bwrap present")
+            .status()
+            .expect("spawn under bwrap");
+        assert!(
+            !status.success(),
+            "no-net jail must not reach loopback (fresh netns, lo down)"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bwrap_allows_network_with_net_cap() {
+        if !linux_bwrap_usable() {
+            eprintln!("skipping: bwrap/userns unavailable");
+            return;
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let _ = listener.accept();
+        });
+        let vault = tempfile::tempdir().unwrap();
+        let plugin_dir = vault.path().join(".cairn/plugins/p");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+
+        let status = LinuxBwrapSandbox::default()
+            .wrap(
+                vault.path(),
+                &plugin_dir,
+                Path::new("/bin/bash"),
+                &[
+                    "-c".to_string(),
+                    format!("exec 3<>/dev/tcp/127.0.0.1/{port}"),
+                ],
+                SandboxCapabilities { net: true },
+            )
+            .expect("bwrap present")
+            .status()
+            .expect("spawn under bwrap");
+        let _ = handle.join();
+        assert!(
+            status.success(),
+            "net jail must reach loopback via --share-net"
+        );
     }
 }
