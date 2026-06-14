@@ -265,7 +265,7 @@ pub trait CollabSession {
 /// tau's wire enum, so the port names no external type. `#[non_exhaustive]`:
 /// adapters map unknown upstream event kinds to nothing rather than panicking,
 /// and downstream `match`es must carry a wildcard arm.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AgentEvent {
     /// A chunk of answer text.
@@ -274,7 +274,8 @@ pub enum AgentEvent {
     ToolStarted { tool: String },
     /// A tool call finished; `ok` is false if the tool reported an error.
     ToolCompleted { tool: String, ok: bool },
-    /// One agent turn completed (token usage omitted in v1).
+    /// One agent turn completed; a run may span several. `Completed` marks the
+    /// end of the whole run. (Token usage omitted in v1.)
     TurnCompleted,
     /// The run finished successfully.
     Completed,
@@ -282,7 +283,7 @@ pub enum AgentEvent {
     Failed { message: String },
 }
 
-/// Receives [`AgentEvent`]s as a run streams. The caller owns rendering
+/// Receives [`AgentEvent`]s as a run streams events. The caller owns rendering
 /// (stdout in the CLI, a WebSocket later).
 pub trait AgentSink {
     /// Handle one streamed increment.
