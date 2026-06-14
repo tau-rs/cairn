@@ -261,13 +261,44 @@ pub trait CollabSession {
     fn is_active(&self) -> bool;
 }
 
+/// One increment of an agent run, in cairn's own vocabulary — deliberately not
+/// tau's wire enum, so the port names no external type. `#[non_exhaustive]`:
+/// adapters map unknown upstream event kinds to nothing rather than panicking,
+/// and downstream `match`es must carry a wildcard arm.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum AgentEvent {
+    /// A chunk of answer text.
+    TextDelta(String),
+    /// The agent began a tool call.
+    ToolStarted { tool: String },
+    /// A tool call finished; `ok` is false if the tool reported an error.
+    ToolCompleted { tool: String, ok: bool },
+    /// One agent turn completed (token usage omitted in v1).
+    TurnCompleted,
+    /// The run finished successfully.
+    Completed,
+    /// The run failed; `message` is human-readable.
+    Failed { message: String },
+}
+
+/// Receives [`AgentEvent`]s as a run streams. The caller owns rendering
+/// (stdout in the CLI, a WebSocket later).
+pub trait AgentSink {
+    /// Handle one streamed increment.
+    fn emit(&mut self, event: AgentEvent);
+}
+
 /// Agent runtime (tau). Seam: `NullRuntime`.
 pub trait AgentRuntime {
-    /// Run a named agent action over optional note context, returning text.
+    /// Run an agent over `prompt`, pushing each increment to `sink` until the
+    /// run completes or fails. Returns when the run terminates.
     ///
     /// # Errors
-    /// Returns [`PortError`] if no runtime is configured or the action fails.
-    fn run_action(&self, action: &str, context: Option<&str>) -> Result<String, PortError>;
+    /// Returns [`PortError`] if no runtime is configured or the transport fails
+    /// before any event is delivered. A run that starts and then fails is
+    /// reported via an [`AgentEvent::Failed`] on `sink`, not an `Err`.
+    fn answer(&self, prompt: &str, sink: &mut dyn AgentSink) -> Result<(), PortError>;
 }
 
 /// A loaded plugin and the commands it declared at handshake.
@@ -473,5 +504,42 @@ mod tests {
         let err = PortError::Adapter(AdapterError::from("non-UTF-8 path".to_string()));
         assert_eq!(err.to_string(), "non-UTF-8 path");
         assert!(std::error::Error::source(&err).is_none());
+    }
+}
+
+#[cfg(test)]
+mod agent_runtime_tests {
+    use super::*;
+
+    struct TwoChunkRuntime;
+    impl AgentRuntime for TwoChunkRuntime {
+        fn answer(&self, _prompt: &str, sink: &mut dyn AgentSink) -> Result<(), PortError> {
+            sink.emit(AgentEvent::TextDelta("Hel".into()));
+            sink.emit(AgentEvent::TextDelta("lo".into()));
+            sink.emit(AgentEvent::Completed);
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct VecSink(Vec<AgentEvent>);
+    impl AgentSink for VecSink {
+        fn emit(&mut self, e: AgentEvent) {
+            self.0.push(e);
+        }
+    }
+
+    #[test]
+    fn runtime_streams_events_into_sink() {
+        let mut sink = VecSink::default();
+        TwoChunkRuntime.answer("hi", &mut sink).unwrap();
+        assert_eq!(
+            sink.0,
+            vec![
+                AgentEvent::TextDelta("Hel".into()),
+                AgentEvent::TextDelta("lo".into()),
+                AgentEvent::Completed,
+            ]
+        );
     }
 }
