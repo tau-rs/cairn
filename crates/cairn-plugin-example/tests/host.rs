@@ -1,6 +1,8 @@
 use cairn_domain::{Note, NotePath};
 use cairn_infra::{PinnedHash, ProcessPluginHost, TrustedPlugins};
-use cairn_ports::{PluginCallbacks, PluginHost, PortError, Sandbox, SandboxError, SearchHit};
+use cairn_ports::{
+    PluginCallbacks, PluginHost, PortError, Sandbox, SandboxCapabilities, SandboxError, SearchHit,
+};
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
@@ -14,6 +16,7 @@ impl Sandbox for PermissiveSandbox {
         _dir: &Path,
         cmd: &Path,
         args: &[String],
+        _caps: SandboxCapabilities,
     ) -> Result<Command, SandboxError> {
         let mut c = Command::new(cmd);
         c.args(args);

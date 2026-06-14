@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
-use cairn_ports::{Sandbox, SandboxError};
+use cairn_ports::{Sandbox, SandboxCapabilities, SandboxError};
 
 /// Quote a path as an SBPL string literal, escaping the characters that would
 /// otherwise break the quoted token: `\`, `"`, and the line terminators `\n`
@@ -42,7 +42,12 @@ fn sbpl_quote(p: &Path) -> String {
 /// The plugin's own directory is re-allowed after the vault deny so plugins can
 /// still read their own bundled files. Write, network, and exec (other than the
 /// plugin command itself) remain denied. Rule ordering is last-match-wins.
-pub(crate) fn seatbelt_profile(vault_root: &Path, plugin_dir: &Path, cmd: &Path) -> String {
+pub(crate) fn seatbelt_profile(
+    vault_root: &Path,
+    plugin_dir: &Path,
+    cmd: &Path,
+    _caps: SandboxCapabilities,
+) -> String {
     let vault = sbpl_quote(vault_root);
     let dir = sbpl_quote(plugin_dir);
     let cmd = sbpl_quote(cmd);
@@ -77,7 +82,12 @@ pub(crate) fn seatbelt_profile(vault_root: &Path, plugin_dir: &Path, cmd: &Path)
 /// All three paths are expected to be canonical absolute paths. They are
 /// emitted as distinct `OsString` argv entries, so no quoting is required and a
 /// non-UTF-8 path survives intact.
-pub(crate) fn bwrap_args(vault_root: &Path, plugin_dir: &Path, cmd: &Path) -> Vec<OsString> {
+pub(crate) fn bwrap_args(
+    vault_root: &Path,
+    plugin_dir: &Path,
+    cmd: &Path,
+    _caps: SandboxCapabilities,
+) -> Vec<OsString> {
     let vault = vault_root.as_os_str().to_os_string();
     let dir = plugin_dir.as_os_str().to_os_string();
     let cmd = cmd.as_os_str().to_os_string();
@@ -129,6 +139,7 @@ impl Sandbox for MacSeatbeltSandbox {
         plugin_dir: &Path,
         cmd: &Path,
         args: &[String],
+        caps: SandboxCapabilities,
     ) -> Result<Command, SandboxError> {
         if !self.exec.exists() {
             return Err(SandboxError::Unavailable(format!(
@@ -146,7 +157,7 @@ impl Sandbox for MacSeatbeltSandbox {
         let cmd_abs = cmd
             .canonicalize()
             .map_err(|e| SandboxError::Unavailable(format!("canonicalize command: {e}")))?;
-        let profile = seatbelt_profile(&vault_root_abs, &dir, &cmd_abs);
+        let profile = seatbelt_profile(&vault_root_abs, &dir, &cmd_abs, caps);
         let mut c = Command::new(&self.exec);
         c.arg("-p").arg(profile).arg("--").arg(&cmd_abs).args(args);
         Ok(c)
@@ -220,6 +231,7 @@ impl Sandbox for LinuxBwrapSandbox {
         plugin_dir: &Path,
         cmd: &Path,
         args: &[String],
+        caps: SandboxCapabilities,
     ) -> Result<Command, SandboxError> {
         if !self.exec.exists() {
             return Err(SandboxError::Unavailable(format!(
@@ -241,7 +253,7 @@ impl Sandbox for LinuxBwrapSandbox {
             .canonicalize()
             .map_err(|e| SandboxError::Unavailable(format!("canonicalize command: {e}")))?;
         let mut c = Command::new(&self.exec);
-        c.args(bwrap_args(&vault_root_abs, &dir, &cmd_abs))
+        c.args(bwrap_args(&vault_root_abs, &dir, &cmd_abs, caps))
             .args(args);
         Ok(c)
     }
@@ -258,6 +270,7 @@ impl Sandbox for RefusingSandbox {
         _plugin_dir: &Path,
         _cmd: &Path,
         _args: &[String],
+        _caps: SandboxCapabilities,
     ) -> Result<Command, SandboxError> {
         Err(SandboxError::Unavailable(format!(
             "no sandbox backend for target_os={}",
@@ -286,7 +299,7 @@ pub fn platform_sandbox() -> Box<dyn Sandbox> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cairn_ports::{Sandbox, SandboxError};
+    use cairn_ports::{Sandbox, SandboxCapabilities, SandboxError};
     use std::path::PathBuf;
 
     #[test]
@@ -295,6 +308,7 @@ mod tests {
             &PathBuf::from("/cairn"),
             &PathBuf::from("/cairn/.cairn/plugins/p"),
             &PathBuf::from("/cairn/.cairn/plugins/p/bin"),
+            SandboxCapabilities::default(),
         );
         assert!(p.contains("(deny default)"));
         assert!(p.contains("(allow file-read*)"));
@@ -316,7 +330,12 @@ mod tests {
     fn space_in_path_is_quoted_not_escaped() {
         let dir = PathBuf::from("/Library/Application Support/cairn/p");
         assert_eq!(sbpl_quote(&dir), "\"/Library/Application Support/cairn/p\"");
-        let p = seatbelt_profile(&PathBuf::from("/vault"), &dir, &dir.join("bin"));
+        let p = seatbelt_profile(
+            &PathBuf::from("/vault"),
+            &dir,
+            &dir.join("bin"),
+            SandboxCapabilities::default(),
+        );
         assert!(p.contains("(subpath \"/Library/Application Support/cairn/p\")"));
     }
 
@@ -330,7 +349,13 @@ mod tests {
     #[test]
     fn refusing_sandbox_is_always_unavailable() {
         let err = RefusingSandbox
-            .wrap(Path::new("/"), Path::new("/"), Path::new("/bin/echo"), &[])
+            .wrap(
+                Path::new("/"),
+                Path::new("/"),
+                Path::new("/bin/echo"),
+                &[],
+                SandboxCapabilities::default(),
+            )
             .unwrap_err();
         assert!(matches!(err, SandboxError::Unavailable(_)));
     }
@@ -341,6 +366,7 @@ mod tests {
             Path::new("/cairn"),
             Path::new("/cairn/.cairn/plugins/p"),
             Path::new("/cairn/.cairn/plugins/p/bin"),
+            SandboxCapabilities::default(),
         );
         let s: Vec<String> = a.iter().map(|o| o.to_string_lossy().into_owned()).collect();
         assert_eq!(
@@ -370,7 +396,13 @@ mod tests {
     fn linux_sandbox_missing_bwrap_is_unavailable() {
         let s = LinuxBwrapSandbox::with_exec(PathBuf::from("/nonexistent/bwrap"));
         let err = s
-            .wrap(Path::new("/"), Path::new("/"), Path::new("/bin/true"), &[])
+            .wrap(
+                Path::new("/"),
+                Path::new("/"),
+                Path::new("/bin/true"),
+                &[],
+                SandboxCapabilities::default(),
+            )
             .unwrap_err();
         assert!(matches!(err, SandboxError::Unavailable(_)));
     }
@@ -392,6 +424,7 @@ mod tests {
                 &plugin_dir,
                 Path::new("/bin/echo"),
                 &["a".to_string(), "b".to_string()],
+                SandboxCapabilities::default(),
             )
             .expect("wrap should succeed for existing canonicalizable paths");
 
@@ -419,7 +452,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let s = MacSeatbeltSandbox::with_exec(PathBuf::from("/nonexistent/sandbox-exec"));
         let err = s
-            .wrap(tmp.path(), tmp.path(), Path::new("/bin/echo"), &[])
+            .wrap(
+                tmp.path(),
+                tmp.path(),
+                Path::new("/bin/echo"),
+                &[],
+                SandboxCapabilities::default(),
+            )
             .unwrap_err();
         assert!(matches!(err, SandboxError::Unavailable(_)));
     }
@@ -438,6 +477,7 @@ mod tests {
                 &plugin_dir,
                 Path::new("/usr/bin/touch"),
                 &[escaped.to_string_lossy().into_owned()],
+                SandboxCapabilities::default(),
             )
             .expect("sandbox-exec present on macOS");
         let status = cmd.status().expect("spawn under sandbox");
@@ -466,6 +506,7 @@ mod tests {
                 &plugin_dir,
                 Path::new("/bin/echo"),
                 &["hi".to_string()],
+                SandboxCapabilities::default(),
             )
             .expect("sandbox-exec present on macOS")
             .output()
@@ -495,6 +536,7 @@ mod tests {
                 &plugin_dir,
                 Path::new("/bin/cat"),
                 &[secret.to_string_lossy().into_owned()],
+                SandboxCapabilities::default(),
             )
             .expect("sandbox-exec present")
             .output()
@@ -512,6 +554,7 @@ mod tests {
                 &plugin_dir,
                 Path::new("/bin/cat"),
                 &[own.to_string_lossy().into_owned()],
+                SandboxCapabilities::default(),
             )
             .expect("sandbox-exec present")
             .output()
@@ -552,6 +595,7 @@ mod tests {
                 &plugin_dir,
                 Path::new("/usr/bin/touch"),
                 &[escaped.to_string_lossy().into_owned()],
+                SandboxCapabilities::default(),
             )
             .expect("bwrap present and userns usable");
         let status = cmd.status().expect("spawn under bwrap");
@@ -587,6 +631,7 @@ mod tests {
                 &plugin_dir,
                 Path::new("/bin/echo"),
                 &["hi".to_string()],
+                SandboxCapabilities::default(),
             )
             .expect("bwrap present and userns usable")
             .output()
@@ -620,6 +665,7 @@ mod tests {
                 &plugin_dir,
                 Path::new("/bin/cat"),
                 &[secret.to_string_lossy().into_owned()],
+                SandboxCapabilities::default(),
             )
             .expect("bwrap present")
             .output()
@@ -637,6 +683,7 @@ mod tests {
                 &plugin_dir,
                 Path::new("/bin/cat"),
                 &[own.to_string_lossy().into_owned()],
+                SandboxCapabilities::default(),
             )
             .expect("bwrap present")
             .output()
