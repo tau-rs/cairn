@@ -11,12 +11,16 @@ pub mod seams;
 mod tantivy_index;
 pub mod tau;
 
+pub use cairn_plugin_protocol::Capability;
 pub use git::GitVcs;
 pub use index::InMemoryIndex;
 pub use localfs::{ensure_cairn_dir, LocalFsStore};
 pub use notify_watcher::NotifyWatcher;
 pub use plugin_hash::PinnedHash;
-pub use plugin_host::{ProcessPluginHost, TrustedPlugins, DEFAULT_PLUGIN_TIMEOUT};
+pub use plugin_host::{
+    inspect_plugins, InspectedManifest, PluginInspection, ProcessPluginHost, TrustStatus,
+    TrustedPlugins, DEFAULT_PLUGIN_TIMEOUT,
+};
 #[cfg(target_os = "macos")]
 pub use sandbox::MacSeatbeltSandbox;
 pub use sandbox::{platform_sandbox, RefusingSandbox};

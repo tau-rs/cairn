@@ -101,6 +101,118 @@ impl TrustedPlugins {
     }
 }
 
+/// How an on-disk plugin stands relative to the trusted set, as reported by
+/// [`inspect_plugins`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustStatus {
+    /// Not listed in `[plugins].trusted`.
+    Untrusted,
+    /// Trusted, but no content hash is pinned.
+    TrustedUnpinned,
+    /// Trusted and the pinned hash matches the directory's current contents.
+    Pinned,
+    /// Trusted with a pinned hash, but the contents have changed since.
+    Drift,
+    /// The manifest is missing/malformed or the directory cannot be hashed.
+    Unreadable,
+}
+
+/// The manifest fields surfaced at approval time (read-only view; no spawn).
+#[derive(Debug, Clone, PartialEq)]
+pub struct InspectedManifest {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub command: String,
+    pub capabilities: Vec<Capability>,
+}
+
+/// One plugin directory as seen by [`inspect_plugins`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct PluginInspection {
+    pub dir_name: String,
+    /// `None` when the manifest is missing/malformed.
+    pub manifest: Option<InspectedManifest>,
+    /// `None` when the directory cannot be hashed (e.g. contains a symlink).
+    pub computed_hash: Option<PinnedHash>,
+    pub status: TrustStatus,
+}
+
+/// Read-only inspection of every plugin directory under `dir`, for the CLI's
+/// `plugin list` / `plugin trust` review flow. **No process is spawned.**
+///
+/// Unlike the daemon's automatic load path, this **does** parse untrusted
+/// manifests — that is the point of letting a user review a plugin before
+/// trusting it. It is a user-initiated, read-only parse (no code execution), so
+/// it does not weaken the load path's "never parse untrusted bytes during spawn"
+/// invariant.
+///
+/// # Errors
+/// [`PortError::Adapter`] only on an unexpected IO error reading `dir`; an absent
+/// `dir` yields an empty `Vec`. A per-plugin problem (bad manifest, un-hashable
+/// dir) becomes [`TrustStatus::Unreadable`], never an error.
+pub fn inspect_plugins(
+    dir: &Path,
+    trusted: &TrustedPlugins,
+) -> Result<Vec<PluginInspection>, PortError> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(adapt(e)),
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        let plugin_dir = match entry {
+            Ok(e) if e.path().is_dir() => e.path(),
+            _ => continue,
+        };
+        let Some(dir_name) = plugin_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .filter(|n| !n.is_empty())
+        else {
+            continue; // unnameable in a trust list
+        };
+        let dir_name = dir_name.to_string();
+        let computed = PinnedHash::of_dir(&plugin_dir).ok();
+        let manifest = read_inspected_manifest(&plugin_dir).ok();
+        let status = match (trusted.get(&dir_name), &manifest, &computed) {
+            // Cannot review what we cannot read/hash.
+            (_, None, _) | (_, _, None) => TrustStatus::Unreadable,
+            (None, _, _) => TrustStatus::Untrusted,
+            (Some(None), _, _) => TrustStatus::TrustedUnpinned,
+            (Some(Some(pin)), _, Some(c)) => {
+                if pin == c {
+                    TrustStatus::Pinned
+                } else {
+                    TrustStatus::Drift
+                }
+            }
+        };
+        out.push(PluginInspection {
+            dir_name,
+            manifest,
+            computed_hash: computed,
+            status,
+        });
+    }
+    Ok(out)
+}
+
+/// Read + parse a plugin's `manifest.toml` into the surfaced subset. An unknown
+/// capability fails here (fail-closed), surfacing as `Unreadable`.
+fn read_inspected_manifest(plugin_dir: &Path) -> Result<InspectedManifest, PortError> {
+    let raw = std::fs::read_to_string(plugin_dir.join("manifest.toml")).map_err(adapt)?;
+    let m: Manifest = toml::from_str(&raw).map_err(adapt)?;
+    Ok(InspectedManifest {
+        id: m.id,
+        name: m.name,
+        version: m.version,
+        command: m.engine.command,
+        capabilities: m.engine.capabilities,
+    })
+}
+
 struct LoadedPlugin {
     child: Child,
     stdin: ChildStdin,
@@ -662,6 +774,7 @@ impl PluginHost for ProcessPluginHost {
 mod tests {
     use super::*;
     use crate::sandbox::RefusingSandbox;
+    use cairn_plugin_protocol::Capability;
     use cairn_ports::SandboxError;
     use std::process::Command;
 
@@ -771,5 +884,81 @@ mod tests {
         assert!(
             TrustedPlugins::from_entries([("a".to_string(), Some("bogus".to_string()))]).is_err()
         );
+    }
+
+    fn write_manifest_with(root: &Path, dir_name: &str, body: &str) {
+        let pdir = root.join(dir_name);
+        std::fs::create_dir_all(&pdir).unwrap();
+        std::fs::write(pdir.join("manifest.toml"), body).unwrap();
+    }
+
+    #[test]
+    fn inspect_absent_dir_is_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let got = inspect_plugins(&tmp.path().join("missing"), &TrustedPlugins::none()).unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn inspect_reports_untrusted_with_capabilities() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_manifest_with(
+            tmp.path(),
+            "p",
+            "id=\"p\"\nname=\"P\"\nversion=\"1\"\n\
+             [engine]\ncommand=\"./p\"\ncapabilities=[\"vault:read\",\"net\"]\n",
+        );
+        let got = inspect_plugins(tmp.path(), &TrustedPlugins::none()).unwrap();
+        assert_eq!(got.len(), 1);
+        let p = &got[0];
+        assert_eq!(p.dir_name, "p");
+        assert_eq!(p.status, TrustStatus::Untrusted);
+        let m = p.manifest.as_ref().unwrap();
+        assert_eq!(m.capabilities, vec![Capability::VaultRead, Capability::Net]);
+        assert!(p.computed_hash.is_some());
+    }
+
+    #[test]
+    fn inspect_distinguishes_pinned_drift_unpinned() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_manifest_with(
+            tmp.path(),
+            "p",
+            "id=\"p\"\nname=\"P\"\nversion=\"1\"\n[engine]\ncommand=\"./p\"\n",
+        );
+        let real = PinnedHash::of_dir(&tmp.path().join("p")).unwrap();
+
+        // Pinned + matching hash -> Pinned.
+        let pinned =
+            TrustedPlugins::from_entries([("p".to_string(), Some(real.to_string()))]).unwrap();
+        assert_eq!(
+            inspect_plugins(tmp.path(), &pinned).unwrap()[0].status,
+            TrustStatus::Pinned
+        );
+
+        // Pinned + wrong hash -> Drift.
+        let wrong = format!("sha256:{}", "0".repeat(64));
+        let drift = TrustedPlugins::from_entries([("p".to_string(), Some(wrong))]).unwrap();
+        assert_eq!(
+            inspect_plugins(tmp.path(), &drift).unwrap()[0].status,
+            TrustStatus::Drift
+        );
+
+        // Trusted, no pin -> TrustedUnpinned.
+        let unpinned = TrustedPlugins::from_ids(["p".to_string()]);
+        assert_eq!(
+            inspect_plugins(tmp.path(), &unpinned).unwrap()[0].status,
+            TrustStatus::TrustedUnpinned
+        );
+    }
+
+    #[test]
+    fn inspect_marks_malformed_manifest_unreadable() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_manifest_with(tmp.path(), "p", "this is not valid toml {{{");
+        let got =
+            inspect_plugins(tmp.path(), &TrustedPlugins::from_ids(["p".to_string()])).unwrap();
+        assert_eq!(got[0].status, TrustStatus::Unreadable);
+        assert!(got[0].manifest.is_none());
     }
 }
