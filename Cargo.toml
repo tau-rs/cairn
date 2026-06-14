@@ -13,6 +13,7 @@ members = [
     "crates/cairn-cli",
     "crates/cairn-daemon",
     "crates/cairn-plugin-example",
+    "crates/cairn-sandbox-win",
 ]
 exclude = ["fuzz"]
 
