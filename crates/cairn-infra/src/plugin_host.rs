@@ -79,9 +79,9 @@ pub enum TrustedEntry {
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PinnedEntry {
-    pub dir: String,
+    dir: String,
     #[serde(default)]
-    pub hash: Option<String>,
+    hash: Option<String>,
 }
 
 impl TrustedEntry {
