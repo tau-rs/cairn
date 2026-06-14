@@ -43,6 +43,33 @@ impl<W: Write> EventSink for WatchSink<W> {
     }
 }
 
+/// Renders agent events for `cairn ask`: answer text to stdout (flushed per
+/// chunk so it streams), tool/error chatter to stderr.
+struct AgentStdoutSink;
+
+impl cairn_ports::AgentSink for AgentStdoutSink {
+    fn emit(&mut self, event: cairn_ports::AgentEvent) {
+        use cairn_ports::AgentEvent::{
+            Completed, Failed, TextDelta, ToolCompleted, ToolStarted, TurnCompleted,
+        };
+        match event {
+            TextDelta(text) => {
+                print!("{text}");
+                let _ = std::io::stdout().flush();
+            }
+            ToolStarted { tool } => eprintln!("  [tool {tool}…]"),
+            ToolCompleted { tool, ok } => {
+                eprintln!("  [tool {tool} {}]", if ok { "ok" } else { "error" });
+            }
+            TurnCompleted => {}
+            Completed => println!(),
+            Failed { message } => eprintln!("\nagent error: {message}"),
+            // tau's event vocabulary is #[non_exhaustive]; ignore unknown kinds.
+            _ => {}
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "cairn", about = "Cairn note engine")]
 struct Cli {
@@ -85,6 +112,11 @@ enum Command {
     /// Search notes.
     Search {
         /// Query string.
+        query: String,
+    },
+    /// Ask a question; answers grounded in your notes, streamed.
+    Ask {
+        /// The question.
         query: String,
     },
     /// List notes that link to a note.
@@ -136,7 +168,10 @@ enum Command {
 /// full disk read for them — it is wasted on a one-shot `read`, `commit`, or
 /// `backlinks` (audit D2).
 fn needs_startup_reindex(command: &Command) -> bool {
-    matches!(command, Command::Search { .. } | Command::Watch { .. })
+    matches!(
+        command,
+        Command::Search { .. } | Command::Watch { .. } | Command::Ask { .. }
+    )
 }
 
 /// The message `init` prints. Distinguishes a freshly created cairn from a
@@ -236,6 +271,22 @@ fn run() -> Result<(), String> {
                     if !r.snippet.is_empty() {
                         println!("    {}", r.snippet);
                     }
+                }
+            }
+        }
+        Command::Ask { query } => {
+            let cfg = cairn_infra::TauConfig::from_env().ok_or_else(|| {
+                "tau not configured: set TAU_BIN (and optionally TAU_AGENT, TAU_PROJECT)"
+                    .to_string()
+            })?;
+            let runtime = cairn_infra::TauServeRuntime::new(cfg);
+            let mut sink = AgentStdoutSink;
+            let cited = cairn_service::augmented_answer(&engine, &query, &runtime, &mut sink, 5)
+                .map_err(|e| e.to_string())?;
+            if !cited.is_empty() {
+                eprintln!("sources:");
+                for path in cited {
+                    eprintln!("  - {path}");
                 }
             }
         }
@@ -393,6 +444,7 @@ mod tests {
             query: "x".into()
         }));
         assert!(needs_startup_reindex(&Command::Watch { json: false }));
+        assert!(needs_startup_reindex(&Command::Ask { query: "x".into() }));
         assert!(!needs_startup_reindex(&Command::Read {
             path: "a.md".into()
         }));
