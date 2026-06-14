@@ -1,0 +1,26 @@
+[package]
+name = "cairn-sandbox-win"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# This crate is the SOLE unsafe carve-out in the workspace: setting up a
+# Windows AppContainer is unavoidably Win32 FFI (no MSRV-1.88, permissively
+# licensed safe wrapper exists — see the design spec). All unsafe is localized
+# here; cairn-infra and the Sandbox port stay unsafe-free. We therefore do NOT
+# inherit the workspace `forbid(unsafe_code)` lint.
+
+[lints.rust]
+unsafe_code = "allow"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Isolation",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+    "Win32_System_JobObjects",
+    "Win32_System_Memory",
+] }
