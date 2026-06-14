@@ -117,12 +117,11 @@ impl<R: BufRead, W: Write> ServeClient<R, W> {
                         .get("kind")
                         .and_then(|k| k.as_str())
                         .unwrap_or("");
-                    let data = msg
-                        .params
-                        .get("data")
-                        .cloned()
-                        .unwrap_or(serde_json::Value::Null);
-                    if let Some(ev) = map_event(kind, &data) {
+                    // Borrow the data subtree (no clone — it can be a large
+                    // tool-output blob); fall back to a 'static Null sentinel.
+                    const NULL: serde_json::Value = serde_json::Value::Null;
+                    let data = msg.params.get("data").unwrap_or(&NULL);
+                    if let Some(ev) = map_event(kind, data) {
                         let done = matches!(ev, AgentEvent::Completed | AgentEvent::Failed { .. });
                         sink.emit(ev);
                         if done {
