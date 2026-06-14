@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
-use cairn_ports::{Sandbox, SandboxError};
+use cairn_ports::{Sandbox, SandboxCapabilities, SandboxError};
 
 /// Quote a path as an SBPL string literal, escaping the characters that would
 /// otherwise break the quoted token: `\`, `"`, and the line terminators `\n`
@@ -41,12 +41,32 @@ fn sbpl_quote(p: &Path) -> String {
 /// explicitly listed), but the vault root is denied so plugins cannot directly
 /// read the user's notes — they must use the gated host-RPC channel instead.
 /// The plugin's own directory is re-allowed after the vault deny so plugins can
-/// still read their own bundled files. Write, network, and exec (other than the
-/// plugin command itself) remain denied. Rule ordering is last-match-wins.
-pub(crate) fn seatbelt_profile(vault_root: &Path, plugin_dir: &Path, cmd: &Path) -> String {
+/// still read their own bundled files. Write and exec (other than the plugin
+/// command itself) remain denied. Rule ordering is last-match-wins.
+///
+/// Network: denied by default (`(deny network*)`). When `caps.net` is true,
+/// outbound network is permitted instead: `(allow network-outbound)` +
+/// `(allow system-socket)` (required for TCP under Seatbelt) + an mDNSResponder
+/// mach-lookup so DNS resolution works inside the jail.
+pub(crate) fn seatbelt_profile(
+    vault_root: &Path,
+    plugin_dir: &Path,
+    cmd: &Path,
+    caps: SandboxCapabilities,
+) -> String {
     let vault = sbpl_quote(vault_root);
     let dir = sbpl_quote(plugin_dir);
     let cmd = sbpl_quote(cmd);
+    let net = if caps.net {
+        // Outbound only (no inbound bind). `system-socket` + the mDNSResponder
+        // mach-lookup are required for DNS resolution under Seatbelt; without
+        // them a `net` plugin could open sockets but never resolve a hostname.
+        "(allow network-outbound)\n\
+         (allow system-socket)\n\
+         (allow mach-lookup (global-name \"com.apple.mDNSResponder\"))\n"
+    } else {
+        "(deny network*)\n"
+    };
     format!(
         "(version 1)\n\
          (deny default)\n\
@@ -55,7 +75,7 @@ pub(crate) fn seatbelt_profile(vault_root: &Path, plugin_dir: &Path, cmd: &Path)
          (deny file-read* (subpath {vault}))\n\
          (allow file-read* (subpath {dir}))\n\
          (deny file-write*)\n\
-         (deny network*)\n\
+         {net}\
          (deny process-exec*)\n\
          (allow process-exec (literal {cmd}))\n"
     )
@@ -65,8 +85,9 @@ pub(crate) fn seatbelt_profile(vault_root: &Path, plugin_dir: &Path, cmd: &Path)
 ///
 /// Mounts a broad read-only root (`--ro-bind / /`), masks the vault with an
 /// empty tmpfs, re-exposes the plugin's own directory read-only on top, drops
-/// the network and other namespaces (`--unshare-all`), and ties the jail's
-/// lifetime to the host (`--die-with-parent`).
+/// all namespaces (`--unshare-all`; if `caps.net` is true, `--share-net`
+/// immediately follows to re-share the host network namespace), and ties the
+/// jail's lifetime to the host (`--die-with-parent`).
 /// A minimal `/dev` and `/proc` are mounted (`--dev /dev`, `--proc /proc`) so
 /// plugin runtimes have the standard device nodes and a process tree.
 /// The vector ends with `--` and
@@ -78,11 +99,16 @@ pub(crate) fn seatbelt_profile(vault_root: &Path, plugin_dir: &Path, cmd: &Path)
 /// All three paths are expected to be canonical absolute paths. They are
 /// emitted as distinct `OsString` argv entries, so no quoting is required and a
 /// non-UTF-8 path survives intact.
-pub(crate) fn bwrap_args(vault_root: &Path, plugin_dir: &Path, cmd: &Path) -> Vec<OsString> {
+pub(crate) fn bwrap_args(
+    vault_root: &Path,
+    plugin_dir: &Path,
+    cmd: &Path,
+    caps: SandboxCapabilities,
+) -> Vec<OsString> {
     let vault = vault_root.as_os_str().to_os_string();
     let dir = plugin_dir.as_os_str().to_os_string();
     let cmd = cmd.as_os_str().to_os_string();
-    vec![
+    let mut v = vec![
         OsString::from("--ro-bind"),
         OsString::from("/"),
         OsString::from("/"),
@@ -96,10 +122,17 @@ pub(crate) fn bwrap_args(vault_root: &Path, plugin_dir: &Path, cmd: &Path) -> Ve
         OsString::from("--proc"),
         OsString::from("/proc"),
         OsString::from("--unshare-all"),
-        OsString::from("--die-with-parent"),
-        OsString::from("--"),
-        cmd,
-    ]
+    ];
+    // `--unshare-all` drops the network namespace; re-share it only when the
+    // plugin declared `net`. (bwrap cannot scope this to outbound-only; the
+    // whole host namespace is shared — see the design's platform-asymmetry note.)
+    if caps.net {
+        v.push(OsString::from("--share-net"));
+    }
+    v.push(OsString::from("--die-with-parent"));
+    v.push(OsString::from("--"));
+    v.push(cmd);
+    v
 }
 
 /// Build the argv (after the launcher program) that asks `cairn-sandbox-win`
@@ -154,6 +187,7 @@ impl Sandbox for MacSeatbeltSandbox {
         plugin_dir: &Path,
         cmd: &Path,
         args: &[String],
+        caps: SandboxCapabilities,
     ) -> Result<Command, SandboxError> {
         if !self.exec.exists() {
             return Err(SandboxError::Unavailable(format!(
@@ -171,7 +205,7 @@ impl Sandbox for MacSeatbeltSandbox {
         let cmd_abs = cmd
             .canonicalize()
             .map_err(|e| SandboxError::Unavailable(format!("canonicalize command: {e}")))?;
-        let profile = seatbelt_profile(&vault_root_abs, &dir, &cmd_abs);
+        let profile = seatbelt_profile(&vault_root_abs, &dir, &cmd_abs, caps);
         let mut c = Command::new(&self.exec);
         c.arg("-p").arg(profile).arg("--").arg(&cmd_abs).args(args);
         Ok(c)
@@ -245,6 +279,7 @@ impl Sandbox for LinuxBwrapSandbox {
         plugin_dir: &Path,
         cmd: &Path,
         args: &[String],
+        caps: SandboxCapabilities,
     ) -> Result<Command, SandboxError> {
         if !self.exec.exists() {
             return Err(SandboxError::Unavailable(format!(
@@ -266,7 +301,7 @@ impl Sandbox for LinuxBwrapSandbox {
             .canonicalize()
             .map_err(|e| SandboxError::Unavailable(format!("canonicalize command: {e}")))?;
         let mut c = Command::new(&self.exec);
-        c.args(bwrap_args(&vault_root_abs, &dir, &cmd_abs))
+        c.args(bwrap_args(&vault_root_abs, &dir, &cmd_abs, caps))
             .args(args);
         Ok(c)
     }
@@ -336,7 +371,20 @@ impl Sandbox for WindowsAppContainerSandbox {
         plugin_dir: &Path,
         cmd: &Path,
         args: &[String],
+        caps: SandboxCapabilities,
     ) -> Result<Command, SandboxError> {
+        // The AppContainer is built with no capabilities (which is what denies
+        // network). Granting `caps.net` requires adding the `internetClient`
+        // AppContainer capability — a follow-up. Until then, refuse loudly rather
+        // than silently run a net-requesting plugin without network (the
+        // refusal contract: never under-confine, never surprise the caller).
+        if caps.net {
+            return Err(SandboxError::Unavailable(
+                "network-enabled plugins are not yet supported by the Windows \
+                 AppContainer backend (caps.net)"
+                    .to_string(),
+            ));
+        }
         if !self.exec.exists() {
             return Err(SandboxError::Unavailable(format!(
                 "{} not found",
@@ -372,6 +420,7 @@ impl Sandbox for RefusingSandbox {
         _plugin_dir: &Path,
         _cmd: &Path,
         _args: &[String],
+        _caps: SandboxCapabilities,
     ) -> Result<Command, SandboxError> {
         Err(SandboxError::Unavailable(format!(
             "no sandbox backend for target_os={}",
@@ -404,8 +453,39 @@ pub fn platform_sandbox() -> Box<dyn Sandbox> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cairn_ports::{Sandbox, SandboxError};
+    use cairn_ports::{Sandbox, SandboxCapabilities, SandboxError};
     use std::path::PathBuf;
+
+    #[test]
+    fn seatbelt_denies_network_without_net_cap() {
+        let p = seatbelt_profile(
+            &PathBuf::from("/cairn"),
+            &PathBuf::from("/cairn/.cairn/plugins/p"),
+            &PathBuf::from("/cairn/.cairn/plugins/p/bin"),
+            SandboxCapabilities::default(),
+        );
+        assert!(p.contains("(deny network*)"));
+        assert!(!p.contains("network-outbound"));
+    }
+
+    #[test]
+    fn seatbelt_allows_outbound_network_with_net_cap() {
+        let p = seatbelt_profile(
+            &PathBuf::from("/cairn"),
+            &PathBuf::from("/cairn/.cairn/plugins/p"),
+            &PathBuf::from("/cairn/.cairn/plugins/p/bin"),
+            SandboxCapabilities { net: true },
+        );
+        assert!(p.contains("(allow network-outbound)"));
+        assert!(
+            p.contains("com.apple.mDNSResponder"),
+            "DNS resolution must be permitted"
+        );
+        assert!(
+            !p.contains("(deny network*)"),
+            "the blanket network deny must be gone"
+        );
+    }
 
     #[test]
     fn profile_denies_write_network_and_interpolates_paths() {
@@ -413,6 +493,7 @@ mod tests {
             &PathBuf::from("/cairn"),
             &PathBuf::from("/cairn/.cairn/plugins/p"),
             &PathBuf::from("/cairn/.cairn/plugins/p/bin"),
+            SandboxCapabilities::default(),
         );
         assert!(p.contains("(deny default)"));
         assert!(p.contains("(allow file-read*)"));
@@ -434,7 +515,12 @@ mod tests {
     fn space_in_path_is_quoted_not_escaped() {
         let dir = PathBuf::from("/Library/Application Support/cairn/p");
         assert_eq!(sbpl_quote(&dir), "\"/Library/Application Support/cairn/p\"");
-        let p = seatbelt_profile(&PathBuf::from("/vault"), &dir, &dir.join("bin"));
+        let p = seatbelt_profile(
+            &PathBuf::from("/vault"),
+            &dir,
+            &dir.join("bin"),
+            SandboxCapabilities::default(),
+        );
         assert!(p.contains("(subpath \"/Library/Application Support/cairn/p\")"));
     }
 
@@ -448,7 +534,13 @@ mod tests {
     #[test]
     fn refusing_sandbox_is_always_unavailable() {
         let err = RefusingSandbox
-            .wrap(Path::new("/"), Path::new("/"), Path::new("/bin/echo"), &[])
+            .wrap(
+                Path::new("/"),
+                Path::new("/"),
+                Path::new("/bin/echo"),
+                &[],
+                SandboxCapabilities::default(),
+            )
             .unwrap_err();
         assert!(matches!(err, SandboxError::Unavailable(_)));
     }
@@ -480,6 +572,7 @@ mod tests {
             Path::new("/cairn"),
             Path::new("/cairn/.cairn/plugins/p"),
             Path::new("/cairn/.cairn/plugins/p/bin"),
+            SandboxCapabilities::default(),
         );
         let s: Vec<String> = a.iter().map(|o| o.to_string_lossy().into_owned()).collect();
         assert_eq!(
@@ -511,16 +604,84 @@ mod tests {
             r"C:\nonexistent\cairn-sandbox-win.exe",
         ));
         let err = s
-            .wrap(Path::new("."), Path::new("."), Path::new("cmd.exe"), &[])
+            .wrap(
+                Path::new("."),
+                Path::new("."),
+                Path::new("cmd.exe"),
+                &[],
+                SandboxCapabilities::default(),
+            )
             .unwrap_err();
         assert!(matches!(err, SandboxError::Unavailable(_)));
+    }
+
+    #[test]
+    fn windows_sandbox_refuses_net_capability() {
+        // The Windows AppContainer backend does not yet grant network; a plugin
+        // that requests it is refused (not silently run without network). This
+        // refusal precedes the launcher-existence check, so the test is
+        // deterministic on every platform.
+        let s = WindowsAppContainerSandbox::with_exec(PathBuf::from(
+            r"C:\nonexistent\cairn-sandbox-win.exe",
+        ));
+        let err = s
+            .wrap(
+                Path::new("."),
+                Path::new("."),
+                Path::new("cmd.exe"),
+                &[],
+                SandboxCapabilities { net: true },
+            )
+            .unwrap_err();
+        assert!(matches!(err, SandboxError::Unavailable(_)));
+    }
+
+    #[test]
+    fn bwrap_args_omits_share_net_without_net_cap() {
+        let a = bwrap_args(
+            Path::new("/cairn"),
+            Path::new("/cairn/.cairn/plugins/p"),
+            Path::new("/cairn/.cairn/plugins/p/bin"),
+            SandboxCapabilities::default(),
+        );
+        let s: Vec<String> = a.iter().map(|o| o.to_string_lossy().into_owned()).collect();
+        assert!(
+            !s.iter().any(|x| x == "--share-net"),
+            "default jail must have no network"
+        );
+    }
+
+    #[test]
+    fn bwrap_args_adds_share_net_after_unshare_all_with_net_cap() {
+        let a = bwrap_args(
+            Path::new("/cairn"),
+            Path::new("/cairn/.cairn/plugins/p"),
+            Path::new("/cairn/.cairn/plugins/p/bin"),
+            SandboxCapabilities { net: true },
+        );
+        let s: Vec<String> = a.iter().map(|o| o.to_string_lossy().into_owned()).collect();
+        let unshare = s
+            .iter()
+            .position(|x| x == "--unshare-all")
+            .expect("--unshare-all present");
+        assert_eq!(
+            s.get(unshare + 1).map(String::as_str),
+            Some("--share-net"),
+            "--share-net must immediately follow --unshare-all"
+        );
     }
 
     #[test]
     fn linux_sandbox_missing_bwrap_is_unavailable() {
         let s = LinuxBwrapSandbox::with_exec(PathBuf::from("/nonexistent/bwrap"));
         let err = s
-            .wrap(Path::new("/"), Path::new("/"), Path::new("/bin/true"), &[])
+            .wrap(
+                Path::new("/"),
+                Path::new("/"),
+                Path::new("/bin/true"),
+                &[],
+                SandboxCapabilities::default(),
+            )
             .unwrap_err();
         assert!(matches!(err, SandboxError::Unavailable(_)));
     }
@@ -542,6 +703,7 @@ mod tests {
                 &plugin_dir,
                 Path::new("/bin/echo"),
                 &["a".to_string(), "b".to_string()],
+                SandboxCapabilities::default(),
             )
             .expect("wrap should succeed for existing canonicalizable paths");
 
@@ -569,7 +731,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let s = MacSeatbeltSandbox::with_exec(PathBuf::from("/nonexistent/sandbox-exec"));
         let err = s
-            .wrap(tmp.path(), tmp.path(), Path::new("/bin/echo"), &[])
+            .wrap(
+                tmp.path(),
+                tmp.path(),
+                Path::new("/bin/echo"),
+                &[],
+                SandboxCapabilities::default(),
+            )
             .unwrap_err();
         assert!(matches!(err, SandboxError::Unavailable(_)));
     }
@@ -588,6 +756,7 @@ mod tests {
                 &plugin_dir,
                 Path::new("/usr/bin/touch"),
                 &[escaped.to_string_lossy().into_owned()],
+                SandboxCapabilities::default(),
             )
             .expect("sandbox-exec present on macOS");
         let status = cmd.status().expect("spawn under sandbox");
@@ -616,6 +785,7 @@ mod tests {
                 &plugin_dir,
                 Path::new("/bin/echo"),
                 &["hi".to_string()],
+                SandboxCapabilities::default(),
             )
             .expect("sandbox-exec present on macOS")
             .output()
@@ -645,6 +815,7 @@ mod tests {
                 &plugin_dir,
                 Path::new("/bin/cat"),
                 &[secret.to_string_lossy().into_owned()],
+                SandboxCapabilities::default(),
             )
             .expect("sandbox-exec present")
             .output()
@@ -662,6 +833,7 @@ mod tests {
                 &plugin_dir,
                 Path::new("/bin/cat"),
                 &[own.to_string_lossy().into_owned()],
+                SandboxCapabilities::default(),
             )
             .expect("sandbox-exec present")
             .output()
@@ -671,6 +843,68 @@ mod tests {
             "reading the plugin's own dir must be allowed"
         );
         assert_eq!(allowed.stdout, b"OWN");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_behavioral_denies_network_without_net_cap() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let vault = tempfile::tempdir().unwrap();
+        let plugin_dir = vault.path().join(".cairn/plugins/p");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+
+        let status = MacSeatbeltSandbox::default()
+            .wrap(
+                vault.path(),
+                &plugin_dir,
+                Path::new("/bin/bash"),
+                &[
+                    "-c".to_string(),
+                    format!("exec 3<>/dev/tcp/127.0.0.1/{port}"),
+                ],
+                SandboxCapabilities::default(),
+            )
+            .expect("sandbox-exec present")
+            .status()
+            .expect("spawn under sandbox");
+        assert!(
+            !status.success(),
+            "no-net jail must deny the loopback connect"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_behavioral_allows_network_with_net_cap() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let _ = listener.accept();
+        });
+        let vault = tempfile::tempdir().unwrap();
+        let plugin_dir = vault.path().join(".cairn/plugins/p");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+
+        let status = MacSeatbeltSandbox::default()
+            .wrap(
+                vault.path(),
+                &plugin_dir,
+                Path::new("/bin/bash"),
+                &[
+                    "-c".to_string(),
+                    format!("exec 3<>/dev/tcp/127.0.0.1/{port}"),
+                ],
+                SandboxCapabilities { net: true },
+            )
+            .expect("sandbox-exec present")
+            .status()
+            .expect("spawn under sandbox");
+        let _ = handle.join();
+        assert!(
+            status.success(),
+            "net jail must permit the outbound loopback connect"
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -702,6 +936,7 @@ mod tests {
                 &plugin_dir,
                 Path::new("/usr/bin/touch"),
                 &[escaped.to_string_lossy().into_owned()],
+                SandboxCapabilities::default(),
             )
             .expect("bwrap present and userns usable");
         let status = cmd.status().expect("spawn under bwrap");
@@ -737,6 +972,7 @@ mod tests {
                 &plugin_dir,
                 Path::new("/bin/echo"),
                 &["hi".to_string()],
+                SandboxCapabilities::default(),
             )
             .expect("bwrap present and userns usable")
             .output()
@@ -770,6 +1006,7 @@ mod tests {
                 &plugin_dir,
                 Path::new("/bin/cat"),
                 &[secret.to_string_lossy().into_owned()],
+                SandboxCapabilities::default(),
             )
             .expect("bwrap present")
             .output()
@@ -787,6 +1024,7 @@ mod tests {
                 &plugin_dir,
                 Path::new("/bin/cat"),
                 &[own.to_string_lossy().into_owned()],
+                SandboxCapabilities::default(),
             )
             .expect("bwrap present")
             .output()
@@ -796,5 +1034,75 @@ mod tests {
             "reading the plugin's own dir must be allowed"
         );
         assert_eq!(allowed.stdout, b"OWN");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bwrap_denies_network_without_net_cap() {
+        if !linux_bwrap_usable() {
+            eprintln!("skipping: bwrap/userns unavailable");
+            return;
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let vault = tempfile::tempdir().unwrap();
+        let plugin_dir = vault.path().join(".cairn/plugins/p");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+
+        let status = LinuxBwrapSandbox::default()
+            .wrap(
+                vault.path(),
+                &plugin_dir,
+                Path::new("/bin/bash"),
+                &[
+                    "-c".to_string(),
+                    format!("exec 3<>/dev/tcp/127.0.0.1/{port}"),
+                ],
+                SandboxCapabilities::default(),
+            )
+            .expect("bwrap present")
+            .status()
+            .expect("spawn under bwrap");
+        assert!(
+            !status.success(),
+            "no-net jail must not reach loopback (fresh netns, lo down)"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bwrap_allows_network_with_net_cap() {
+        if !linux_bwrap_usable() {
+            eprintln!("skipping: bwrap/userns unavailable");
+            return;
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let _ = listener.accept();
+        });
+        let vault = tempfile::tempdir().unwrap();
+        let plugin_dir = vault.path().join(".cairn/plugins/p");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+
+        let status = LinuxBwrapSandbox::default()
+            .wrap(
+                vault.path(),
+                &plugin_dir,
+                Path::new("/bin/bash"),
+                &[
+                    "-c".to_string(),
+                    format!("exec 3<>/dev/tcp/127.0.0.1/{port}"),
+                ],
+                SandboxCapabilities { net: true },
+            )
+            .expect("bwrap present")
+            .status()
+            .expect("spawn under bwrap");
+        let _ = handle.join();
+        assert!(
+            status.success(),
+            "net jail must reach loopback via --share-net"
+        );
     }
 }

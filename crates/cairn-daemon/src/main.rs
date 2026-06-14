@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Duration;
 
 use cairn_app::{Engine, Event};
@@ -133,11 +134,26 @@ async fn run() -> Result<(), String> {
         cli.cairn.display()
     );
 
+    // Agent runtime for `POST /ask`: tau when configured, else NullRuntime (which
+    // errors until TAU_BIN is set). Mirrors the CLI's `cairn ask` wiring.
+    let runtime: Arc<dyn cairn_ports::AgentRuntime + Send + Sync> =
+        match cairn_infra::TauConfig::from_env() {
+            Some(cfg) => {
+                tracing::info!("ask: tau runtime enabled");
+                Arc::new(cairn_infra::TauServeRuntime::new(cfg))
+            }
+            None => {
+                tracing::info!("ask: no TAU_BIN; /ask returns a configuration error");
+                Arc::new(cairn_infra::NullRuntime)
+            }
+        };
+
     // The same allowlist gates the /events WS upgrade (browsers bypass CORS on
     // WebSocket handshakes; see events_handler).
     let state = AppState::new(engine)
         .with_allowed_origins(cors_origins.clone())
-        .with_token(token);
+        .with_token(token)
+        .with_runtime(runtime);
     let app = build_router(state.clone()).layer(cors_layer(&cors_origins));
 
     if !cli.no_watch {

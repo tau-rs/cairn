@@ -14,12 +14,13 @@ use cairn_plugin_protocol::{
     InitializeParams, InitializeResult, InvokeParams, ListNotesResult, Manifest, NoteSummaryDto,
     ReadNoteParams, ReadNoteResult, Request, Response, RpcError, SearchHitDto, SearchParams,
     SearchResultDto, WriteNoteParams, CALLBACK_DENIED, CALLBACK_FAILED, CAP_EVENTS, CAP_FS_READ,
-    CAP_FS_WRITE, JSONRPC_VERSION, METHOD_CAIRN_EVENT, METHOD_DELETE_NOTE, METHOD_INITIALIZE,
-    METHOD_INVOKE, METHOD_LIST_NOTES, METHOD_READ_NOTE, METHOD_SEARCH, METHOD_WRITE_NOTE,
+    CAP_FS_WRITE, CAP_NET, JSONRPC_VERSION, METHOD_CAIRN_EVENT, METHOD_DELETE_NOTE,
+    METHOD_INITIALIZE, METHOD_INVOKE, METHOD_LIST_NOTES, METHOD_READ_NOTE, METHOD_SEARCH,
+    METHOD_WRITE_NOTE,
 };
 use cairn_ports::{
     AdapterError, EventDispatchError, PluginCallbacks, PluginCommand, PluginEvent, PluginHost,
-    PluginInfo, PortError, Sandbox,
+    PluginInfo, PortError, Sandbox, SandboxCapabilities,
 };
 
 /// Map a ports event to its wire form for delivery to plugins.
@@ -533,8 +534,15 @@ impl ProcessPluginHost {
                 plugin_dir.join(p)
             }
         };
+        let caps = sandbox_caps(&manifest.engine.capabilities);
         let mut command = sandbox
-            .wrap(vault_root, plugin_dir, &cmd_path, &manifest.engine.args)
+            .wrap(
+                vault_root,
+                plugin_dir,
+                &cmd_path,
+                &manifest.engine.args,
+                caps,
+            )
             .map_err(adapt)?;
         let mut child = command
             .stdin(Stdio::piped())
@@ -607,6 +615,15 @@ impl ProcessPluginHost {
     }
 }
 
+/// Translate a manifest's self-declared capability strings into the typed
+/// OS-sandbox capability set. Only sandbox-driving capabilities are mapped;
+/// host-RPC capabilities (`fs:read`/`fs:write`/`events`) are irrelevant here.
+fn sandbox_caps(caps: &[String]) -> SandboxCapabilities {
+    SandboxCapabilities {
+        net: caps.iter().any(|c| c == CAP_NET),
+    }
+}
+
 impl PluginHost for ProcessPluginHost {
     fn plugins(&self) -> Vec<PluginInfo> {
         self.loaded.iter().map(|p| p.info.clone()).collect()
@@ -675,6 +692,7 @@ mod tests {
             _dir: &Path,
             cmd: &Path,
             args: &[String],
+            _caps: cairn_ports::SandboxCapabilities,
         ) -> Result<Command, SandboxError> {
             let mut c = Command::new(cmd);
             c.args(args);
@@ -771,5 +789,19 @@ mod tests {
         assert!(
             TrustedPlugins::from_entries([("a".to_string(), Some("bogus".to_string()))]).is_err()
         );
+    }
+
+    #[test]
+    fn sandbox_caps_sets_net_only_when_declared() {
+        use cairn_ports::SandboxCapabilities;
+        assert_eq!(
+            super::sandbox_caps(&["net".to_string()]),
+            SandboxCapabilities { net: true }
+        );
+        assert_eq!(
+            super::sandbox_caps(&["fs:read".to_string(), "events".to_string()]),
+            SandboxCapabilities { net: false }
+        );
+        assert_eq!(super::sandbox_caps(&[]), SandboxCapabilities::default());
     }
 }

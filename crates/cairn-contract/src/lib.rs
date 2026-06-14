@@ -128,6 +128,58 @@ pub enum Event {
     },
 }
 
+/// A streaming, note-grounded question. Its own shape — not a `Command` (no
+/// mutation) and not a `Query` (no single response).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub struct AskRequest {
+    /// The question to answer.
+    pub query: String,
+    /// How many top search hits to ground the answer in. `None` ⇒ 5.
+    pub top_k: Option<usize>,
+}
+
+/// One increment of an answer stream — cairn's own closed wire vocabulary,
+/// mirroring `cairn_ports::AgentEvent` plus a leading `Sources` frame. Struct
+/// variants are required: `#[serde(tag = "type")]` cannot tag a newtype variant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AnswerEvent {
+    /// The cited notes grounding the answer; emitted first.
+    Sources {
+        /// Relative note paths, in rank order.
+        paths: Vec<String>,
+    },
+    /// A chunk of answer text.
+    TextDelta {
+        /// The text fragment.
+        text: String,
+    },
+    /// The agent began a tool call.
+    ToolStarted {
+        /// Tool name.
+        tool: String,
+    },
+    /// A tool call finished; `ok` is false if it reported an error.
+    ToolCompleted {
+        /// Tool name.
+        tool: String,
+        /// Whether the call succeeded.
+        ok: bool,
+    },
+    /// One agent turn completed; a run may span several.
+    TurnCompleted,
+    /// The run finished successfully.
+    Completed,
+    /// The run failed; `message` is human-readable.
+    Failed {
+        /// Failure detail.
+        message: String,
+    },
+}
+
 /// Result of a successful command.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -583,5 +635,69 @@ mod tests {
         .map(|v| v["kind"].as_str().unwrap().to_string())
         .collect();
         assert_eq!(kinds, ["text", "action", "list"]);
+    }
+}
+
+#[cfg(test)]
+mod ask_wire_format {
+    use super::{AnswerEvent, AskRequest};
+
+    #[test]
+    fn answer_event_tags_match_the_track04_mock() {
+        let cases = [
+            (
+                serde_json::to_value(AnswerEvent::Sources {
+                    paths: vec!["a.md".into()],
+                })
+                .unwrap(),
+                "sources",
+            ),
+            (
+                serde_json::to_value(AnswerEvent::TextDelta { text: "hi".into() }).unwrap(),
+                "text_delta",
+            ),
+            (
+                serde_json::to_value(AnswerEvent::ToolStarted {
+                    tool: "grep".into(),
+                })
+                .unwrap(),
+                "tool_started",
+            ),
+            (
+                serde_json::to_value(AnswerEvent::ToolCompleted {
+                    tool: "grep".into(),
+                    ok: true,
+                })
+                .unwrap(),
+                "tool_completed",
+            ),
+            (
+                serde_json::to_value(AnswerEvent::TurnCompleted).unwrap(),
+                "turn_completed",
+            ),
+            (
+                serde_json::to_value(AnswerEvent::Completed).unwrap(),
+                "completed",
+            ),
+            (
+                serde_json::to_value(AnswerEvent::Failed {
+                    message: "boom".into(),
+                })
+                .unwrap(),
+                "failed",
+            ),
+        ];
+        for (json, tag) in cases {
+            assert_eq!(json["type"], tag, "wire tag drift for {tag}");
+        }
+        let delta = serde_json::to_value(AnswerEvent::TextDelta { text: "x".into() }).unwrap();
+        assert_eq!(delta["text"], "x");
+    }
+
+    #[test]
+    fn ask_request_top_k_is_optional() {
+        let r: AskRequest = serde_json::from_str(r#"{"query":"q"}"#).unwrap();
+        assert_eq!(r.query, "q");
+        assert_eq!(r.top_k, None);
     }
 }

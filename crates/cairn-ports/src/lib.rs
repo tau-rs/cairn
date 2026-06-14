@@ -444,6 +444,16 @@ pub enum SandboxError {
     Unavailable(String),
 }
 
+/// OS-sandbox-relevant capabilities a plugin declared, translated from its
+/// manifest. Distinct from the host-RPC capabilities in `cairn-plugin-protocol`
+/// (`fs:read`/`fs:write`/`events`), which never reach the sandbox. Defaults to
+/// the fully locked-down posture (every field `false`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SandboxCapabilities {
+    /// Allow outbound network access in the jail. Default `false` (denied).
+    pub net: bool,
+}
+
 /// Confines a plugin's spawned child process at the OS level. An adapter that
 /// cannot confine on the current platform/host **refuses** (returns
 /// `Unavailable`), so the host never falls back to spawning an unjailed plugin.
@@ -452,7 +462,8 @@ pub trait Sandbox {
     /// that allows reads broadly but denies direct reads of `vault_root` (the
     /// user's cairn/vault directory — plugins must use the gated host channel
     /// instead), re-allows reads of the plugin's own `plugin_dir`, and denies
-    /// direct file-write, network, and further `exec`.
+    /// direct file-write and further `exec`. Outbound network is denied unless
+    /// `caps.net` is set.
     ///
     /// The returned `Command` has **no stdio configured** — the caller wires
     /// stdin/stdout/stderr after wrapping.
@@ -472,6 +483,7 @@ pub trait Sandbox {
         plugin_dir: &Path,
         cmd: &Path,
         args: &[String],
+        caps: SandboxCapabilities,
     ) -> Result<Command, SandboxError>;
 }
 
