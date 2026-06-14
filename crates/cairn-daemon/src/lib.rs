@@ -11,6 +11,7 @@ pub use auth::generate_token_file;
 
 use std::sync::{Arc, Mutex};
 
+use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -23,9 +24,14 @@ use axum::{
 };
 use cairn_app::{Engine, Event as AppEvent, EventSink};
 use cairn_contract::{
-    Command, CommandResponse, ContractError, Event as WireEvent, Query, QueryResponse,
+    AnswerEvent, AskRequest, Command, CommandResponse, ContractError, Event as WireEvent, Query,
+    QueryResponse,
 };
-use cairn_service::{app_event_to_wire, dispatch_command, dispatch_query, ServiceError};
+use cairn_ports::{AgentEvent, AgentRuntime, AgentSink};
+use cairn_service::{
+    agent_event_to_wire, app_event_to_wire, dispatch_command, dispatch_query,
+    gather_answer_context, ServiceError,
+};
 use tokio::sync::broadcast;
 use tracing::Instrument;
 
@@ -41,6 +47,10 @@ pub struct AppState {
     /// (the in-process/library/test default); the `cairn-daemon` binary always
     /// sets a token via [`AppState::with_token`].
     token: Option<Arc<str>>,
+    /// Agent runtime backing `POST /ask`. Defaults to `NullRuntime` (which errors
+    /// until `TAU_BIN` is set); the binary injects `TauServeRuntime` via
+    /// [`AppState::with_runtime`].
+    runtime: Arc<dyn AgentRuntime + Send + Sync>,
 }
 
 /// An `EventSink` that republishes engine events as wire events.
@@ -62,6 +72,21 @@ impl EventSink for EventTap {
     fn emit(&mut self, event: AppEvent) {
         self.collected.push(event.clone());
         let _ = self.tx.send(app_event_to_wire(event));
+    }
+}
+
+/// An `AgentSink` that forwards each agent increment as a wire `AnswerEvent`
+/// over an mpsc channel. `blocking_send` gives natural backpressure and is
+/// lossless (unlike the broadcast `/events` channel); a closed receiver (client
+/// gone) turns sends into no-ops — the run still finishes (no v1 cancellation).
+struct AnswerStreamSink {
+    tx: tokio::sync::mpsc::Sender<AnswerEvent>,
+}
+impl AgentSink for AnswerStreamSink {
+    fn emit(&mut self, event: AgentEvent) {
+        if let Some(wire) = agent_event_to_wire(event) {
+            let _ = self.tx.blocking_send(wire);
+        }
     }
 }
 
@@ -87,6 +112,7 @@ impl AppState {
             events,
             allowed_origins: Arc::from([]),
             token: None,
+            runtime: Arc::new(cairn_infra::NullRuntime),
         }
     }
 
@@ -103,6 +129,13 @@ impl AppState {
     #[must_use]
     pub fn with_token(mut self, token: impl Into<Arc<str>>) -> Self {
         self.token = Some(token.into());
+        self
+    }
+
+    /// Inject the agent runtime backing `POST /ask`.
+    #[must_use]
+    pub fn with_runtime(mut self, runtime: Arc<dyn AgentRuntime + Send + Sync>) -> Self {
+        self.runtime = runtime;
         self
     }
 
@@ -307,6 +340,52 @@ async fn query_handler(State(state): State<AppState>, Json(query): Json<Query>) 
     .await
 }
 
+/// `POST /ask`: gather note context under the engine lock, release it, then
+/// stream the agent answer as Server-Sent `AnswerEvent` frames. The agent run
+/// (seconds; spawns a subprocess) is kept off the async reactor (`spawn_blocking`)
+/// and off the engine mutex (released after the gather).
+async fn ask_handler(State(state): State<AppState>, Json(req): Json<AskRequest>) -> Response {
+    let top_k = req.top_k.unwrap_or(5);
+
+    // 1. Gather context under the lock, in a blocking task (engine work blocks).
+    let gather_state = state.clone();
+    let query = req.query;
+    let gathered = tokio::task::spawn_blocking(move || {
+        let guard = gather_state.engine();
+        gather_answer_context(&guard, &query, top_k)
+    })
+    .await;
+    let (prompt, cited) = match gathered {
+        Ok(Ok(v)) => v,
+        Ok(Err(svc)) => return service_response::<()>(Ok(Err(svc))),
+        Err(join) => return service_response::<()>(Err(join)),
+    };
+
+    // 2. Stream the agent run, lock-free.
+    let (tx, rx) = tokio::sync::mpsc::channel::<AnswerEvent>(64);
+    let runtime = state.runtime.clone();
+    tokio::task::spawn_blocking(move || {
+        let _ = tx.blocking_send(AnswerEvent::Sources { paths: cited });
+        let mut sink = AnswerStreamSink { tx };
+        if let Err(e) = runtime.answer(&prompt, &mut sink) {
+            let _ = sink.tx.blocking_send(AnswerEvent::Failed {
+                message: e.to_string(),
+            });
+        }
+    });
+
+    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+        let ev = rx.recv().await?;
+        let frame = SseEvent::default()
+            .json_data(&ev)
+            .unwrap_or_else(|_| SseEvent::default().comment("serialize error"));
+        Some((Ok::<_, std::convert::Infallible>(frame), rx))
+    });
+    Sse::new(stream)
+        .keep_alive(KeepAlive::new())
+        .into_response()
+}
+
 /// True if `origin` (the request's `Origin` header value) is present and in the
 /// allowlist. Browsers always send `Origin` on a WS handshake; a missing or
 /// non-UTF-8 header is treated as disallowed (deny-by-default, mirroring CORS).
@@ -428,7 +507,7 @@ pub fn cors_layer(origins: &[String]) -> tower_http::cors::CorsLayer {
     tower_http::cors::CorsLayer::new()
         .allow_origin(tower_http::cors::AllowOrigin::list(allowed))
         .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
-        .allow_headers([header::CONTENT_TYPE])
+        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
 }
 
 /// Build the axum router for the given state.
@@ -440,6 +519,7 @@ pub fn build_router(state: AppState) -> Router {
     let protected = Router::new()
         .route("/command", post(command_handler))
         .route("/query", post(query_handler))
+        .route("/ask", post(ask_handler))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_token,
