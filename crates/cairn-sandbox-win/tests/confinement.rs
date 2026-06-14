@@ -62,12 +62,16 @@ fn write_to_host_is_denied() {
         eprintln!("skipping: AppContainer unavailable");
         return;
     }
-    let plugin_dir = std::env::temp_dir();
-    // A host file OUTSIDE any AppContainer-writable location.
-    let target = std::env::temp_dir().join("cairn_sbx_should_not_exist.txt");
+    // Isolated plugin dir (granted read) and a sibling host file that is NEVER
+    // granted, so the write-deny is independent of the plugin-dir read grant.
+    let base = std::env::temp_dir().join(format!("cairn_sbx_w_{}", std::process::id()));
+    let plugin_dir = base.join("plugin");
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    let target = base.join("escaped.txt");
     let _ = std::fs::remove_file(&target);
     let cmd = PathBuf::from(r"C:\Windows\System32\cmd.exe");
-    let redirect = format!("echo x> {}", target.display());
+    // Quote the path so a space in %TEMP% does not split the redirect target.
+    let redirect = format!("echo x> \"{}\"", target.display());
     let status = Command::new(launcher())
         .arg("--plugin-dir")
         .arg(&plugin_dir)
@@ -79,6 +83,7 @@ fn write_to_host_is_denied() {
         .expect("spawn launcher");
     assert!(!status.success(), "writing to the host must fail");
     assert!(!target.exists(), "the host file must not be created");
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 #[test]
