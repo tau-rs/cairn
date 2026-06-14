@@ -11,9 +11,11 @@ called **a cairn** — analogous to "a repo" in git.
 ## Status
 
 Walking skeleton: the engine and CLI are fully working (init, write, read,
-search, backlinks, commit). The web UI, engine-plugin host, tau/`AgentRuntime`
-adapter, daemon transport, and CRDT collaboration are future sub-projects,
-each present today as a proven seam (a port trait with a Null/stub adapter).
+search, backlinks, commit). The `tau`/`AgentRuntime` seam is now wired for
+interactive use — `cairn ask` streams a note-grounded answer from a `tau serve`
+subprocess. The web UI, daemon-supervised tau sidecar, dataflow pipelines, and
+CRDT collaboration remain future sub-projects, each present today as a proven
+seam.
 
 ## License
 
