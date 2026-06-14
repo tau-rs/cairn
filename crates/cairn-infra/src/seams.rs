@@ -2,7 +2,7 @@
 //! to later sub-projects. They let the engine compose and run today.
 
 use cairn_ports::{
-    AgentRuntime, CollabSession, Executor, FsChange, PortError, WatchHandle, Watcher,
+    AgentRuntime, AgentSink, CollabSession, Executor, FsChange, PortError, WatchHandle, Watcher,
 };
 
 /// No-op watcher seam.
@@ -39,12 +39,9 @@ impl CollabSession for NoCollab {
 #[derive(Debug, Default)]
 pub struct NullRuntime;
 impl AgentRuntime for NullRuntime {
-    fn run_action(&self, action: &str, _context: Option<&str>) -> Result<String, PortError> {
+    fn answer(&self, _prompt: &str, _sink: &mut dyn AgentSink) -> Result<(), PortError> {
         Err(PortError::Adapter(
-            format!(
-                "no agent runtime configured (action '{action}' unavailable until tau is wired)"
-            )
-            .into(),
+            "no agent runtime configured (set TAU_BIN to enable `cairn ask`)".into(),
         ))
     }
 }
@@ -52,6 +49,7 @@ impl AgentRuntime for NullRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cairn_ports::AgentEvent;
 
     #[test]
     fn seams_have_expected_neutral_behavior() {
@@ -65,6 +63,11 @@ mod tests {
                 .recv_timeout(std::time::Duration::from_millis(50)),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout)
         );
-        assert!(NullRuntime.run_action("summarize", None).is_err());
+        // Collect into a Vec sink; NullRuntime errors before emitting anything.
+        struct NoopSink;
+        impl AgentSink for NoopSink {
+            fn emit(&mut self, _e: AgentEvent) {}
+        }
+        assert!(NullRuntime.answer("summarize this", &mut NoopSink).is_err());
     }
 }

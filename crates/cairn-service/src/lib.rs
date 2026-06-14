@@ -7,7 +7,7 @@ use cairn_contract::{
     PluginCommandSummary, PluginSummary, Query, QueryResponse, Revision, SearchResult, TagCount,
 };
 use cairn_domain::NotePath;
-use cairn_ports::{AdapterError, FsChange, PortError, WatchHandle};
+use cairn_ports::{AdapterError, AgentRuntime, AgentSink, FsChange, PortError, WatchHandle};
 
 /// Drain a watch handle until its sender drops, invoking `on_change` for each
 /// debounced change. Blocking — run on a dedicated thread (CLI `watch`) or via
@@ -257,6 +257,62 @@ pub fn dispatch_query(engine: &Engine, query: &Query) -> Result<QueryResponse, S
                 .collect();
             Ok(QueryResponse::Plugins { plugins })
         }
+    }
+}
+
+/// Build a note-grounded answer to `query`: search the cairn, read the top
+/// `top_k` hits into context, prompt the agent, and stream the answer into
+/// `sink`. Returns the cited note paths (the retrieval set), in rank order.
+///
+/// # Errors
+/// [`ServiceError`] if a search/read dispatch fails or the runtime fails before
+/// streaming begins.
+pub fn augmented_answer(
+    engine: &Engine,
+    query: &str,
+    runtime: &dyn AgentRuntime,
+    sink: &mut dyn AgentSink,
+    top_k: usize,
+) -> Result<Vec<String>, ServiceError> {
+    let cited: Vec<String> = match dispatch_query(
+        engine,
+        &Query::Search {
+            query: query.to_string(),
+        },
+    )? {
+        QueryResponse::SearchResults { results } => {
+            results.into_iter().take(top_k).map(|r| r.path).collect()
+        }
+        _ => Vec::new(),
+    };
+
+    let mut context = String::new();
+    for path in &cited {
+        if let QueryResponse::Note { contents } =
+            dispatch_query(engine, &Query::GetNote { path: path.clone() })?
+        {
+            context.push_str("## ");
+            context.push_str(path);
+            context.push('\n');
+            context.push_str(&contents);
+            context.push_str("\n\n");
+        }
+    }
+
+    let prompt = build_answer_prompt(&context, query);
+    runtime.answer(&prompt, sink)?;
+    Ok(cited)
+}
+
+/// Assemble the agent prompt from retrieved `context` and the user `query`.
+fn build_answer_prompt(context: &str, query: &str) -> String {
+    if context.is_empty() {
+        format!("Answer the question.\n\nQuestion: {query}")
+    } else {
+        format!(
+            "Answer the question using the notes below. Cite note paths when relevant.\n\n\
+             Notes:\n{context}\nQuestion: {query}"
+        )
     }
 }
 
@@ -935,5 +991,72 @@ mod tests {
             }
             other => panic!("expected Plugins, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod augmented_answer_tests {
+    use super::*;
+    use cairn_app::Event;
+    use cairn_contract::Command;
+    use cairn_ports::{AgentEvent, AgentRuntime, AgentSink, PortError};
+    use std::cell::RefCell;
+
+    struct RecordingRuntime {
+        prompt: RefCell<String>,
+    }
+    impl AgentRuntime for RecordingRuntime {
+        fn answer(&self, prompt: &str, sink: &mut dyn AgentSink) -> Result<(), PortError> {
+            *self.prompt.borrow_mut() = prompt.to_string();
+            sink.emit(AgentEvent::TextDelta("ok".into()));
+            sink.emit(AgentEvent::Completed);
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct VecSink(Vec<AgentEvent>);
+    impl AgentSink for VecSink {
+        fn emit(&mut self, e: AgentEvent) {
+            self.0.push(e);
+        }
+    }
+
+    #[test]
+    fn retrieves_context_builds_prompt_and_streams() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut events: Vec<Event> = Vec::new();
+        let mut engine = cairn_startup::build_engine(dir.path()).unwrap();
+        dispatch_command(
+            &mut engine,
+            &Command::WriteNote {
+                path: "a.md".into(),
+                contents: "ownership moves by default".into(),
+            },
+            &mut events,
+        )
+        .unwrap();
+        engine.reindex(&mut events).unwrap();
+
+        let rt = RecordingRuntime {
+            prompt: RefCell::new(String::new()),
+        };
+        let mut sink = VecSink::default();
+        let cited = augmented_answer(&engine, "ownership", &rt, &mut sink, 5).unwrap();
+
+        assert_eq!(cited, vec!["a.md".to_string()]);
+        assert!(rt.prompt.borrow().contains("ownership moves by default"));
+        assert!(rt.prompt.borrow().contains("Question: ownership"));
+        assert_eq!(
+            sink.0,
+            vec![AgentEvent::TextDelta("ok".into()), AgentEvent::Completed]
+        );
+    }
+
+    #[test]
+    fn prompt_without_context_omits_notes_section() {
+        let p = build_answer_prompt("", "what is x");
+        assert!(!p.contains("Notes:"));
+        assert!(p.contains("Question: what is x"));
     }
 }

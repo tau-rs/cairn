@@ -407,6 +407,7 @@ dependencies = [
  "cairn-infra",
  "cairn-plugin-protocol",
  "cairn-ports",
+ "cairn-startup",
  "serde_json",
  "tempfile",
  "thiserror",
