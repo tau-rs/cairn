@@ -10,12 +10,12 @@ use std::time::Duration;
 
 use crate::PinnedHash;
 use cairn_plugin_protocol::{
-    write_message, CairnEvent, CairnEventKind, CommandDecl, DeleteNoteParams, Incoming,
+    write_message, CairnEvent, CairnEventKind, Capability, CommandDecl, DeleteNoteParams, Incoming,
     InitializeParams, InitializeResult, InvokeParams, ListNotesResult, Manifest, NoteSummaryDto,
     ReadNoteParams, ReadNoteResult, Request, Response, RpcError, SearchHitDto, SearchParams,
-    SearchResultDto, WriteNoteParams, CALLBACK_DENIED, CALLBACK_FAILED, CAP_EVENTS, CAP_FS_READ,
-    CAP_FS_WRITE, JSONRPC_VERSION, METHOD_CAIRN_EVENT, METHOD_DELETE_NOTE, METHOD_INITIALIZE,
-    METHOD_INVOKE, METHOD_LIST_NOTES, METHOD_READ_NOTE, METHOD_SEARCH, METHOD_WRITE_NOTE,
+    SearchResultDto, WriteNoteParams, CALLBACK_DENIED, CALLBACK_FAILED, JSONRPC_VERSION,
+    METHOD_CAIRN_EVENT, METHOD_DELETE_NOTE, METHOD_INITIALIZE, METHOD_INVOKE, METHOD_LIST_NOTES,
+    METHOD_READ_NOTE, METHOD_SEARCH, METHOD_WRITE_NOTE,
 };
 use cairn_ports::{
     AdapterError, EventDispatchError, PluginCallbacks, PluginCommand, PluginEvent, PluginHost,
@@ -46,13 +46,13 @@ pub const DEFAULT_PLUGIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The capability a host-callback method requires, or `None` if the method is
 /// unknown to the host.
-fn required_cap(method: &str) -> Option<&'static str> {
+fn required_cap(method: &str) -> Option<Capability> {
     match method {
-        METHOD_READ_NOTE => Some(CAP_FS_READ),
-        METHOD_WRITE_NOTE => Some(CAP_FS_WRITE),
-        METHOD_DELETE_NOTE => Some(CAP_FS_WRITE),
-        METHOD_SEARCH => Some(CAP_FS_READ),
-        METHOD_LIST_NOTES => Some(CAP_FS_READ),
+        METHOD_READ_NOTE => Some(Capability::VaultRead),
+        METHOD_WRITE_NOTE => Some(Capability::VaultWrite),
+        METHOD_DELETE_NOTE => Some(Capability::VaultWrite),
+        METHOD_SEARCH => Some(Capability::VaultRead),
+        METHOD_LIST_NOTES => Some(Capability::VaultRead),
         _ => None,
     }
 }
@@ -112,7 +112,7 @@ struct LoadedPlugin {
     info: PluginInfo,
     next_id: u64,
     /// Capabilities the manifest declared; gates host-callbacks.
-    capabilities: Vec<String>,
+    capabilities: Vec<Capability>,
 }
 
 impl LoadedPlugin {
@@ -240,10 +240,10 @@ impl LoadedPlugin {
                     message: format!("unknown host method {}", cb.method),
                 });
             }
-            Some(cap) if !self.capabilities.iter().any(|c| c == cap) => {
+            Some(cap) if !self.capabilities.contains(&cap) => {
                 resp.error = Some(RpcError {
                     code: CALLBACK_DENIED,
-                    message: format!("capability {cap} not declared"),
+                    message: format!("capability {} not declared", cap.wire()),
                 });
             }
             // The cap is declared; dispatch the method. This match must stay in
@@ -643,7 +643,7 @@ impl PluginHost for ProcessPluginHost {
         let cairn_event = to_cairn_event(event);
         let mut errors = Vec::new();
         for p in self.loaded.iter_mut() {
-            if p.capabilities.iter().any(|c| c == CAP_EVENTS) {
+            if p.capabilities.contains(&Capability::VaultEvents) {
                 if let Err(e) = p.deliver_event(&cairn_event, callbacks) {
                     // Return the failure for the engine to log uniformly (audit
                     // G4), rather than writing to stderr from the adapter.

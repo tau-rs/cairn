@@ -24,13 +24,6 @@ pub const METHOD_DELETE_NOTE: &str = "host/deleteNote";
 /// Host -> plugin: a cairn change event. Delivered to plugins declaring `events`.
 pub const METHOD_CAIRN_EVENT: &str = "cairn/event";
 
-/// Capability: read the cairn (read/search/list note content + metadata).
-pub const CAP_FS_READ: &str = "fs:read";
-/// Capability: mutate the cairn (create/overwrite/delete notes).
-pub const CAP_FS_WRITE: &str = "fs:write";
-/// Capability: receive pushed cairn events.
-pub const CAP_EVENTS: &str = "events";
-
 /// A capability a plugin declares in its manifest's `[engine].capabilities`.
 ///
 /// Two enforcement domains:
@@ -355,15 +348,17 @@ pub struct EngineSection {
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
-    /// Declared capabilities. The host gates every plugin->host callback on
-    /// this list (see `cairn-infra` `plugin_host::service_callback`): a callback
-    /// whose required capability is absent here is denied. Note the boundary's
-    /// limits (audit `security.md` S3): capabilities are *self-declared* in the
-    /// plugin's own manifest, and gating only narrows the host-callback RPC
-    /// surface — it is not a sandbox and does not constrain what the spawned
-    /// plugin process does directly (network, filesystem, exec).
+    /// Declared capabilities (typed; see [`Capability`]). The host gates every
+    /// plugin->host callback on this list (see `cairn-infra`
+    /// `plugin_host::service_callback`): a callback whose required capability is
+    /// absent here is denied. An **unknown** capability string fails this parse
+    /// (fail-closed), so the plugin is refused rather than silently
+    /// under-granted. Note the boundary's limits (audit `security.md` S3):
+    /// capabilities are *self-declared*, and the `vault:*` gate only narrows the
+    /// host-callback RPC surface; the `net`/`exec`/`fs:read` sandbox caps are
+    /// enforced by the capability-derived profile (#63).
     #[serde(default)]
-    pub capabilities: Vec<String>,
+    pub capabilities: Vec<Capability>,
 }
 
 fn invalid_data(e: serde_json::Error) -> std::io::Error {
@@ -605,5 +600,30 @@ mod tests {
     fn capability_displays_as_wire_string() {
         assert_eq!(Capability::VaultRead.to_string(), "vault:read");
         assert_eq!(Capability::FsRead.to_string(), "fs:read");
+    }
+
+    #[test]
+    fn manifest_parses_typed_capabilities() {
+        let m: Manifest = toml::from_str(
+            "id=\"x\"\nname=\"X\"\nversion=\"0\"\n\
+             [engine]\ncommand=\"./x\"\ncapabilities=[\"vault:read\", \"net\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            m.engine.capabilities,
+            vec![Capability::VaultRead, Capability::Net]
+        );
+    }
+
+    #[test]
+    fn manifest_rejects_unknown_capability() {
+        let r: Result<Manifest, _> = toml::from_str(
+            "id=\"x\"\nname=\"X\"\nversion=\"0\"\n\
+             [engine]\ncommand=\"./x\"\ncapabilities=[\"fs:write\"]\n",
+        );
+        assert!(
+            r.is_err(),
+            "unknown capability must fail the manifest parse"
+        );
     }
 }

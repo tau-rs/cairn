@@ -484,7 +484,7 @@ mod host_tests {
             result: None,
             error: Some(RpcError {
                 code: -32001,
-                message: "capability fs:read not declared".to_string(),
+                message: "capability vault:read not declared".to_string(),
             }),
         };
         write_message(&mut response_bytes, &resp).unwrap();
@@ -499,7 +499,7 @@ mod host_tests {
         };
         let err = host.read_note("note.md").unwrap_err();
         assert_eq!(err.code, -32001);
-        assert!(err.message.contains("fs:read"));
+        assert!(err.message.contains("vault:read"));
     }
 }
 
