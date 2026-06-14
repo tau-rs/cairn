@@ -69,8 +69,9 @@ pub(crate) fn seatbelt_profile(
 ///
 /// Mounts a broad read-only root (`--ro-bind / /`), masks the vault with an
 /// empty tmpfs, re-exposes the plugin's own directory read-only on top, drops
-/// the network and other namespaces (`--unshare-all`), and ties the jail's
-/// lifetime to the host (`--die-with-parent`).
+/// all namespaces (`--unshare-all`; if `caps.net` is true, `--share-net`
+/// immediately follows to re-share the host network namespace), and ties the
+/// jail's lifetime to the host (`--die-with-parent`).
 /// A minimal `/dev` and `/proc` are mounted (`--dev /dev`, `--proc /proc`) so
 /// plugin runtimes have the standard device nodes and a process tree.
 /// The vector ends with `--` and
@@ -86,12 +87,12 @@ pub(crate) fn bwrap_args(
     vault_root: &Path,
     plugin_dir: &Path,
     cmd: &Path,
-    _caps: SandboxCapabilities,
+    caps: SandboxCapabilities,
 ) -> Vec<OsString> {
     let vault = vault_root.as_os_str().to_os_string();
     let dir = plugin_dir.as_os_str().to_os_string();
     let cmd = cmd.as_os_str().to_os_string();
-    vec![
+    let mut v = vec![
         OsString::from("--ro-bind"),
         OsString::from("/"),
         OsString::from("/"),
@@ -105,10 +106,17 @@ pub(crate) fn bwrap_args(
         OsString::from("--proc"),
         OsString::from("/proc"),
         OsString::from("--unshare-all"),
-        OsString::from("--die-with-parent"),
-        OsString::from("--"),
-        cmd,
-    ]
+    ];
+    // `--unshare-all` drops the network namespace; re-share it only when the
+    // plugin declared `net`. (bwrap cannot scope this to outbound-only; the
+    // whole host namespace is shared — see the design's platform-asymmetry note.)
+    if caps.net {
+        v.push(OsString::from("--share-net"));
+    }
+    v.push(OsString::from("--die-with-parent"));
+    v.push(OsString::from("--"));
+    v.push(cmd);
+    v
 }
 
 /// macOS Seatbelt backend: runs the plugin under `sandbox-exec -p <profile>`.
@@ -389,6 +397,41 @@ mod tests {
                 "--",
                 "/cairn/.cairn/plugins/p/bin",
             ]
+        );
+    }
+
+    #[test]
+    fn bwrap_args_omits_share_net_without_net_cap() {
+        let a = bwrap_args(
+            Path::new("/cairn"),
+            Path::new("/cairn/.cairn/plugins/p"),
+            Path::new("/cairn/.cairn/plugins/p/bin"),
+            SandboxCapabilities::default(),
+        );
+        let s: Vec<String> = a.iter().map(|o| o.to_string_lossy().into_owned()).collect();
+        assert!(
+            !s.iter().any(|x| x == "--share-net"),
+            "default jail must have no network"
+        );
+    }
+
+    #[test]
+    fn bwrap_args_adds_share_net_after_unshare_all_with_net_cap() {
+        let a = bwrap_args(
+            Path::new("/cairn"),
+            Path::new("/cairn/.cairn/plugins/p"),
+            Path::new("/cairn/.cairn/plugins/p/bin"),
+            SandboxCapabilities { net: true },
+        );
+        let s: Vec<String> = a.iter().map(|o| o.to_string_lossy().into_owned()).collect();
+        let unshare = s
+            .iter()
+            .position(|x| x == "--unshare-all")
+            .expect("--unshare-all present");
+        assert_eq!(
+            s.get(unshare + 1).map(String::as_str),
+            Some("--share-net"),
+            "--share-net must immediately follow --unshare-all"
         );
     }
 
