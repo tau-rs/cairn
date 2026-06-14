@@ -5,6 +5,8 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+pub use cairn_infra::TrustedEntry;
+
 /// Daemon configuration.
 #[derive(Debug, Default, Deserialize)]
 pub struct Config {
@@ -34,42 +36,6 @@ pub struct PluginsConfig {
     /// (legacy/shorthand) or a `[[plugins.trusted]]` table with optional `hash`.
     #[serde(default)]
     pub trusted: Vec<TrustedEntry>,
-}
-
-/// One entry in `[plugins].trusted`. Parsed untagged so both the legacy bare
-/// string form (`trusted = ["name"]`) and the table form
-/// (`[[plugins.trusted]] dir = "name" hash = "sha256:..."`) are accepted. A
-/// bare string and a table with `hash` omitted both mean "trusted, unpinned".
-#[derive(Debug, Deserialize, PartialEq)]
-#[serde(untagged)]
-pub enum TrustedEntry {
-    /// Legacy / shorthand: trust by directory name, no pin.
-    Name(String),
-    /// Table form: directory name plus an optional pinned content hash.
-    Pinned(PinnedEntry),
-}
-
-/// The table form of a [`TrustedEntry`]. `deny_unknown_fields` is essential:
-/// without it a typo'd `hsah = "..."` would silently drop the pin and the
-/// plugin would run unpinned, so a user who believes they pinned a plugin would
-/// be unprotected. (The deny lives on this inner struct, not on the untagged
-/// enum, where serde ignores it.)
-#[derive(Debug, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct PinnedEntry {
-    dir: String,
-    #[serde(default)]
-    hash: Option<String>,
-}
-
-impl TrustedEntry {
-    /// Reduce to `(dir_name, optional_pin_string)` for `TrustedPlugins`.
-    pub fn normalize(&self) -> (String, Option<String>) {
-        match self {
-            TrustedEntry::Name(dir) => (dir.clone(), None),
-            TrustedEntry::Pinned(p) => (p.dir.clone(), p.hash.clone()),
-        }
-    }
 }
 
 /// On-disk index persistence settings.

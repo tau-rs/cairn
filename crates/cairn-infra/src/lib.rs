@@ -19,7 +19,7 @@ pub use notify_watcher::NotifyWatcher;
 pub use plugin_hash::PinnedHash;
 pub use plugin_host::{
     inspect_plugins, InspectedManifest, PluginInspection, ProcessPluginHost, TrustStatus,
-    TrustedPlugins, DEFAULT_PLUGIN_TIMEOUT,
+    TrustedEntry, TrustedPlugins, DEFAULT_PLUGIN_TIMEOUT,
 };
 #[cfg(target_os = "macos")]
 pub use sandbox::MacSeatbeltSandbox;

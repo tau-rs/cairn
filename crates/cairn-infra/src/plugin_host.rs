@@ -8,6 +8,8 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use serde::Deserialize;
+
 use crate::PinnedHash;
 use cairn_plugin_protocol::{
     write_message, CairnEvent, CairnEventKind, Capability, CommandDecl, DeleteNoteParams, Incoming,
@@ -57,6 +59,55 @@ fn required_cap(method: &str) -> Option<Capability> {
     }
 }
 
+/// One entry in `[plugins].trusted`. Untagged so both the bare string form
+/// (`trusted = ["name"]`) and the table form (`[[plugins.trusted]] dir = …
+/// hash = …`) parse. A bare string and a table without `hash` both mean
+/// "trusted, unpinned".
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum TrustedEntry {
+    /// Trust by directory name, no pin.
+    Name(String),
+    /// Directory name plus an optional pinned content hash.
+    Pinned(PinnedEntry),
+}
+
+/// The table form of a [`TrustedEntry`]. `deny_unknown_fields` is essential:
+/// without it a typo'd `hsah = "…"` would silently drop the pin and the plugin
+/// would run unpinned. (The deny lives on this inner struct, not the untagged
+/// enum, where serde ignores it.)
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PinnedEntry {
+    pub dir: String,
+    #[serde(default)]
+    pub hash: Option<String>,
+}
+
+impl TrustedEntry {
+    /// Reduce to `(dir_name, optional_pin_string)` for [`TrustedPlugins`].
+    pub fn normalize(&self) -> (String, Option<String>) {
+        match self {
+            TrustedEntry::Name(dir) => (dir.clone(), None),
+            TrustedEntry::Pinned(p) => (p.dir.clone(), p.hash.clone()),
+        }
+    }
+}
+
+/// Minimal `cairn.toml` view: just enough to extract `[plugins].trusted`.
+/// Unknown sections/keys are ignored (no top-level `deny_unknown_fields`).
+#[derive(Debug, Default, Deserialize)]
+struct TrustedListConfig {
+    #[serde(default)]
+    plugins: TrustedListPlugins,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct TrustedListPlugins {
+    #[serde(default)]
+    trusted: Vec<TrustedEntry>,
+}
+
 /// The set of plugin **directory names** the user has explicitly trusted, each
 /// with an optional pinned content hash. A plugin under
 /// `<cairn>/.cairn/plugins/<dir>` is spawned only if `<dir>` is a key here; if
@@ -98,6 +149,23 @@ impl TrustedPlugins {
     /// `None` ⇒ trusted but unpinned; `Some(&pin)` ⇒ pinned.
     pub fn get(&self, dir_name: &str) -> Option<&Option<PinnedHash>> {
         self.0.get(dir_name)
+    }
+
+    /// Build from `<cairn_root>/cairn.toml` `[plugins].trusted`. An absent file
+    /// or absent section yields [`Self::none`] (default-deny).
+    ///
+    /// # Errors
+    /// [`PortError::Adapter`] on an IO error, malformed TOML, or a malformed pin
+    /// (fail-fast: a typo'd pin must not degrade to "unpinned").
+    pub fn from_cairn_toml(cairn_root: &Path) -> Result<Self, PortError> {
+        let path = cairn_root.join("cairn.toml");
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::none()),
+            Err(e) => return Err(adapt(e)),
+        };
+        let cfg: TrustedListConfig = toml::from_str(&raw).map_err(adapt)?;
+        Self::from_entries(cfg.plugins.trusted.iter().map(|e| e.normalize()))
     }
 }
 
@@ -968,5 +1036,50 @@ mod tests {
         std::fs::write(tmp.path().join("stray.txt"), "noise").unwrap();
         let got = inspect_plugins(tmp.path(), &TrustedPlugins::none()).unwrap();
         assert!(got.is_empty());
+    }
+
+    #[test]
+    fn from_cairn_toml_absent_file_is_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = TrustedPlugins::from_cairn_toml(tmp.path()).unwrap();
+        assert!(t.get("anything").is_none());
+    }
+
+    #[test]
+    fn from_cairn_toml_reads_legacy_form() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("cairn.toml"),
+            "[plugins]\ntrusted = [\"legacy\"]\n",
+        )
+        .unwrap();
+        let t = TrustedPlugins::from_cairn_toml(tmp.path()).unwrap();
+        assert!(matches!(t.get("legacy"), Some(None)));
+        assert!(t.get("absent").is_none());
+    }
+
+    #[test]
+    fn from_cairn_toml_reads_table_form() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pin = format!("sha256:{}", "a".repeat(64));
+        std::fs::write(
+            tmp.path().join("cairn.toml"),
+            format!("[[plugins.trusted]]\ndir = \"pinned\"\nhash = \"{pin}\"\n"),
+        )
+        .unwrap();
+        let t = TrustedPlugins::from_cairn_toml(tmp.path()).unwrap();
+        assert!(matches!(t.get("pinned"), Some(Some(_))));
+        assert!(t.get("absent").is_none());
+    }
+
+    #[test]
+    fn from_cairn_toml_rejects_bad_pin() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("cairn.toml"),
+            "[[plugins.trusted]]\ndir = \"a\"\nhash = \"bogus\"\n",
+        )
+        .unwrap();
+        assert!(TrustedPlugins::from_cairn_toml(tmp.path()).is_err());
     }
 }
