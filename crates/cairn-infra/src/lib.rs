@@ -22,3 +22,4 @@ pub use sandbox::MacSeatbeltSandbox;
 pub use sandbox::{platform_sandbox, RefusingSandbox};
 pub use seams::{BlockingExecutor, NoCollab, NoopWatcher, NullRuntime};
 pub use tantivy_index::{TantivyIndex, MIN_QUERY_CHARS};
+pub use tau::{TauConfig, TauServeRuntime};

@@ -5,4 +5,8 @@
 pub mod client;
 pub mod config;
 pub mod process;
+pub mod runtime;
 pub mod wire;
+
+pub use config::TauConfig;
+pub use runtime::TauServeRuntime;
