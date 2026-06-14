@@ -174,6 +174,22 @@ pub enum PluginSlot {
     Command,
 }
 
+/// A capability a Tier-3 (sandboxed-iframe) plugin may request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub enum PluginCapability {
+    #[serde(rename = "activeNote.read")]
+    ActiveNoteRead,
+    #[serde(rename = "activeNote.write")]
+    ActiveNoteWrite,
+    #[serde(rename = "notes.read")]
+    NotesRead,
+    #[serde(rename = "notes.search")]
+    NotesSearch,
+    #[serde(rename = "command.invoke")]
+    CommandInvoke,
+}
+
 /// One row inside a `list` widget.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -583,5 +599,28 @@ mod tests {
         .map(|v| v["kind"].as_str().unwrap().to_string())
         .collect();
         assert_eq!(kinds, ["text", "action", "list"]);
+
+        // Capability wire strings (the contract): dotted, exact, ordered.
+        let caps = [
+            PluginCapability::ActiveNoteRead,
+            PluginCapability::ActiveNoteWrite,
+            PluginCapability::NotesRead,
+            PluginCapability::NotesSearch,
+            PluginCapability::CommandInvoke,
+        ];
+        let cap_strs: Vec<String> = caps
+            .iter()
+            .map(|c| to_value(c).unwrap().as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            cap_strs,
+            [
+                "activeNote.read",
+                "activeNote.write",
+                "notes.read",
+                "notes.search",
+                "command.invoke"
+            ]
+        );
     }
 }
