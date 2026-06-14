@@ -21,7 +21,7 @@ use cairn_plugin_protocol::{
 };
 use cairn_ports::{
     AdapterError, EventDispatchError, PluginCallbacks, PluginCommand, PluginEvent, PluginHost,
-    PluginInfo, PortError, Sandbox,
+    PluginInfo, PortError, Sandbox, SandboxCapabilities,
 };
 
 /// Map a ports event to its wire form for delivery to plugins.
@@ -713,8 +713,15 @@ impl ProcessPluginHost {
                 plugin_dir.join(p)
             }
         };
+        let caps = sandbox_caps(&manifest.engine.capabilities);
         let mut command = sandbox
-            .wrap(vault_root, plugin_dir, &cmd_path, &manifest.engine.args)
+            .wrap(
+                vault_root,
+                plugin_dir,
+                &cmd_path,
+                &manifest.engine.args,
+                caps,
+            )
             .map_err(adapt)?;
         let mut child = command
             .stdin(Stdio::piped())
@@ -787,6 +794,15 @@ impl ProcessPluginHost {
     }
 }
 
+/// Translate a manifest's declared capabilities into the typed OS-sandbox
+/// capability set. Only sandbox-driving capabilities are mapped; host-RPC
+/// capabilities (`vault:read`/`vault:write`/`vault:events`) are irrelevant here.
+fn sandbox_caps(caps: &[Capability]) -> SandboxCapabilities {
+    SandboxCapabilities {
+        net: caps.contains(&Capability::Net),
+    }
+}
+
 impl PluginHost for ProcessPluginHost {
     fn plugins(&self) -> Vec<PluginInfo> {
         self.loaded.iter().map(|p| p.info.clone()).collect()
@@ -856,6 +872,7 @@ mod tests {
             _dir: &Path,
             cmd: &Path,
             args: &[String],
+            _caps: cairn_ports::SandboxCapabilities,
         ) -> Result<Command, SandboxError> {
             let mut c = Command::new(cmd);
             c.args(args);
@@ -1094,5 +1111,19 @@ mod tests {
         )
         .unwrap();
         assert!(TrustedPlugins::from_cairn_toml(tmp.path()).is_err());
+    }
+
+    #[test]
+    fn sandbox_caps_sets_net_only_when_declared() {
+        use cairn_ports::SandboxCapabilities;
+        assert_eq!(
+            super::sandbox_caps(&[Capability::Net]),
+            SandboxCapabilities { net: true }
+        );
+        assert_eq!(
+            super::sandbox_caps(&[Capability::FsRead, Capability::VaultEvents]),
+            SandboxCapabilities { net: false }
+        );
+        assert_eq!(super::sandbox_caps(&[]), SandboxCapabilities::default());
     }
 }

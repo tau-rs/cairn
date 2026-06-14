@@ -337,7 +337,7 @@ fn plugin_trust_yes_prints_snippet() {
         dir,
         "fetch-bot",
         "id=\"fetch-bot\"\nname=\"Fetch Bot\"\nversion=\"1.0.0\"\n\
-         [engine]\ncommand=\"./fetch-bot\"\ncapabilities=[\"vault:read\",\"net\"]\n",
+         [engine]\ncommand=\"./fetch-bot\"\ncapabilities=[\"vault:read\",\"fs:read\"]\n",
     );
     cairn(dir)
         .args(["plugin", "trust", "fetch-bot"])
@@ -346,7 +346,8 @@ fn plugin_trust_yes_prints_snippet() {
         .success()
         .stdout(
             contains("vault:read")
-                .and(contains("enforced in a future release")) // net's label
+                // fs:read is declared but not yet enforced, so it carries the label
+                .and(contains("enforced in a future release"))
                 .and(contains("[[plugins.trusted]]"))
                 .and(contains("dir = \"fetch-bot\""))
                 .and(contains("hash = \"sha256:")),

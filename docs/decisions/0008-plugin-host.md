@@ -97,9 +97,11 @@ enum's `wire()` method replaces them. An unrecognised capability now fails the
 manifest parse (fail-closed) rather than being silently ignored. Three new sandbox
 capabilities — `net` (outbound network), `exec` (spawn subprocesses), `fs:read`
 (filesystem reads beyond the vault) — are declared in the manifest and surfaced to
-the user at first-run approval; they are **not yet enforced** (the fixed OS jail still
-applies). Their enforcement is the capability-derived sandbox profile tracked in
-issue #63; this vocabulary is its keystone. A new CLI surface, `cairn plugin list` /
+the user at first-run approval. `net` is now **enforced** by the capability-derived
+sandbox profile (#63, since merged): the jail opens the network only when `net` is
+declared. `exec` / `fs:read` are declared but **not yet enforced** (the jail denies
+them regardless), and carry an "enforced in a future release" label at approval. This
+vocabulary is the keystone #63 was built on. A new CLI surface, `cairn plugin list` /
 `cairn plugin trust <dir>`, inspects plugins read-only and prints the
 `[[plugins.trusted]]` entry for the user to paste into `cairn.toml` (it never writes
 config itself). See

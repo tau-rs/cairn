@@ -28,11 +28,12 @@ pub const METHOD_CAIRN_EVENT: &str = "cairn/event";
 ///
 /// Two enforcement domains:
 /// - `vault:*` gate the **host-callback RPC** surface (`host/readNote`, …) and
-///   are enforced today by the host (`cairn-infra` `service_callback`).
+///   are enforced by the host (`cairn-infra` `service_callback`).
 /// - `net` / `exec` / `fs:read` gate the **OS sandbox** around the spawned
-///   child. They are declared and surfaced to the user now, and enforced by the
-///   capability-derived sandbox profile (issue #63); until then the fixed jail
-///   is stricter-or-equal, so declaring them never grants more than today.
+///   child. `net` is enforced by the capability-derived sandbox profile (#63):
+///   the jail opens the network only when `net` is declared. `exec` / `fs:read`
+///   are declared and surfaced to the user but not yet enforced (the jail
+///   denies them regardless, so declaring them grants nothing extra today).
 ///
 /// The `vault:*` names supersede the legacy `CAP_FS_READ` / `CAP_FS_WRITE` /
 /// `CAP_EVENTS` string constants, which have been removed.
@@ -54,10 +55,11 @@ pub enum Capability {
     /// Make outbound network connections (sandbox; enforced by #63).
     #[serde(rename = "net")]
     Net,
-    /// Spawn subprocesses (sandbox; enforced by #63).
+    /// Spawn subprocesses (sandbox; declared but not yet enforced).
     #[serde(rename = "exec")]
     Exec,
-    /// Read real files outside the vault, broadly (sandbox; enforced by #63).
+    /// Read real files outside the vault, broadly (sandbox; declared but not
+    /// yet enforced).
     #[serde(rename = "fs:read")]
     FsRead,
 }
@@ -90,13 +92,17 @@ impl Capability {
     }
 
     /// Whether this capability is actually enforced by the current build. The
-    /// three `vault:*` caps gate the live host-RPC channel (`true`); the three
-    /// sandbox caps are declared now and enforced by #63 (`false`). Drives the
+    /// `vault:*` caps gate the live host-RPC channel and `net` is enforced by
+    /// the capability-derived sandbox profile (#63) — all `true`. `exec` /
+    /// `fs:read` are declared but not yet enforced (`false`), which drives the
     /// "enforced in a future release" label on the approval screen.
     pub fn enforced_today(&self) -> bool {
         matches!(
             self,
-            Capability::VaultRead | Capability::VaultWrite | Capability::VaultEvents
+            Capability::VaultRead
+                | Capability::VaultWrite
+                | Capability::VaultEvents
+                | Capability::Net
         )
     }
 }
@@ -585,11 +591,14 @@ mod tests {
     }
 
     #[test]
-    fn enforced_today_only_for_vault_caps() {
+    fn enforced_today_for_vault_and_net_caps() {
+        // vault:* gate the live host-RPC channel; net is enforced by the
+        // capability-derived sandbox profile (#63). exec/fs:read are declared
+        // but not yet enforced.
         assert!(Capability::VaultRead.enforced_today());
         assert!(Capability::VaultWrite.enforced_today());
         assert!(Capability::VaultEvents.enforced_today());
-        assert!(!Capability::Net.enforced_today());
+        assert!(Capability::Net.enforced_today());
         assert!(!Capability::Exec.enforced_today());
         assert!(!Capability::FsRead.enforced_today());
     }

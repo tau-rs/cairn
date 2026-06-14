@@ -32,16 +32,24 @@
 //!
 //! A plugin the daemon agrees to run is **fully-trusted code**. It is spawned as
 //! a child of the daemon and runs with the daemon's full operating-system
-//! privileges — the same user, filesystem, network, and process access. There is
-//! **no OS-level sandbox** around the plugin process.
+//! privileges — the same user, filesystem, and process access.
 //!
 //! The daemon's trusted-list (`[plugins].trusted` in `cairn.toml`) gates *whether*
 //! a plugin runs, not *what it can do*. The `capabilities` declared in a plugin's
-//! manifest constrain only the host-callback methods on [`Host`]
-//! (`read_note`/`write_note`/`search`/`list_notes`); they do **not** sandbox the
-//! process, which can use the network, filesystem, and exec directly regardless of
-//! what it declares. Approving a plugin is therefore equivalent to trusting its
-//! author and its exact on-disk contents to run as you. See the trust design doc
+//! manifest serve two distinct roles:
+//!
+//! - `vault:read`, `vault:write`, and `vault:events` gate host-callback methods
+//!   on [`Host`] (`read_note`/`write_note`/`search`/`list_notes`). They only
+//!   narrow that host-RPC surface and are orthogonal to the OS sandbox, which
+//!   separately denies the plugin process direct filesystem writes and vault
+//!   reads regardless of what it declares.
+//! - `net` is consumed by the OS sandbox (bubblewrap on Linux, sandbox-exec on
+//!   macOS). If a plugin does **not** declare `net`, the jail denies all outbound
+//!   network connections at the OS level. Declaring `net` lifts that restriction.
+//!   `net` gates no host-callback method.
+//!
+//! Approving a plugin is therefore equivalent to trusting its author and its exact
+//! on-disk contents to run as you. See the trust design doc
 //! (`docs/superpowers/specs/2026-06-11-cairn-plugin-trust-design.md`) and
 //! the SDK design doc
 //! (`docs/superpowers/specs/2026-06-10-plugin-sdk-design.md`).
