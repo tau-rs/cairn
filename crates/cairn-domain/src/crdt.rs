@@ -85,7 +85,6 @@ struct Entry {
     text: String,
     content_lamport: Lamport,
     content_author: Author,
-    content_replica: u64,
     tombstone: bool,
     /// Loser content versions retained on conflict (never silently dropped).
     stash: Vec<String>,
@@ -129,7 +128,6 @@ impl BlockDoc {
                     text: block.text,
                     content_lamport: doc.clock,
                     content_author: Author::Human,
-                    content_replica: replica,
                     tombstone: false,
                     stash: Vec::new(),
                 },
@@ -181,7 +179,6 @@ impl BlockDoc {
                     text,
                     content_lamport: lamport,
                     content_author: Author::Human,
-                    content_replica: id.replica,
                     tombstone: false,
                     stash: Vec::new(),
                 });
@@ -245,23 +242,28 @@ impl BlockDoc {
         let Some(e) = self.entries.get_mut(&id) else {
             return;
         };
-        // Deterministic total order: (author_rank, lamport, replica). Higher
-        // wins. Human always beats Agent; the loser's text is stashed.
-        let incoming = (author_rank(author), lamport, id.replica);
-        let current = (
-            author_rank(e.content_author),
-            e.content_lamport,
-            e.content_replica,
-        );
-        if incoming > current {
-            e.stash.push(std::mem::replace(&mut e.text, text));
-            e.content_author = author;
-            e.content_lamport = lamport;
-            e.content_replica = id.replica;
-        } else if incoming < current {
-            e.stash.push(text);
+        // Deterministic total order on content: (author_rank, lamport), with the
+        // text itself as the final tiebreak. Human always outranks Agent; among
+        // equal rank the higher Lamport wins; a true (rank, lamport) tie is
+        // broken by text (greater wins). Order-independent ⇒ convergent, and the
+        // loser's text is always stashed rather than dropped.
+        let incoming = (author_rank(author), lamport);
+        let current = (author_rank(e.content_author), e.content_lamport);
+        match incoming.cmp(&current) {
+            std::cmp::Ordering::Greater => {
+                e.stash.push(std::mem::replace(&mut e.text, text));
+                e.content_author = author;
+                e.content_lamport = lamport;
+            }
+            std::cmp::Ordering::Less => e.stash.push(text),
+            std::cmp::Ordering::Equal => match text.cmp(&e.text) {
+                std::cmp::Ordering::Greater => {
+                    e.stash.push(std::mem::replace(&mut e.text, text));
+                }
+                std::cmp::Ordering::Less => e.stash.push(text),
+                std::cmp::Ordering::Equal => {} // identical content: idempotent no-op
+            },
         }
-        // incoming == current ⇒ identical winner key: ignore (idempotent).
     }
 
     /// Apply a local edit, mutating this doc and returning the op(s) to share.
@@ -443,6 +445,39 @@ mod tests {
             d.materialize()
         };
         assert_eq!(ops(true), ops(false));
+    }
+
+    #[test]
+    fn set_content_converges_on_equal_author_and_lamport() {
+        // Two concurrent edits to the same block with the SAME (author, lamport)
+        // must still converge: the text tiebreak makes the order total. Without
+        // it, first-writer-wins and the replicas diverge.
+        let run = |first_aaa: bool| {
+            let mut d = BlockDoc::from_markdown(1, "seed\n");
+            let id = d.block_ids_in_order()[0];
+            let aaa = BlockOp::SetContent {
+                id,
+                text: "AAA".into(),
+                lamport: 5,
+                author: Author::Human,
+            };
+            let bbb = BlockOp::SetContent {
+                id,
+                text: "BBB".into(),
+                lamport: 5,
+                author: Author::Human,
+            };
+            if first_aaa {
+                d.merge(aaa);
+                d.merge(bbb);
+            } else {
+                d.merge(bbb);
+                d.merge(aaa);
+            }
+            d.materialize()
+        };
+        assert_eq!(run(true), run(false));
+        assert_eq!(run(true), "BBB\n"); // greater text wins, deterministically
     }
 
     #[test]
