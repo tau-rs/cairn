@@ -226,6 +226,22 @@ pub enum PluginSlot {
     Command,
 }
 
+/// A capability a Tier-3 (sandboxed-iframe) plugin may request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub enum PluginCapability {
+    #[serde(rename = "activeNote.read")]
+    ActiveNoteRead,
+    #[serde(rename = "activeNote.write")]
+    ActiveNoteWrite,
+    #[serde(rename = "notes.read")]
+    NotesRead,
+    #[serde(rename = "notes.search")]
+    NotesSearch,
+    #[serde(rename = "command.invoke")]
+    CommandInvoke,
+}
+
 /// One row inside a `list` widget.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -261,6 +277,11 @@ pub enum PluginWidget {
     List {
         items: Vec<PluginListItem>,
     },
+    Iframe {
+        html: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        height: Option<u32>,
+    },
 }
 
 /// One placement of one widget into one slot.
@@ -293,6 +314,9 @@ pub struct PluginSummary {
     /// UI contributions (Tier-2). Empty for plugins that declare none.
     #[serde(default)]
     pub contributions: Vec<PluginContribution>,
+    /// Capabilities a Tier-3 plugin requests. None for plugins that declare none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<Vec<PluginCapability>>,
 }
 
 /// A command a plugin handles.
@@ -552,6 +576,7 @@ mod tests {
                     title: "Echo".into(),
                 }],
                 contributions: vec![],
+                capabilities: None,
             }],
         };
         let j = serde_json::to_string(&resp).unwrap();
@@ -635,6 +660,66 @@ mod tests {
         .map(|v| v["kind"].as_str().unwrap().to_string())
         .collect();
         assert_eq!(kinds, ["text", "action", "list"]);
+
+        // Capability wire strings (the contract): dotted, exact, ordered.
+        let caps = [
+            PluginCapability::ActiveNoteRead,
+            PluginCapability::ActiveNoteWrite,
+            PluginCapability::NotesRead,
+            PluginCapability::NotesSearch,
+            PluginCapability::CommandInvoke,
+        ];
+        let cap_strs: Vec<String> = caps
+            .iter()
+            .map(|c| to_value(c).unwrap().as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            cap_strs,
+            [
+                "activeNote.read",
+                "activeNote.write",
+                "notes.read",
+                "notes.search",
+                "command.invoke"
+            ]
+        );
+
+        // The Iframe widget kind serializes to "iframe".
+        let iframe_kind = to_value(PluginWidget::Iframe {
+            html: "<p>x</p>".into(),
+            height: None,
+        })
+        .unwrap();
+        assert_eq!(iframe_kind["kind"].as_str().unwrap(), "iframe");
+
+        // A present height serializes as a bare number (not stringified/wrapped).
+        let iframe_sized = to_value(PluginWidget::Iframe {
+            html: "<p>x</p>".into(),
+            height: Some(240),
+        })
+        .unwrap();
+        assert_eq!(iframe_sized["height"].as_u64().unwrap(), 240);
+    }
+
+    #[test]
+    fn plugin_summary_capabilities_round_trip() {
+        // Tier-2 payloads (no `capabilities` key) must still deserialize.
+        let legacy = r#"{"id":"p","name":"P","version":"1","commands":[],"contributions":[]}"#;
+        let s: PluginSummary = serde_json::from_str(legacy).unwrap();
+        assert_eq!(s.capabilities, None);
+
+        // Round-trip with capabilities present.
+        let s2 = PluginSummary {
+            id: "p".into(),
+            name: "P".into(),
+            version: "1".into(),
+            commands: vec![],
+            contributions: vec![],
+            capabilities: Some(vec![PluginCapability::NotesRead]),
+        };
+        let j = serde_json::to_string(&s2).unwrap();
+        assert!(j.contains("\"capabilities\":[\"notes.read\"]"));
+        assert_eq!(serde_json::from_str::<PluginSummary>(&j).unwrap(), s2);
     }
 }
 

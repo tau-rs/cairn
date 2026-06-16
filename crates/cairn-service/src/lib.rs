@@ -253,6 +253,7 @@ pub fn dispatch_query(engine: &Engine, query: &Query) -> Result<QueryResponse, S
                         })
                         .collect(),
                     contributions: p.contributions.into_iter().map(map_contribution).collect(),
+                    capabilities: None,
                 })
                 .collect();
             Ok(QueryResponse::Plugins { plugins })
