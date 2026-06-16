@@ -40,8 +40,11 @@ fn op_pool(seed: &str) -> Vec<BlockOp> {
     let mut ops = Vec::new();
     let mut a = BlockDoc::from_markdown(1, seed);
     let mut b = BlockDoc::from_markdown(2, seed);
-    // NOTE: replicas 1 and 2 seed identical structure but with different
-    // replica ids on their block ids, so cross-merge exercises real concurrency.
+    // Replicas 1 and 2 seed identical structure but with distinct birth-replica
+    // block ids, so b's ops here land on ids absent from a fresh replica-1 doc
+    // (they no-op on merge). This pool therefore exercises ordering/idempotence
+    // of insert+update; same-block concurrent *content* edits are stressed
+    // directly by `same_block_content_edits_converge` below.
     let a_ids: Vec<BlockId> = a.block_ids_in_order();
     let b_ids: Vec<BlockId> = b.block_ids_in_order();
     if let Some(&id) = a_ids.first() {
@@ -95,6 +98,43 @@ proptest! {
             x.merge(pool[k].clone());
         }
         for op in &pool {
+            y.merge(op.clone());
+        }
+        prop_assert_eq!(x.materialize(), y.materialize());
+    }
+}
+
+proptest! {
+    /// Same-block convergence: many SetContent ops on ONE shared block id, with a
+    /// small Lamport range to force frequent (author, lamport) ties, converge
+    /// regardless of application order — directly stressing the LWW total order
+    /// and its text tiebreak. Closes the gap left by `replicas_converge_under_
+    /// any_order` (whose cross-replica ops no-op on absent ids).
+    #[test]
+    fn same_block_content_edits_converge(
+        ops in prop::collection::vec((any::<bool>(), 0u64..6, "[A-C]{1,3}"), 1..8),
+    ) {
+        let seed = "shared\n";
+        // First block minted by from_markdown(1, _) has this id.
+        let id = BlockId { replica: 1, counter: 0 };
+        let pool: Vec<BlockOp> = ops
+            .iter()
+            .map(|(human, lamport, text)| BlockOp::SetContent {
+                id,
+                text: text.clone(),
+                lamport: *lamport,
+                author: if *human { Author::Human } else { Author::Agent },
+            })
+            .collect();
+
+        let mut x = BlockDoc::from_markdown(1, seed);
+        let mut y = BlockDoc::from_markdown(1, seed);
+        // x: forward order + a duplicate (idempotence). y: reverse order.
+        for op in &pool {
+            x.merge(op.clone());
+        }
+        x.merge(pool[0].clone());
+        for op in pool.iter().rev() {
             y.merge(op.clone());
         }
         prop_assert_eq!(x.materialize(), y.materialize());
