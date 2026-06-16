@@ -115,60 +115,65 @@ fn main() {
 }
 ```
 
-- [ ] **Step 2: Write the fixture smoke test**
+- [ ] **Step 2: Write a self-contained fixture smoke test**
+
+This test must compile and **pass** at this task (the pre-commit hook runs the
+full clippy `-D warnings` + test suite on every commit, so a commit may not leave
+a non-compiling or failing test in the tree). It exercises the stub directly over
+`std::process`, with **no dependency on `TauServe`** (which gains
+`spawn_command` only in Task 2).
 
 Create `crates/cairn-infra/tests/tau_lifecycle.rs`:
 
 ```rust
-//! Integration tests for the `TauServe` process primitive, driven by the
-//! cross-platform `tau-stub` helper binary (located via CARGO_BIN_EXE).
+//! Integration tests for the `tau-stub` helper and (from Task 2 on) the
+//! `TauServe` process primitive. The stub binary is located via CARGO_BIN_EXE.
 
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::time::Duration;
-
-use cairn_infra::tau::config::TauConfig;
-use cairn_infra::tau::process::{ShutdownOutcome, TauServe, Timeouts};
-use cairn_ports::{AgentEvent, AgentSink};
+use std::process::{Command, Stdio};
 
 fn stub() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_tau-stub"))
 }
 
-fn cfg(mode: &str) -> TauConfig {
-    // `bin` is the stub; the mode is passed as the first arg by spawn_command in
-    // the tests that need it. For helpers that go through TauConfig, bin is the stub.
-    TauConfig {
-        bin: stub(),
-        agent: "stub".into(),
-        project: None,
-    }
-}
-
-#[derive(Default)]
-struct Collect(Vec<AgentEvent>);
-impl AgentSink for Collect {
-    fn emit(&mut self, e: AgentEvent) {
-        self.0.push(e);
-    }
-}
-
 #[test]
-fn stub_speaks_handshake_and_a_run() {
-    // Validates the fixture: a ready-run stub completes spawn + a streaming run.
-    let mut cmd = std::process::Command::new(stub());
-    cmd.arg("ready-run");
-    let mut serve = TauServe::spawn_command(cmd, Timeouts::default()).expect("spawn stub");
-    let mut sink = Collect::default();
-    serve.run_streaming("stub", "hi", &mut sink).expect("run");
-    assert!(sink.0.iter().any(|e| matches!(e, AgentEvent::Completed)));
-    let _ = cfg("ready-run"); // silence unused helper until later tasks
+fn stub_signals_ready_and_answers_handshake() {
+    // Validates the fixture without TauServe: readiness marker on stderr, then a
+    // handshake round-trip on stdout, then graceful exit on stdin close.
+    let mut child = Command::new(stub())
+        .arg("ready-run")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn stub");
+
+    let mut err = BufReader::new(child.stderr.take().unwrap());
+    let mut line = String::new();
+    err.read_line(&mut line).unwrap();
+    assert!(line.contains("ready"), "stderr readiness line: {line:?}");
+
+    let mut stdin = child.stdin.take().unwrap();
+    writeln!(
+        stdin,
+        "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"meta.handshake\",\"params\":{{}}}}"
+    )
+    .unwrap();
+    let mut out = BufReader::new(child.stdout.take().unwrap());
+    let mut reply = String::new();
+    out.read_line(&mut reply).unwrap();
+    assert!(reply.contains("\"id\":1"), "handshake reply: {reply:?}");
+
+    drop(stdin); // EOF → stub exits
+    let _ = child.wait();
 }
 ```
 
-- [ ] **Step 3: Run the smoke test to verify it fails to compile**
+- [ ] **Step 3: Run the smoke test to verify it passes**
 
-Run: `cargo test -p cairn-infra --test tau_lifecycle stub_speaks_handshake_and_a_run`
-Expected: FAIL — `TauServe::spawn_command`, `Timeouts`, `ShutdownOutcome` do not exist yet (and `tau::process` items may be unresolved). This confirms Task 2/3 are still needed.
+Run: `cargo test -p cairn-infra --test tau_lifecycle stub_signals_ready_and_answers_handshake`
+Expected: PASS. Also run `just lint` (clippy `-D warnings`) and confirm it is clean — the stub binary is linted as an `--all-targets` target.
 
 - [ ] **Step 4: Commit**
 
@@ -189,7 +194,16 @@ Replace the unbounded stderr readiness read (`process.rs:56`) with a reader-thre
 
 - [ ] **Step 1: Write the failing test (readiness timeout)**
 
-Add to `crates/cairn-infra/tests/tau_lifecycle.rs`:
+First add these imports to the top of `crates/cairn-infra/tests/tau_lifecycle.rs`
+(below the existing `use` lines):
+
+```rust
+use std::time::{Duration, Instant};
+
+use cairn_infra::tau::process::{TauServe, Timeouts};
+```
+
+Then add the test:
 
 ```rust
 #[test]
@@ -417,7 +431,14 @@ Add liveness detection and replace the SIGKILL-only `Drop` with close-stdin → 
 
 - [ ] **Step 1: Write the failing tests**
 
-Add to `crates/cairn-infra/tests/tau_lifecycle.rs`:
+First update the process import in `crates/cairn-infra/tests/tau_lifecycle.rs` to
+add `ShutdownOutcome`:
+
+```rust
+use cairn_infra::tau::process::{ShutdownOutcome, TauServe, Timeouts};
+```
+
+Then add the tests:
 
 ```rust
 #[test]
