@@ -1,13 +1,16 @@
 //! HTTP + WebSocket transport over the cairn dispatcher. Binds localhost only.
-//! `/command` and `/query` require a local bearer token (audit S5; see the
-//! `auth` module and [`AppState::with_token`]). The engine runs synchronously
-//! under a mutex via `spawn_blocking`.
+//! `/command`, `/query`, `/ask`, and `/mcp` require a local bearer token (audit
+//! S5; see the `auth` module and [`AppState::with_token`]). `/mcp` additionally
+//! accepts the token as a `?token=` query param for headerless MCP clients. The
+//! engine runs synchronously under a mutex via `spawn_blocking`.
 
 pub mod config;
 pub use config::Config;
 
 mod auth;
 pub use auth::generate_token_file;
+
+mod mcp;
 
 use std::sync::{Arc, Mutex};
 
@@ -51,6 +54,10 @@ pub struct AppState {
     /// until `TAU_BIN` is set); the binary injects `TauServeRuntime` via
     /// [`AppState::with_runtime`].
     runtime: Arc<dyn AgentRuntime + Send + Sync>,
+    /// Whether the `/mcp` route advertises and accepts write tools. Default
+    /// `false` (read-only), mirroring the plugin trust default-deny posture; the
+    /// binary opts in via `--mcp-write` ([`AppState::with_mcp_write`]).
+    mcp_write: bool,
 }
 
 /// An `EventSink` that republishes engine events as wire events.
@@ -113,6 +120,7 @@ impl AppState {
             allowed_origins: Arc::from([]),
             token: None,
             runtime: Arc::new(cairn_infra::NullRuntime),
+            mcp_write: false,
         }
     }
 
@@ -136,6 +144,13 @@ impl AppState {
     #[must_use]
     pub fn with_runtime(mut self, runtime: Arc<dyn AgentRuntime + Send + Sync>) -> Self {
         self.runtime = runtime;
+        self
+    }
+
+    /// Enable write tools on the `/mcp` route. Default off (read-only).
+    #[must_use]
+    pub fn with_mcp_write(mut self, enabled: bool) -> Self {
+        self.mcp_write = enabled;
         self
     }
 
@@ -575,10 +590,19 @@ pub fn build_router(state: AppState) -> Router {
             state.clone(),
             auth::require_token,
         ));
+    // `/mcp` is token-gated too, but via its own middleware that also accepts the
+    // token as a `?token=` query param (tau β.3's MCP config carries a bare URL
+    // with no header).
+    let mcp = Router::new()
+        .route("/mcp", post(mcp::mcp_handler))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::mcp_require_token,
+        ));
     let open = Router::new()
         .route("/events", get(events_handler))
         .route("/health", get(health_handler));
-    protected.merge(open).with_state(state)
+    protected.merge(mcp).merge(open).with_state(state)
 }
 
 #[cfg(test)]

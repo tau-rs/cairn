@@ -75,13 +75,21 @@ and the first architecture decision record at
 
 ## Daemon trust model
 
-`cairn-daemon` binds `127.0.0.1` only. Its `/command` and `/query` routes
-require a local bearer token: on startup the daemon writes a random token to
-`<cairn>/.cairn/token` (mode `0600`) and requires it as an
+`cairn-daemon` binds `127.0.0.1` only. Its `/command`, `/query`, `/ask`, and
+`/mcp` routes require a local bearer token: on startup the daemon writes a random
+token to `<cairn>/.cairn/token` (mode `0600`) and requires it as an
 `Authorization: Bearer <token>` header. Any client with filesystem access to the
 cairn reads that file; on a multi-user host the `0600` permissions restrict that
 to the cairn's owner, so another local user cannot drive the daemon. The token
 is regenerated each startup.
+
+The `/mcp` route exposes cairn's note operations as
+[MCP](https://modelcontextprotocol.io) tools (see
+[`docs/decisions/0011-mcp-server.md`](docs/decisions/0011-mcp-server.md)). Write
+tools are off by default — pass `--mcp-write` to enable note mutation. Because an
+MCP client's config may carry only a bare URL with no header (e.g. tau), `/mcp`
+also accepts the same token as a `?token=<token>` query parameter; prefer the
+header where the client supports it.
 
 `/health` is an open liveness probe. The `/events` WebSocket is gated by an
 Origin allowlist (see [`docs/decisions/0004-daemon-cors.md`](docs/decisions/0004-daemon-cors.md));

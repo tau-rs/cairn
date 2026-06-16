@@ -37,6 +37,10 @@ struct Cli {
     /// with `[cors].origins` from the settings file.
     #[arg(long = "cors-origin")]
     cors_origin: Vec<String>,
+    /// Expose write tools (write_note, rename_note, delete_note, commit) on the
+    /// `/mcp` route. Default off: `/mcp` is read-only unless this is set.
+    #[arg(long)]
+    mcp_write: bool,
 }
 
 async fn run() -> Result<(), String> {
@@ -150,10 +154,17 @@ async fn run() -> Result<(), String> {
 
     // The same allowlist gates the /events WS upgrade (browsers bypass CORS on
     // WebSocket handshakes; see events_handler).
+    if cli.mcp_write {
+        tracing::info!("mcp: /mcp write tools enabled (read + write)");
+    } else {
+        tracing::info!("mcp: /mcp read-only (pass --mcp-write to enable note mutation)");
+    }
+
     let state = AppState::new(engine)
         .with_allowed_origins(cors_origins.clone())
         .with_token(token)
-        .with_runtime(runtime);
+        .with_runtime(runtime)
+        .with_mcp_write(cli.mcp_write);
     let app = build_router(state.clone()).layer(cors_layer(&cors_origins));
 
     if !cli.no_watch {
