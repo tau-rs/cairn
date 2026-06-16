@@ -9,3 +9,9 @@ pub use link::{extract_links, rewrite_link_target, LinkTarget};
 
 pub mod graph;
 pub use graph::Graph;
+
+pub mod block;
+pub use block::{Block, BlockKind};
+
+pub mod crdt;
+pub use crdt::{Author, BlockDoc, BlockId, BlockOp, Edit};
