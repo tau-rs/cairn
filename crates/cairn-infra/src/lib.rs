@@ -1,5 +1,6 @@
 //! Adapters implementing Cairn ports against real systems.
 
+mod collab;
 pub mod git;
 pub mod index;
 pub mod localfs;
@@ -11,6 +12,7 @@ pub mod seams;
 mod tantivy_index;
 pub mod tau;
 
+pub use collab::LocalCrdt;
 pub use git::GitVcs;
 pub use index::InMemoryIndex;
 pub use localfs::{ensure_cairn_dir, LocalFsStore};
