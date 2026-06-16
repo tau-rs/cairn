@@ -25,6 +25,17 @@ struct QueryArgs {
 }
 
 fn main() {
+    // Test fixture: `--init-delay-ms=<N>` sleeps before the stdio loop starts, so
+    // the host's one-time `initialize` handshake is delayed by ~N ms. Used to
+    // prove the startup handshake is bounded by its own generous deadline, not by
+    // the (possibly tiny) per-message invoke timeout.
+    if let Some(ms) = std::env::args().find_map(|a| {
+        a.strip_prefix("--init-delay-ms=")
+            .and_then(|n| n.parse::<u64>().ok())
+    }) {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+
     let mut plugin = Plugin::new("example", env!("CARGO_PKG_VERSION"));
 
     plugin.command("echo", "Echo", |args: Value, _host: &mut Host| Ok(args));

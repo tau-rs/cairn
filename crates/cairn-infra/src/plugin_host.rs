@@ -45,6 +45,16 @@ fn adapt<E: std::error::Error + Send + Sync + 'static>(e: E) -> PortError {
 /// is treated as hung and killed.
 pub const DEFAULT_PLUGIN_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Floor for the one-time `initialize` handshake during load. The per-message
+/// `timeout` governs steady-state invokes — a hung invoke must fail fast, so
+/// callers may set it small (tests use 2s). But a cold plugin's first handshake
+/// (process start + sandbox setup + interpreter warm-up) can be far slower under
+/// machine load; binding it to that small per-message timeout spuriously drops
+/// trusted plugins at load. The handshake therefore reads its reply under
+/// `max(timeout, STARTUP_HANDSHAKE_FLOOR)`; once it completes, the per-message
+/// timeout is restored for invokes and events.
+pub const STARTUP_HANDSHAKE_FLOOR: Duration = Duration::from_secs(10);
+
 /// The capability a host-callback method requires, or `None` if the method is
 /// unknown to the host.
 fn required_cap(method: &str) -> Option<&'static str> {
@@ -586,7 +596,10 @@ impl ProcessPluginHost {
             stdin,
             rx,
             reader: Some(reader),
-            timeout,
+            // The one-time `initialize` handshake below reads under a generous
+            // floor (see `STARTUP_HANDSHAKE_FLOOR`); the caller's per-message
+            // `timeout` is restored once it completes.
+            timeout: timeout.max(STARTUP_HANDSHAKE_FLOOR),
             info: PluginInfo {
                 id: manifest.id.clone(),
                 name: manifest.name.clone(),
@@ -611,6 +624,9 @@ impl ProcessPluginHost {
         plugin.info.name = init.name;
         plugin.info.version = init.version;
         plugin.info.contributions = init.contributions;
+        // Handshake done: revert to the caller's per-message timeout so steady-state
+        // invokes/events fail fast on a hung plugin (e.g. the `hang` fixture).
+        plugin.timeout = timeout;
         Ok(plugin)
     }
 }
