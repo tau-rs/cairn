@@ -123,6 +123,35 @@ pub fn parse_blocks(src: &str) -> Vec<Block> {
     blocks
 }
 
+/// Join block source texts into canonical markdown: one blank line between
+/// blocks, a single trailing newline, no leading/trailing blank lines. Adjacent
+/// list-item blocks are separated by a single newline (not a blank line), since
+/// `parse_blocks` splits one list into per-item blocks and a blank line between
+/// them would reflow the list. This is the normalization the round-trip
+/// property is defined against.
+#[must_use]
+pub fn join_blocks(texts: &[String]) -> String {
+    if texts.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    for (i, text) in texts.iter().enumerate() {
+        if i > 0 {
+            // Consecutive list items belong to one list: single newline, no
+            // blank line. Every other boundary gets a blank line.
+            let glue = if is_list_item(&texts[i - 1]) && is_list_item(text) {
+                "\n"
+            } else {
+                "\n\n"
+            };
+            out.push_str(glue);
+        }
+        out.push_str(text);
+    }
+    out.push('\n');
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,5 +195,19 @@ mod tests {
         let b = parse_blocks("# Title\n\n---");
         assert_eq!(b[0].kind, BlockKind::Heading);
         assert_eq!(b[1].kind, BlockKind::ThematicBreak);
+    }
+
+    #[test]
+    fn join_separates_with_one_blank_line_and_trailing_newline() {
+        let joined = join_blocks(&["# Title".into(), "Body para.".into()]);
+        assert_eq!(joined, "# Title\n\nBody para.\n");
+    }
+
+    #[test]
+    fn round_trip_normalized_markdown_is_identity() {
+        let src = "# Title\n\nFirst para.\n\n- a\n- b\n";
+        let blocks = parse_blocks(src);
+        let texts: Vec<String> = blocks.iter().map(|b| b.text.clone()).collect();
+        assert_eq!(join_blocks(&texts), src);
     }
 }
