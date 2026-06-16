@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use cairn_domain::{Note, NotePath};
+use cairn_domain::{BlockOp, Edit, Note, NotePath};
 
 /// Errors any port may surface to the application.
 #[derive(Debug, thiserror::Error)]
@@ -255,10 +255,25 @@ pub trait Executor {
     fn run(&self, job: Box<dyn FnOnce() + Send>);
 }
 
-/// Live collaboration session. Seam: `NoCollab`.
+/// A live, transport-blind collaboration seam over a note. Default adapter
+/// `NoCollab` is inert; `LocalCrdt` wraps an in-memory block CRDT. Transport
+/// (relay / daemon `/events`) is a later slice behind this same port.
 pub trait CollabSession {
-    /// Whether a live session is active. Always false in the skeleton.
+    /// Whether a live session is active.
     fn is_active(&self) -> bool;
+
+    /// Open (or replace) the live document for `path`, seeded from `markdown`.
+    fn open(&mut self, path: &NotePath, markdown: &str);
+
+    /// Apply a local edit to the open document, returning ops to broadcast.
+    fn edit(&mut self, path: &NotePath, edit: Edit) -> Vec<BlockOp>;
+
+    /// Merge a remote op into the open document for `path`.
+    fn merge_remote(&mut self, path: &NotePath, op: BlockOp);
+
+    /// Materialize the open document for `path` to canonical markdown, or
+    /// `None` if no document is open.
+    fn materialize(&self, path: &NotePath) -> Option<String>;
 }
 
 /// One increment of an agent run, in cairn's own vocabulary — deliberately not

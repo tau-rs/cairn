@@ -33,6 +33,18 @@ impl CollabSession for NoCollab {
     fn is_active(&self) -> bool {
         false
     }
+    fn open(&mut self, _path: &cairn_domain::NotePath, _markdown: &str) {}
+    fn edit(
+        &mut self,
+        _path: &cairn_domain::NotePath,
+        _edit: cairn_domain::Edit,
+    ) -> Vec<cairn_domain::BlockOp> {
+        Vec::new()
+    }
+    fn merge_remote(&mut self, _path: &cairn_domain::NotePath, _op: cairn_domain::BlockOp) {}
+    fn materialize(&self, _path: &cairn_domain::NotePath) -> Option<String> {
+        None
+    }
 }
 
 /// Null agent runtime seam.
@@ -54,6 +66,24 @@ mod tests {
     #[test]
     fn seams_have_expected_neutral_behavior() {
         assert!(!NoCollab.is_active());
+        // Expanded CollabSession: NoCollab is inert — no docs, no ops.
+        let mut nc = NoCollab;
+        let path = cairn_domain::NotePath::new("a.md").unwrap();
+        nc.open(&path, "hello\n");
+        assert!(nc.materialize(&path).is_none());
+        assert!(nc
+            .edit(
+                &path,
+                cairn_domain::Edit::UpdateText {
+                    id: cairn_domain::BlockId {
+                        replica: 0,
+                        counter: 0
+                    },
+                    text: "x".into(),
+                    author: cairn_domain::Author::Human,
+                },
+            )
+            .is_empty());
         // Times out (not Disconnected): the parked sender keeps the channel
         // open, so the no-op watcher never yields and never disconnects.
         let handle = NoopWatcher.watch(std::path::Path::new(".")).unwrap();
