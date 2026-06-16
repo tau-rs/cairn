@@ -11,5 +11,6 @@ pub mod graph;
 pub use graph::Graph;
 
 pub mod block;
+pub use block::{Block, BlockKind};
 
 pub mod crdt;
