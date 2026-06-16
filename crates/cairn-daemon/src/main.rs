@@ -139,8 +139,8 @@ async fn run() -> Result<(), String> {
     let runtime: Arc<dyn cairn_ports::AgentRuntime + Send + Sync> =
         match cairn_infra::TauConfig::from_env() {
             Some(cfg) => {
-                tracing::info!("ask: tau runtime enabled");
-                Arc::new(cairn_infra::TauServeRuntime::new(cfg))
+                tracing::info!("ask: tau sidecar enabled (supervised, long-lived)");
+                Arc::new(cairn_infra::TauSidecar::new(cfg))
             }
             None => {
                 tracing::info!("ask: no TAU_BIN; /ask returns a configuration error");

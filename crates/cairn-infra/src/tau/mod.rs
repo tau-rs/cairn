@@ -11,3 +11,4 @@ pub mod wire;
 
 pub use config::TauConfig;
 pub use runtime::TauServeRuntime;
+pub use supervisor::TauSidecar;
