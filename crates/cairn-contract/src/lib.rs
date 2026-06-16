@@ -224,6 +224,8 @@ pub enum PluginSlot {
     TopbarAction,
     #[serde(rename = "command")]
     Command,
+    #[serde(rename = "panel.main")]
+    PanelMain,
 }
 
 /// A capability a Tier-3 (sandboxed-iframe) plugin may request.
@@ -278,7 +280,7 @@ pub enum PluginWidget {
         items: Vec<PluginListItem>,
     },
     Iframe {
-        html: String,
+        entry: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         height: Option<u32>,
     },
@@ -317,6 +319,9 @@ pub struct PluginSummary {
     /// Capabilities a Tier-3 plugin requests. None for plugins that declare none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<Vec<PluginCapability>>,
+    /// Root directory of the plugin's UI bundle (None if it declares no UI).
+    #[serde(default, rename = "uiRoot", skip_serializing_if = "Option::is_none")]
+    pub ui_root: Option<String>,
 }
 
 /// A command a plugin handles.
@@ -577,6 +582,7 @@ mod tests {
                 }],
                 contributions: vec![],
                 capabilities: None,
+                ui_root: None,
             }],
         };
         let j = serde_json::to_string(&resp).unwrap();
@@ -614,12 +620,16 @@ mod tests {
             PluginSlot::SidebarSection,
             PluginSlot::TopbarAction,
             PluginSlot::Command,
+            PluginSlot::PanelMain,
         ];
         let slot_strs: Vec<String> = slots
             .iter()
             .map(|s| to_value(s).unwrap().as_str().unwrap().to_string())
             .collect();
-        assert_eq!(slot_strs, ["sidebar.section", "topbar.action", "command"]);
+        assert_eq!(
+            slot_strs,
+            ["sidebar.section", "topbar.action", "command", "panel.main"]
+        );
 
         let icons = [
             PluginIcon::Tag,
@@ -684,17 +694,19 @@ mod tests {
             ]
         );
 
-        // The Iframe widget kind serializes to "iframe".
+        // The Iframe widget kind serializes to "iframe" with a relative bundle
+        // `entry` path (not inline HTML).
         let iframe_kind = to_value(PluginWidget::Iframe {
-            html: "<p>x</p>".into(),
+            entry: "index.html".into(),
             height: None,
         })
         .unwrap();
         assert_eq!(iframe_kind["kind"].as_str().unwrap(), "iframe");
+        assert_eq!(iframe_kind["entry"].as_str().unwrap(), "index.html");
 
         // A present height serializes as a bare number (not stringified/wrapped).
         let iframe_sized = to_value(PluginWidget::Iframe {
-            html: "<p>x</p>".into(),
+            entry: "index.html".into(),
             height: Some(240),
         })
         .unwrap();
@@ -703,10 +715,11 @@ mod tests {
 
     #[test]
     fn plugin_summary_capabilities_round_trip() {
-        // Tier-2 payloads (no `capabilities` key) must still deserialize.
+        // Tier-2 payloads (no `capabilities` / `uiRoot` keys) must still deserialize.
         let legacy = r#"{"id":"p","name":"P","version":"1","commands":[],"contributions":[]}"#;
         let s: PluginSummary = serde_json::from_str(legacy).unwrap();
         assert_eq!(s.capabilities, None);
+        assert_eq!(s.ui_root, None);
 
         // Round-trip with capabilities present.
         let s2 = PluginSummary {
@@ -716,10 +729,31 @@ mod tests {
             commands: vec![],
             contributions: vec![],
             capabilities: Some(vec![PluginCapability::NotesRead]),
+            ui_root: None,
         };
         let j = serde_json::to_string(&s2).unwrap();
         assert!(j.contains("\"capabilities\":[\"notes.read\"]"));
+        // `ui_root: None` must not emit a `uiRoot` key.
+        assert!(!j.contains("uiRoot"));
         assert_eq!(serde_json::from_str::<PluginSummary>(&j).unwrap(), s2);
+    }
+
+    #[test]
+    fn plugin_summary_ui_root_round_trip() {
+        // `ui_root` serializes under the `uiRoot` serde rename (not `ui_root`).
+        let s = PluginSummary {
+            id: "p".into(),
+            name: "P".into(),
+            version: "1".into(),
+            commands: vec![],
+            contributions: vec![],
+            capabilities: None,
+            ui_root: Some("ui".into()),
+        };
+        let j = serde_json::to_string(&s).unwrap();
+        assert!(j.contains("\"uiRoot\":\"ui\""));
+        assert!(!j.contains("ui_root"));
+        assert_eq!(serde_json::from_str::<PluginSummary>(&j).unwrap(), s);
     }
 }
 
