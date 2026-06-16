@@ -208,6 +208,14 @@ pub trait Vcs {
     /// [`PortError::NotFound`] if the path doesn't exist at that revision;
     /// [`PortError::Adapter`] on a git failure (e.g. an unknown revision).
     fn show(&self, path: &str, revision: &str) -> Result<String, PortError>;
+
+    /// Whether the working tree has uncommitted changes (tracked modifications,
+    /// deletions, or new untracked files), ignoring git-ignored paths. Used to
+    /// skip an empty auto-commit when there is nothing to commit.
+    ///
+    /// # Errors
+    /// [`PortError::Adapter`] on a git failure.
+    fn is_dirty(&self) -> Result<bool, PortError>;
 }
 
 /// A change to a note detected on disk.

@@ -371,6 +371,14 @@ impl Engine {
         self.store.read(path)
     }
 
+    /// Whether the note currently exists on disk (a cheap `stat`, no read).
+    /// Used by the daemon's confirm-before-delete: a watcher `Removed` fired
+    /// mid-write may be a transient gap, so the daemon re-checks before deleting.
+    #[must_use]
+    pub fn exists_on_disk(&self, path: &NotePath) -> bool {
+        self.store.stamp(path).is_ok()
+    }
+
     /// Delete a note; emits via the memo diff (see [`Engine::apply_change`]).
     ///
     /// # Errors
@@ -496,6 +504,15 @@ impl Engine {
         let id = self.vcs.commit_all(message)?;
         sink.emit(Event::Committed(id.clone()));
         Ok(id)
+    }
+
+    /// Whether the working tree has uncommitted changes. The daemon's auto-commit
+    /// of external edits checks this to avoid creating an empty commit.
+    ///
+    /// # Errors
+    /// Returns [`PortError`] if the VCS adapter fails.
+    pub fn has_uncommitted_changes(&self) -> Result<bool, PortError> {
+        self.vcs.is_dirty()
     }
 
     /// A note's commit history (newest first).
@@ -866,6 +883,33 @@ mod tests {
             InMemoryIndex::default(),
             GitVcs::open_or_init(dir).unwrap(),
         )
+    }
+
+    #[test]
+    fn has_uncommitted_changes_reflects_working_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut events = Vec::new();
+        assert!(!eng.has_uncommitted_changes().unwrap(), "fresh repo clean");
+        eng.write_note(&NotePath::new("a.md").unwrap(), "hi", &mut events)
+            .unwrap();
+        assert!(eng.has_uncommitted_changes().unwrap(), "dirty after write");
+        eng.commit("add a", &mut events).unwrap();
+        assert!(
+            !eng.has_uncommitted_changes().unwrap(),
+            "clean after commit"
+        );
+    }
+
+    #[test]
+    fn exists_on_disk_reflects_the_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut events = Vec::new();
+        let a = NotePath::new("a.md").unwrap();
+        assert!(!eng.exists_on_disk(&a), "absent before any write");
+        eng.write_note(&a, "hi", &mut events).unwrap();
+        assert!(eng.exists_on_disk(&a), "present after write");
     }
 
     #[test]
