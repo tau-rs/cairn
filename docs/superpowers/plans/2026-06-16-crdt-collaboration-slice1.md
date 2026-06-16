@@ -13,7 +13,7 @@
 
 **Scope notes (decisions locked here, consistent with spec §9 open questions):**
 - Slice 1 ops are **`Insert`, `Delete`, `SetContent`**. Reordering a block = `Delete` + `Insert` (new id). A native `Move` op is **deferred** (spec open question #4).
-- Same-block content LWW uses a deterministic total order **(author-rank, lamport, replica)** — any `Human` edit beats any `Agent` edit; the loser's text is stashed. This is the strong, deterministic form of "human-wins"; true concurrency-aware policy (vector clocks) is deferred. The convergence proof only needs *a* deterministic total order; this is one.
+- Same-block content LWW uses a deterministic total order **(author-rank, lamport)** with the block **text** as the final tiebreak (greater text wins on a true `(author-rank, lamport)` tie) — any `Human` edit beats any `Agent` edit; the loser's text is stashed. (The original draft tiebroke on `replica`, but the op only carried the block's birth replica, which is constant per block and therefore inert — same-author/same-Lamport edits diverged. The text tiebreak is the fix and keeps the order total.) True concurrency-aware policy (vector clocks) is deferred. The convergence proof only needs *a* deterministic total order; this is one.
 - Round-trip normalization is **defined**: blocks joined by exactly one blank line (`\n\n`), no leading/trailing blank lines, single trailing newline. The round-trip property test generates normalized markdown.
 
 ---

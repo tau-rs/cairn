@@ -273,10 +273,16 @@ impl BlockDoc {
 
 - **Block ordering:** an RGA / fractional-index sequence CRDT keyed by
   `BlockId`. Insert/delete/move are commutative and idempotent.
-- **Block content:** a Lamport-timestamped LWW register. Ties broken
-  deterministically by `(Lamport, ReplicaId)`. `Author` carries the policy:
-  on a tie/conflict, `Human` wins over `Agent`; the loser's text is retained in
-  a stash list on the block.
+- **Block content:** a Lamport-timestamped LWW register with a deterministic
+  **total** order `(author_rank, lamport)`, the block **text** breaking a true
+  `(author_rank, lamport)` tie (greater text wins). `author_rank` makes `Human`
+  beat `Agent`; among equal rank the higher Lamport wins; the text tiebreak
+  guarantees convergence even when two concurrent edits collide on author and
+  Lamport. The loser's text is retained in a stash list on the block, never
+  dropped. (An earlier draft tiebroke on `ReplicaId`, but the op carried only
+  the block's *birth* replica — constant across a block's content edits — so it
+  was inert and same-author/same-Lamport edits could diverge; the text tiebreak
+  replaces it.)
 - **Convergence guarantee:** for any set of ops applied to any number of
   replicas in any order, with arbitrary duplication, all replicas
   `materialize()` to identical markdown.
