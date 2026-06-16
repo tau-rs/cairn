@@ -155,6 +155,69 @@ impl BlockDoc {
         walk(None, &children, &mut texts);
         join_blocks(&texts)
     }
+
+    /// Merge a replicated op. Commutative and idempotent.
+    pub fn merge(&mut self, op: BlockOp) {
+        match op {
+            BlockOp::Insert { id, after, lamport, kind, text } => {
+                self.clock = self.clock.max(lamport);
+                self.entries.entry(id).or_insert(Entry {
+                    id,
+                    after,
+                    ins_lamport: lamport,
+                    kind,
+                    text,
+                    content_lamport: lamport,
+                    content_author: Author::Human,
+                    content_replica: id.replica,
+                    tombstone: false,
+                    stash: Vec::new(),
+                });
+            }
+            BlockOp::Delete { id, lamport } => {
+                self.clock = self.clock.max(lamport);
+                if let Some(e) = self.entries.get_mut(&id) {
+                    e.tombstone = true;
+                }
+            }
+            BlockOp::SetContent { .. } => {
+                self.merge_set_content(op);
+            }
+        }
+    }
+
+    /// Live (non-tombstoned) block IDs in materialized order. Test/lookup aid.
+    #[must_use]
+    pub fn block_ids_in_order(&self) -> Vec<BlockId> {
+        let mut children: HashMap<Option<BlockId>, Vec<&Entry>> = HashMap::new();
+        for e in self.entries.values() {
+            children.entry(e.after).or_default().push(e);
+        }
+        for v in children.values_mut() {
+            v.sort_by(|a, b| b.ins_lamport.cmp(&a.ins_lamport).then_with(|| b.id.cmp(&a.id)));
+        }
+        let mut out = Vec::new();
+        fn walk(
+            anchor: Option<BlockId>,
+            children: &HashMap<Option<BlockId>, Vec<&Entry>>,
+            out: &mut Vec<BlockId>,
+        ) {
+            if let Some(kids) = children.get(&anchor) {
+                for e in kids {
+                    if !e.tombstone {
+                        out.push(e.id);
+                    }
+                    walk(Some(e.id), children, out);
+                }
+            }
+        }
+        walk(None, &children, &mut out);
+        out
+    }
+
+    fn merge_set_content(&mut self, _op: BlockOp) {
+        // Filled in Task 7.
+    }
 }
 
 /// Pre-order DFS over the RGA tree, emitting live block texts.
@@ -201,5 +264,30 @@ mod tests {
     fn empty_markdown_materializes_empty() {
         let doc = BlockDoc::from_markdown(1, "");
         assert_eq!(doc.materialize(), "");
+    }
+
+    #[test]
+    fn merge_insert_is_idempotent() {
+        let mut doc = BlockDoc::from_markdown(1, "a\n");
+        let op = BlockOp::Insert {
+            id: BlockId { replica: 2, counter: 0 },
+            after: None,
+            lamport: 5,
+            kind: BlockKind::Paragraph,
+            text: "z".into(),
+        };
+        doc.merge(op.clone());
+        let once = doc.materialize();
+        doc.merge(op); // applying twice changes nothing
+        assert_eq!(doc.materialize(), once);
+    }
+
+    #[test]
+    fn merge_delete_tombstones_block() {
+        let mut doc = BlockDoc::from_markdown(1, "keep\n\ndrop\n");
+        // Find the id of the second block ("drop").
+        let drop_id = doc.block_ids_in_order()[1];
+        doc.merge(BlockOp::Delete { id: drop_id, lamport: 9 });
+        assert_eq!(doc.materialize(), "keep\n");
     }
 }
