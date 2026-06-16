@@ -2,7 +2,7 @@
 //! an author-priority LWW register. Block IDs are live-only and never reach
 //! disk. See docs/decisions/0011-crdt-collaboration-model.md.
 
-use crate::block::BlockKind;
+use crate::block::{join_blocks, BlockKind};
 use std::collections::HashMap;
 
 /// Lamport timestamp.
@@ -97,6 +97,82 @@ pub struct BlockDoc {
     entries: HashMap<BlockId, Entry>,
 }
 
+impl BlockDoc {
+    /// Seed a fresh document from a note's markdown. Assigns fresh, live-only
+    /// block IDs in document order (a simple RGA chain).
+    #[must_use]
+    pub fn from_markdown(replica: u64, src: &str) -> Self {
+        let mut doc = Self {
+            replica,
+            counter: 0,
+            clock: 0,
+            entries: HashMap::new(),
+        };
+        let mut prev: Option<BlockId> = None;
+        for block in crate::block::parse_blocks(src) {
+            doc.clock += 1;
+            let id = BlockId { replica, counter: doc.counter };
+            doc.counter += 1;
+            doc.entries.insert(
+                id,
+                Entry {
+                    id,
+                    after: prev,
+                    ins_lamport: doc.clock,
+                    kind: block.kind,
+                    text: block.text,
+                    content_lamport: doc.clock,
+                    content_author: Author::Human,
+                    content_replica: replica,
+                    tombstone: false,
+                    stash: Vec::new(),
+                },
+            );
+            prev = Some(id);
+        }
+        doc
+    }
+
+    /// Project current state to canonical markdown. Block IDs are stripped;
+    /// the output is pure plain markdown.
+    #[must_use]
+    pub fn materialize(&self) -> String {
+        // children[anchor] = entries inserted directly after `anchor`.
+        let mut children: HashMap<Option<BlockId>, Vec<&Entry>> = HashMap::new();
+        for e in self.entries.values() {
+            children.entry(e.after).or_default().push(e);
+        }
+        // Deterministic sibling order: higher insertion lamport first, id as
+        // tiebreak. Total + independent of merge order ⇒ convergent.
+        for v in children.values_mut() {
+            v.sort_by(|a, b| {
+                b.ins_lamport
+                    .cmp(&a.ins_lamport)
+                    .then_with(|| b.id.cmp(&a.id))
+            });
+        }
+        let mut texts: Vec<String> = Vec::new();
+        walk(None, &children, &mut texts);
+        join_blocks(&texts)
+    }
+}
+
+/// Pre-order DFS over the RGA tree, emitting live block texts.
+fn walk(
+    anchor: Option<BlockId>,
+    children: &HashMap<Option<BlockId>, Vec<&Entry>>,
+    out: &mut Vec<String>,
+) {
+    if let Some(kids) = children.get(&anchor) {
+        for e in kids {
+            if !e.tombstone {
+                out.push(e.text.clone());
+            }
+            walk(Some(e.id), children, out);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,5 +188,18 @@ mod tests {
     #[test]
     fn author_human_outranks_agent() {
         assert!(author_rank(Author::Human) > author_rank(Author::Agent));
+    }
+
+    #[test]
+    fn from_markdown_then_materialize_round_trips() {
+        let src = "# Title\n\nFirst para.\n\n- a\n- b\n";
+        let doc = BlockDoc::from_markdown(1, src);
+        assert_eq!(doc.materialize(), src);
+    }
+
+    #[test]
+    fn empty_markdown_materializes_empty() {
+        let doc = BlockDoc::from_markdown(1, "");
+        assert_eq!(doc.materialize(), "");
     }
 }
