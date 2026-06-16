@@ -1,6 +1,6 @@
 # ADR-0012: External-edit sync hardening
 
-**Status:** Proposed (implementation lands in the sync-hardening PR following the MCP server)
+**Status:** Accepted
 **Date:** 2026-06-16
 
 ## Context
@@ -24,8 +24,9 @@ cairn's own `write_note`.
 
 The MCP/command path is unaffected — it is indexed, link-aware, and race-free
 under the engine lock. This ADR hardens the **best-effort native path** and draws
-the boundary explicitly. All recommended changes live at the daemon edge; no
-`Engine`/`Vcs`/`Watcher` port changes are required.
+the boundary explicitly. The policy lives at the daemon edge; the only port
+additions are two read-only probes (`Vcs::is_dirty`, `Engine::exists_on_disk`)
+that keep the engine pure and synchronous. The `Watcher` port is unchanged.
 
 ## Decision
 
@@ -38,7 +39,11 @@ caller-chosen transaction boundary; external edits have none, so a quiet-period
 coalesce is the only available signal. The policy lives at the daemon edge (clock/
 threads) via a `commit_external_blocking` on `AppState` calling the existing
 `Engine::commit`, driven by a testable `run_watch_loop_timeout` sibling in
-`cairn-service` (injected clock). Config: `[sync] auto_commit`, `quiet_period_ms`.
+`cairn-service`. Config: `[sync] auto_commit`, `quiet_period_ms`.
+
+`commit_external_blocking` first checks a new `Vcs::is_dirty` (via
+`Engine::has_uncommitted_changes`) and no-ops on a clean tree, so a spurious
+watcher event or an already-committed change never produces an empty commit.
 
 `GitVcs::commit_all` stages everything (`add_all(["*"])`), so an auto-commit
 sweeps any pending command-path edits too; accepted for v1 with a generic message.
@@ -46,10 +51,11 @@ A path-scoped commit (`Vcs::commit_paths`) is deferred.
 
 ### Gap 3 — confirm-before-delete (fix)
 
-Before deleting on a `Removed` (or a `Changed` the engine would treat as removal),
-the daemon re-stats the path after a short grace; if it now exists, it routes
-`Changed` instead. `apply_removal` is idempotent and the stat-guard skips no-ops,
-so the re-check is harmless. Partial *reads* that parse are not fixed — the
+Before honoring a `Removed`, the daemon waits a short grace and re-checks
+existence (`Engine::exists_on_disk` → `VaultStore::stamp`); if the file is back,
+it routes `Changed` instead. `apply_removal` is idempotent and the stat-guard
+skips no-ops, so the re-check is harmless. Grace is `[sync] confirm_grace_ms`
+(default 50). Partial *reads* that parse are not fixed — the
 content-hash memo plus the next event self-heal (retrying would be
 over-engineering).
 
