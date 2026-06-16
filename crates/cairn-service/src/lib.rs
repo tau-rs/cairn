@@ -22,6 +22,62 @@ pub fn run_watch_loop(handle: &WatchHandle, mut on_change: impl FnMut(&FsChange)
     }
 }
 
+/// Tracks whether external changes have been seen since the last commit, so a
+/// burst of changes coalesces into a single commit. Decision logic only — the
+/// timing lives in [`run_watch_loop_timeout`].
+#[derive(Debug, Default)]
+struct Coalescer {
+    dirty: bool,
+}
+
+impl Coalescer {
+    /// Record that an external change was applied.
+    fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    /// On a quiet tick: returns whether a commit is due (changes were seen since
+    /// the last commit), clearing the dirty flag.
+    fn take_if_dirty(&mut self) -> bool {
+        std::mem::take(&mut self.dirty)
+    }
+}
+
+/// Like [`run_watch_loop`], but coalesces bursts: after `quiet` elapses with no
+/// new change, `on_quiet` fires once (used to auto-commit externally-detected
+/// edits). `on_quiet` also fires on shutdown if changes are pending. Blocking —
+/// run on a dedicated thread.
+pub fn run_watch_loop_timeout(
+    handle: &WatchHandle,
+    quiet: std::time::Duration,
+    mut on_change: impl FnMut(&FsChange),
+    mut on_quiet: impl FnMut(),
+) {
+    use std::sync::mpsc::RecvTimeoutError;
+    let mut coalescer = Coalescer::default();
+    loop {
+        match handle.changes.recv_timeout(quiet) {
+            Ok(change) => {
+                on_change(&change);
+                coalescer.mark_dirty();
+            }
+            // A full `quiet` window passed with no new change: flush if pending.
+            Err(RecvTimeoutError::Timeout) => {
+                if coalescer.take_if_dirty() {
+                    on_quiet();
+                }
+            }
+            // Shutdown: flush any pending changes, then stop.
+            Err(RecvTimeoutError::Disconnected) => {
+                if coalescer.take_if_dirty() {
+                    on_quiet();
+                }
+                break;
+            }
+        }
+    }
+}
+
 /// Errors surfaced when dispatching a contract request.
 #[derive(Debug, thiserror::Error)]
 pub enum ServiceError {
@@ -786,6 +842,65 @@ mod tests {
                 FsChange::Removed(NotePath::new("b.md").unwrap()),
             ]
         );
+    }
+
+    #[test]
+    fn coalescer_fires_once_per_dirty_burst() {
+        let mut c = Coalescer::default();
+        assert!(!c.take_if_dirty(), "clean: nothing to commit");
+        c.mark_dirty();
+        c.mark_dirty();
+        assert!(c.take_if_dirty(), "a dirty burst commits once");
+        assert!(!c.take_if_dirty(), "already committed: clean again");
+    }
+
+    #[test]
+    fn timeout_loop_flushes_pending_changes_on_disconnect() {
+        use cairn_ports::{FsChange, WatchHandle};
+        use std::time::Duration;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = WatchHandle::new(rx, Box::new(()));
+        tx.send(FsChange::Changed(NotePath::new("a.md").unwrap()))
+            .unwrap();
+        tx.send(FsChange::Changed(NotePath::new("b.md").unwrap()))
+            .unwrap();
+        drop(tx); // disconnect → drain both, then flush once
+
+        let mut seen = Vec::new();
+        let mut quiets = 0;
+        run_watch_loop_timeout(
+            &handle,
+            Duration::from_millis(50),
+            |c| seen.push(c.clone()),
+            || quiets += 1,
+        );
+        assert_eq!(seen.len(), 2, "both changes applied");
+        assert_eq!(
+            quiets, 1,
+            "pending changes flushed exactly once on shutdown"
+        );
+    }
+
+    #[test]
+    fn timeout_loop_commits_after_quiet_period() {
+        use cairn_ports::{FsChange, WatchHandle};
+        use std::time::Duration;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = WatchHandle::new(rx, Box::new(()));
+        // One change, then a long pause before disconnect: the quiet timeout must
+        // fire a commit before the channel closes.
+        let sender = std::thread::spawn(move || {
+            tx.send(FsChange::Changed(NotePath::new("a.md").unwrap()))
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(250));
+            drop(tx);
+        });
+        let mut quiets = 0;
+        run_watch_loop_timeout(&handle, Duration::from_millis(60), |_| {}, || quiets += 1);
+        sender.join().unwrap();
+        // One commit from the quiet timeout; the disconnect flush finds nothing
+        // pending (already committed), so exactly one.
+        assert_eq!(quiets, 1, "quiet period triggers exactly one commit");
     }
 
     #[test]
