@@ -309,6 +309,7 @@ dependencies = [
  "cairn-contract",
  "cairn-domain",
  "cairn-infra",
+ "cairn-mcp",
  "cairn-ports",
  "cairn-service",
  "cairn-startup",
@@ -353,6 +354,15 @@ dependencies = [
  "tempfile",
  "toml",
  "tracing",
+]
+
+[[package]]
+name = "cairn-mcp"
+version = "0.0.0"
+dependencies = [
+ "cairn-contract",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
