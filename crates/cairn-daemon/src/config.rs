@@ -17,6 +17,48 @@ pub struct Config {
     /// Plugin host settings.
     #[serde(default)]
     pub plugins: PluginsConfig,
+    /// External-edit sync settings.
+    #[serde(default)]
+    pub sync: SyncConfig,
+}
+
+/// Settings for syncing externally-detected edits — files changed on disk
+/// outside cairn's own command path (e.g. by an agent's native filesystem
+/// tools). See ADR-0012.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncConfig {
+    /// Auto-commit externally-detected changes after a quiet period. Default
+    /// `false`: external edits re-index but stay uncommitted until an explicit
+    /// commit (cairn's own command writes are unaffected either way).
+    #[serde(default)]
+    pub auto_commit: bool,
+    /// Quiet period (ms) with no further external change before an auto-commit
+    /// fires, coalescing a burst into one commit. Default 2000.
+    #[serde(default = "default_quiet_period_ms")]
+    pub quiet_period_ms: u64,
+    /// Grace (ms) to wait and re-check before honoring a watcher `Removed`,
+    /// absorbing the transient gap of a non-atomic / tmp-rename write. Default 50.
+    #[serde(default = "default_confirm_grace_ms")]
+    pub confirm_grace_ms: u64,
+}
+
+impl Default for SyncConfig {
+    fn default() -> Self {
+        Self {
+            auto_commit: false,
+            quiet_period_ms: default_quiet_period_ms(),
+            confirm_grace_ms: default_confirm_grace_ms(),
+        }
+    }
+}
+
+fn default_quiet_period_ms() -> u64 {
+    2000
+}
+
+fn default_confirm_grace_ms() -> u64 {
+    50
 }
 
 /// Plugin host settings.
@@ -132,6 +174,27 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sync_defaults_and_overrides() {
+        let c: Config = toml::from_str("").unwrap();
+        assert!(!c.sync.auto_commit, "auto-commit off by default");
+        assert_eq!(c.sync.quiet_period_ms, 2000);
+        assert_eq!(c.sync.confirm_grace_ms, 50);
+
+        let c: Config = toml::from_str(
+            "[sync]\nauto_commit = true\nquiet_period_ms = 500\nconfirm_grace_ms = 10",
+        )
+        .unwrap();
+        assert!(c.sync.auto_commit);
+        assert_eq!(c.sync.quiet_period_ms, 500);
+        assert_eq!(c.sync.confirm_grace_ms, 10);
+    }
+
+    #[test]
+    fn sync_rejects_unknown_key() {
+        assert!(toml::from_str::<Config>("[sync]\nauto_comit = true").is_err());
+    }
 
     #[test]
     fn parses_cors_origins() {

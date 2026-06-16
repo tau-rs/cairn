@@ -170,12 +170,33 @@ async fn run() -> Result<(), String> {
     if !cli.no_watch {
         match NotifyWatcher.watch(&cli.cairn) {
             Ok(handle) => {
-                let watch_state = state.clone();
-                tokio::task::spawn_blocking(move || {
-                    cairn_service::run_watch_loop(&handle, |change| {
-                        watch_state.apply_change_blocking(change)
+                let grace = Duration::from_millis(config.sync.confirm_grace_ms);
+                if config.sync.auto_commit {
+                    let quiet = Duration::from_millis(config.sync.quiet_period_ms);
+                    tracing::info!(
+                        "sync: auto-committing external edits after {}ms quiet",
+                        config.sync.quiet_period_ms
+                    );
+                    let ws_change = state.clone();
+                    let ws_commit = state.clone();
+                    tokio::task::spawn_blocking(move || {
+                        cairn_service::run_watch_loop_timeout(
+                            &handle,
+                            quiet,
+                            move |change| ws_change.apply_change_confirmed_blocking(change, grace),
+                            move || {
+                                ws_commit.commit_external_blocking("cairn: sync external edits")
+                            },
+                        );
                     });
-                });
+                } else {
+                    let watch_state = state.clone();
+                    tokio::task::spawn_blocking(move || {
+                        cairn_service::run_watch_loop(&handle, |change| {
+                            watch_state.apply_change_confirmed_blocking(change, grace)
+                        });
+                    });
+                }
                 tracing::info!("watching {} for changes", cli.cairn.display());
             }
             Err(e) => tracing::warn!("file watcher disabled: {e}"),

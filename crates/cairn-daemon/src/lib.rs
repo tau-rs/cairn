@@ -226,6 +226,51 @@ impl AppState {
             guard.dispatch_plugin_event(&pe, &mut fwd);
         }
     }
+
+    /// Apply a watcher change, but for a `Removed` first wait `grace` and re-stat:
+    /// a non-atomic or tmp-rename write can make the watcher see the file
+    /// momentarily gone, and applying that `Removed` would spuriously — possibly
+    /// terminally — delete the note. If the file is back after the grace, the
+    /// change is re-routed as `Changed` (re-index) instead of a delete. A
+    /// `Changed` is applied directly (the engine re-stats and a partial read
+    /// self-heals via the memo on the next event).
+    pub fn apply_change_confirmed_blocking(
+        &self,
+        change: &cairn_ports::FsChange,
+        grace: std::time::Duration,
+    ) {
+        if let cairn_ports::FsChange::Removed(path) = change {
+            std::thread::sleep(grace);
+            if self.engine().exists_on_disk(path) {
+                self.apply_change_blocking(&cairn_ports::FsChange::Changed(path.clone()));
+                return;
+            }
+        }
+        self.apply_change_blocking(change);
+    }
+
+    /// Commit externally-detected edits, coalesced by the watch loop's quiet
+    /// period. No-ops when the working tree is clean (avoids an empty commit when
+    /// the changes were already committed, or the watcher event was spurious).
+    /// Best-effort: a failure is logged, not propagated.
+    pub fn commit_external_blocking(&self, message: &str) {
+        let mut guard = self.engine();
+        match guard.has_uncommitted_changes() {
+            Ok(false) => return,
+            Ok(true) => {}
+            Err(e) => {
+                tracing::warn!("watch: auto-commit dirty-check failed: {e}");
+                return;
+            }
+        }
+        let mut tap = EventTap {
+            tx: self.events.clone(),
+            collected: Vec::new(),
+        };
+        if let Err(e) = guard.commit(message, &mut tap) {
+            tracing::warn!("watch: auto-commit failed: {e}");
+        }
+    }
 }
 
 fn status_for(err: &ServiceError) -> StatusCode {

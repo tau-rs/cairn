@@ -91,6 +91,14 @@ impl Vcs for GitVcs {
         Ok(oid.to_string()[..7].to_string())
     }
 
+    fn is_dirty(&self) -> Result<bool, PortError> {
+        let repo = Repository::open(&self.root).map_err(adapt)?;
+        let mut opts = git2::StatusOptions::new();
+        opts.include_ignored(false).include_untracked(true);
+        let statuses = repo.statuses(Some(&mut opts)).map_err(adapt)?;
+        Ok(!statuses.is_empty())
+    }
+
     fn history(&self, path: &str) -> Result<Vec<Revision>, PortError> {
         let repo = Repository::open(&self.root).map_err(adapt)?;
         let mut walk = repo.revwalk().map_err(adapt)?;
@@ -155,6 +163,19 @@ mod tests {
         let repo = Repository::open(tmp.path()).unwrap();
         let tree = repo.head().unwrap().peel_to_tree().unwrap();
         assert_eq!(tree.len(), 0);
+    }
+
+    #[test]
+    fn is_dirty_tracks_uncommitted_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut vcs = GitVcs::open_or_init(tmp.path()).unwrap();
+        assert!(!vcs.is_dirty().unwrap(), "fresh repo is clean");
+        fs::write(tmp.path().join("a.md"), "v1").unwrap();
+        assert!(vcs.is_dirty().unwrap(), "untracked file is dirty");
+        vcs.commit_all("add a").unwrap();
+        assert!(!vcs.is_dirty().unwrap(), "clean after commit");
+        fs::write(tmp.path().join("a.md"), "v2").unwrap();
+        assert!(vcs.is_dirty().unwrap(), "modified tracked file is dirty");
     }
 
     #[test]
