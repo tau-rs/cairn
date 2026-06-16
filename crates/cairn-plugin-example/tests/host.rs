@@ -25,12 +25,18 @@ impl Sandbox for PermissiveSandbox {
 }
 
 fn write_manifest(pdir: &std::path::Path, bin: &str, caps: &str) {
+    write_manifest_with_args(pdir, bin, caps, "");
+}
+
+/// Like `write_manifest` but also sets the engine `args` (TOML array body, e.g.
+/// `"\"--init-delay-ms=1500\""`), passed verbatim to the spawned binary's argv.
+fn write_manifest_with_args(pdir: &std::path::Path, bin: &str, caps: &str, args: &str) {
     std::fs::create_dir_all(pdir).unwrap();
     std::fs::write(
         pdir.join("manifest.toml"),
         format!(
             "id=\"example\"\nname=\"Example\"\nversion=\"0.1.0\"\n\
-             [engine]\ncommand='{bin}'\ncapabilities=[{caps}]\n"
+             [engine]\ncommand='{bin}'\nargs=[{args}]\ncapabilities=[{caps}]\n"
         ),
     )
     .unwrap();
@@ -423,6 +429,15 @@ fn invoke_times_out_and_kills_plugin() {
     let pdir = tmp.path().join(".cairn").join("plugins").join("example");
     write_manifest(&pdir, bin, ""); // no caps needed; `hang` makes no callbacks
     let mut host = load_example_with_timeout(tmp.path(), Duration::from_millis(2_000));
+    // Guard against a misleading NotFound: if the load-time handshake had been
+    // silently dropped, the asserts below would see NotFound rather than the
+    // intended invoke-timeout Adapter error. Surface that as a clear failure.
+    let ids: Vec<String> = host.plugins().into_iter().map(|p| p.id).collect();
+    assert_eq!(
+        ids,
+        vec!["example".to_string()],
+        "plugin must load before we can test invoke timeout"
+    );
     let mut cb = MapCallbacks(HashMap::new());
 
     let start = Instant::now();
@@ -449,6 +464,44 @@ fn invoke_times_out_and_kills_plugin() {
     assert!(
         matches!(err2, PortError::Adapter(_)),
         "expected Adapter, got {err2:?}"
+    );
+}
+
+#[test]
+fn slow_handshake_plugin_still_loads_under_short_invoke_timeout() {
+    use std::time::{Duration, Instant};
+    let bin = env!("CARGO_BIN_EXE_cairn-plugin-example");
+    let tmp = tempfile::tempdir().unwrap();
+    let pdir = tmp.path().join(".cairn").join("plugins").join("example");
+    // The one-time `initialize` handshake stalls ~1.5s — far longer than the
+    // 300ms per-message invoke timeout below. The handshake must use the generous
+    // startup deadline, not the per-message timeout; otherwise the plugin is
+    // silently dropped at load and later invokes spuriously return NotFound.
+    write_manifest_with_args(&pdir, bin, "", "\"--init-delay-ms=1500\"");
+    let mut host = load_example_with_timeout(tmp.path(), Duration::from_millis(300));
+
+    // A slow handshake must NOT drop the trusted plugin.
+    let ids: Vec<String> = host.plugins().into_iter().map(|p| p.id).collect();
+    assert_eq!(
+        ids,
+        vec!["example".to_string()],
+        "slow handshake should not drop the plugin"
+    );
+
+    // Steady-state per-message timeout is still in force after load: `hang`
+    // (never responds) must time out at ~300ms, not the startup deadline.
+    let mut cb = MapCallbacks(HashMap::new());
+    let start = Instant::now();
+    let err = host
+        .invoke("example", "hang", &serde_json::Value::Null, &mut cb)
+        .unwrap_err();
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "invoke must honor the short per-message timeout, not the startup deadline"
+    );
+    assert!(
+        matches!(&err, PortError::Adapter(m) if m.to_string().contains("timed out")),
+        "expected a timeout Adapter, got {err:?}"
     );
 }
 
