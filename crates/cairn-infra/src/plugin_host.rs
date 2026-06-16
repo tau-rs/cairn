@@ -8,15 +8,16 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use serde::Deserialize;
+
 use crate::PinnedHash;
 use cairn_plugin_protocol::{
-    write_message, CairnEvent, CairnEventKind, CommandDecl, DeleteNoteParams, Incoming,
+    write_message, CairnEvent, CairnEventKind, Capability, CommandDecl, DeleteNoteParams, Incoming,
     InitializeParams, InitializeResult, InvokeParams, ListNotesResult, Manifest, NoteSummaryDto,
     ReadNoteParams, ReadNoteResult, Request, Response, RpcError, SearchHitDto, SearchParams,
-    SearchResultDto, WriteNoteParams, CALLBACK_DENIED, CALLBACK_FAILED, CAP_EVENTS, CAP_FS_READ,
-    CAP_FS_WRITE, CAP_NET, JSONRPC_VERSION, METHOD_CAIRN_EVENT, METHOD_DELETE_NOTE,
-    METHOD_INITIALIZE, METHOD_INVOKE, METHOD_LIST_NOTES, METHOD_READ_NOTE, METHOD_SEARCH,
-    METHOD_WRITE_NOTE,
+    SearchResultDto, WriteNoteParams, CALLBACK_DENIED, CALLBACK_FAILED, JSONRPC_VERSION,
+    METHOD_CAIRN_EVENT, METHOD_DELETE_NOTE, METHOD_INITIALIZE, METHOD_INVOKE, METHOD_LIST_NOTES,
+    METHOD_READ_NOTE, METHOD_SEARCH, METHOD_WRITE_NOTE,
 };
 use cairn_ports::{
     AdapterError, EventDispatchError, PluginCallbacks, PluginCommand, PluginEvent, PluginHost,
@@ -47,15 +48,64 @@ pub const DEFAULT_PLUGIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The capability a host-callback method requires, or `None` if the method is
 /// unknown to the host.
-fn required_cap(method: &str) -> Option<&'static str> {
+fn required_cap(method: &str) -> Option<Capability> {
     match method {
-        METHOD_READ_NOTE => Some(CAP_FS_READ),
-        METHOD_WRITE_NOTE => Some(CAP_FS_WRITE),
-        METHOD_DELETE_NOTE => Some(CAP_FS_WRITE),
-        METHOD_SEARCH => Some(CAP_FS_READ),
-        METHOD_LIST_NOTES => Some(CAP_FS_READ),
+        METHOD_READ_NOTE => Some(Capability::VaultRead),
+        METHOD_WRITE_NOTE => Some(Capability::VaultWrite),
+        METHOD_DELETE_NOTE => Some(Capability::VaultWrite),
+        METHOD_SEARCH => Some(Capability::VaultRead),
+        METHOD_LIST_NOTES => Some(Capability::VaultRead),
         _ => None,
     }
+}
+
+/// One entry in `[plugins].trusted`. Untagged so both the bare string form
+/// (`trusted = ["name"]`) and the table form (`[[plugins.trusted]] dir = …
+/// hash = …`) parse. A bare string and a table without `hash` both mean
+/// "trusted, unpinned".
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum TrustedEntry {
+    /// Trust by directory name, no pin.
+    Name(String),
+    /// Directory name plus an optional pinned content hash.
+    Pinned(PinnedEntry),
+}
+
+/// The table form of a [`TrustedEntry`]. `deny_unknown_fields` is essential:
+/// without it a typo'd `hsah = "…"` would silently drop the pin and the plugin
+/// would run unpinned. (The deny lives on this inner struct, not the untagged
+/// enum, where serde ignores it.)
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PinnedEntry {
+    dir: String,
+    #[serde(default)]
+    hash: Option<String>,
+}
+
+impl TrustedEntry {
+    /// Reduce to `(dir_name, optional_pin_string)` for [`TrustedPlugins`].
+    pub fn normalize(&self) -> (String, Option<String>) {
+        match self {
+            TrustedEntry::Name(dir) => (dir.clone(), None),
+            TrustedEntry::Pinned(p) => (p.dir.clone(), p.hash.clone()),
+        }
+    }
+}
+
+/// Minimal `cairn.toml` view: just enough to extract `[plugins].trusted`.
+/// Unknown sections/keys are ignored (no top-level `deny_unknown_fields`).
+#[derive(Debug, Default, Deserialize)]
+struct TrustedListConfig {
+    #[serde(default)]
+    plugins: TrustedListPlugins,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct TrustedListPlugins {
+    #[serde(default)]
+    trusted: Vec<TrustedEntry>,
 }
 
 /// The set of plugin **directory names** the user has explicitly trusted, each
@@ -100,6 +150,135 @@ impl TrustedPlugins {
     pub fn get(&self, dir_name: &str) -> Option<&Option<PinnedHash>> {
         self.0.get(dir_name)
     }
+
+    /// Build from `<cairn_root>/cairn.toml` `[plugins].trusted`. An absent file
+    /// or absent section yields [`Self::none`] (default-deny).
+    ///
+    /// # Errors
+    /// [`PortError::Adapter`] on an IO error, malformed TOML, or a malformed pin
+    /// (fail-fast: a typo'd pin must not degrade to "unpinned").
+    pub fn from_cairn_toml(cairn_root: &Path) -> Result<Self, PortError> {
+        let path = cairn_root.join("cairn.toml");
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::none()),
+            Err(e) => return Err(adapt(e)),
+        };
+        let cfg: TrustedListConfig = toml::from_str(&raw).map_err(adapt)?;
+        Self::from_entries(cfg.plugins.trusted.iter().map(|e| e.normalize()))
+    }
+}
+
+/// How an on-disk plugin stands relative to the trusted set, as reported by
+/// [`inspect_plugins`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustStatus {
+    /// Not listed in `[plugins].trusted`.
+    Untrusted,
+    /// Trusted, but no content hash is pinned.
+    TrustedUnpinned,
+    /// Trusted and the pinned hash matches the directory's current contents.
+    Pinned,
+    /// Trusted with a pinned hash, but the contents have changed since.
+    Drift,
+    /// The manifest is missing/malformed or the directory cannot be hashed.
+    Unreadable,
+}
+
+/// The manifest fields surfaced at approval time (read-only view; no spawn).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InspectedManifest {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub command: String,
+    pub capabilities: Vec<Capability>,
+}
+
+/// One plugin directory as seen by [`inspect_plugins`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct PluginInspection {
+    pub dir_name: String,
+    /// `None` when the manifest is missing/malformed.
+    pub manifest: Option<InspectedManifest>,
+    /// `None` when the directory cannot be hashed (e.g. contains a symlink).
+    pub computed_hash: Option<PinnedHash>,
+    pub status: TrustStatus,
+}
+
+/// Read-only inspection of every plugin directory under `dir`, for the CLI's
+/// `plugin list` / `plugin trust` review flow. **No process is spawned.**
+///
+/// Unlike the daemon's automatic load path, this **does** parse untrusted
+/// manifests — that is the point of letting a user review a plugin before
+/// trusting it. It is a user-initiated, read-only parse (no code execution), so
+/// it does not weaken the load path's "never parse untrusted bytes during spawn"
+/// invariant.
+///
+/// # Errors
+/// [`PortError::Adapter`] only on an unexpected IO error reading `dir`; an absent
+/// `dir` yields an empty `Vec`. A per-plugin problem (bad manifest, un-hashable
+/// dir) becomes [`TrustStatus::Unreadable`], never an error.
+pub fn inspect_plugins(
+    dir: &Path,
+    trusted: &TrustedPlugins,
+) -> Result<Vec<PluginInspection>, PortError> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(adapt(e)),
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        let plugin_dir = match entry {
+            Ok(e) if e.path().is_dir() => e.path(),
+            _ => continue,
+        };
+        let Some(dir_name) = plugin_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .filter(|n| !n.is_empty())
+        else {
+            continue; // unnameable in a trust list
+        };
+        let dir_name = dir_name.to_string();
+        let computed = PinnedHash::of_dir(&plugin_dir).ok();
+        let manifest = read_inspected_manifest(&plugin_dir).ok();
+        let status = match (trusted.get(&dir_name), &manifest, &computed) {
+            // Cannot review what we cannot read/hash.
+            (_, None, _) | (_, _, None) => TrustStatus::Unreadable,
+            (None, _, _) => TrustStatus::Untrusted,
+            (Some(None), _, _) => TrustStatus::TrustedUnpinned,
+            (Some(Some(pin)), _, Some(c)) => {
+                if pin == c {
+                    TrustStatus::Pinned
+                } else {
+                    TrustStatus::Drift
+                }
+            }
+        };
+        out.push(PluginInspection {
+            dir_name,
+            manifest,
+            computed_hash: computed,
+            status,
+        });
+    }
+    Ok(out)
+}
+
+/// Read + parse a plugin's `manifest.toml` into the surfaced subset. An unknown
+/// capability fails here (fail-closed), surfacing as `Unreadable`.
+fn read_inspected_manifest(plugin_dir: &Path) -> Result<InspectedManifest, PortError> {
+    let raw = std::fs::read_to_string(plugin_dir.join("manifest.toml")).map_err(adapt)?;
+    let m: Manifest = toml::from_str(&raw).map_err(adapt)?;
+    Ok(InspectedManifest {
+        id: m.id,
+        name: m.name,
+        version: m.version,
+        command: m.engine.command,
+        capabilities: m.engine.capabilities,
+    })
 }
 
 struct LoadedPlugin {
@@ -113,7 +292,7 @@ struct LoadedPlugin {
     info: PluginInfo,
     next_id: u64,
     /// Capabilities the manifest declared; gates host-callbacks.
-    capabilities: Vec<String>,
+    capabilities: Vec<Capability>,
 }
 
 impl LoadedPlugin {
@@ -241,10 +420,10 @@ impl LoadedPlugin {
                     message: format!("unknown host method {}", cb.method),
                 });
             }
-            Some(cap) if !self.capabilities.iter().any(|c| c == cap) => {
+            Some(cap) if !self.capabilities.contains(&cap) => {
                 resp.error = Some(RpcError {
                     code: CALLBACK_DENIED,
-                    message: format!("capability {cap} not declared"),
+                    message: format!("capability {} not declared", cap.wire()),
                 });
             }
             // The cap is declared; dispatch the method. This match must stay in
@@ -615,12 +794,12 @@ impl ProcessPluginHost {
     }
 }
 
-/// Translate a manifest's self-declared capability strings into the typed
-/// OS-sandbox capability set. Only sandbox-driving capabilities are mapped;
-/// host-RPC capabilities (`fs:read`/`fs:write`/`events`) are irrelevant here.
-fn sandbox_caps(caps: &[String]) -> SandboxCapabilities {
+/// Translate a manifest's declared capabilities into the typed OS-sandbox
+/// capability set. Only sandbox-driving capabilities are mapped; host-RPC
+/// capabilities (`vault:read`/`vault:write`/`vault:events`) are irrelevant here.
+fn sandbox_caps(caps: &[Capability]) -> SandboxCapabilities {
     SandboxCapabilities {
-        net: caps.iter().any(|c| c == CAP_NET),
+        net: caps.contains(&Capability::Net),
     }
 }
 
@@ -660,7 +839,7 @@ impl PluginHost for ProcessPluginHost {
         let cairn_event = to_cairn_event(event);
         let mut errors = Vec::new();
         for p in self.loaded.iter_mut() {
-            if p.capabilities.iter().any(|c| c == CAP_EVENTS) {
+            if p.capabilities.contains(&Capability::VaultEvents) {
                 if let Err(e) = p.deliver_event(&cairn_event, callbacks) {
                     // Return the failure for the engine to log uniformly (audit
                     // G4), rather than writing to stderr from the adapter.
@@ -679,6 +858,7 @@ impl PluginHost for ProcessPluginHost {
 mod tests {
     use super::*;
     use crate::sandbox::RefusingSandbox;
+    use cairn_plugin_protocol::Capability;
     use cairn_ports::SandboxError;
     use std::process::Command;
 
@@ -791,15 +971,157 @@ mod tests {
         );
     }
 
+    fn write_manifest_with(root: &Path, dir_name: &str, body: &str) {
+        let pdir = root.join(dir_name);
+        std::fs::create_dir_all(&pdir).unwrap();
+        std::fs::write(pdir.join("manifest.toml"), body).unwrap();
+    }
+
+    #[test]
+    fn inspect_absent_dir_is_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let got = inspect_plugins(&tmp.path().join("missing"), &TrustedPlugins::none()).unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn inspect_reports_untrusted_with_capabilities() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_manifest_with(
+            tmp.path(),
+            "p",
+            "id=\"p\"\nname=\"P\"\nversion=\"1\"\n\
+             [engine]\ncommand=\"./p\"\ncapabilities=[\"vault:read\",\"net\"]\n",
+        );
+        let got = inspect_plugins(tmp.path(), &TrustedPlugins::none()).unwrap();
+        assert_eq!(got.len(), 1);
+        let p = &got[0];
+        assert_eq!(p.dir_name, "p");
+        assert_eq!(p.status, TrustStatus::Untrusted);
+        let m = p.manifest.as_ref().unwrap();
+        assert_eq!(m.capabilities, vec![Capability::VaultRead, Capability::Net]);
+        assert!(p.computed_hash.is_some());
+    }
+
+    #[test]
+    fn inspect_distinguishes_pinned_drift_unpinned() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_manifest_with(
+            tmp.path(),
+            "p",
+            "id=\"p\"\nname=\"P\"\nversion=\"1\"\n[engine]\ncommand=\"./p\"\n",
+        );
+        let real = PinnedHash::of_dir(&tmp.path().join("p")).unwrap();
+
+        // Pinned + matching hash -> Pinned.
+        let pinned =
+            TrustedPlugins::from_entries([("p".to_string(), Some(real.to_string()))]).unwrap();
+        assert_eq!(
+            inspect_plugins(tmp.path(), &pinned).unwrap()[0].status,
+            TrustStatus::Pinned
+        );
+
+        // Pinned + wrong hash -> Drift.
+        let wrong = format!("sha256:{}", "0".repeat(64));
+        let drift = TrustedPlugins::from_entries([("p".to_string(), Some(wrong))]).unwrap();
+        assert_eq!(
+            inspect_plugins(tmp.path(), &drift).unwrap()[0].status,
+            TrustStatus::Drift
+        );
+
+        // Trusted, no pin -> TrustedUnpinned.
+        let unpinned = TrustedPlugins::from_ids(["p".to_string()]);
+        assert_eq!(
+            inspect_plugins(tmp.path(), &unpinned).unwrap()[0].status,
+            TrustStatus::TrustedUnpinned
+        );
+    }
+
+    #[test]
+    fn inspect_marks_malformed_manifest_unreadable() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_manifest_with(tmp.path(), "p", "this is not valid toml {{{");
+        let got =
+            inspect_plugins(tmp.path(), &TrustedPlugins::from_ids(["p".to_string()])).unwrap();
+        assert_eq!(got[0].status, TrustStatus::Unreadable);
+        assert!(got[0].manifest.is_none());
+    }
+
+    #[test]
+    fn inspect_skips_non_dir_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("stray.txt"), "noise").unwrap();
+        let got = inspect_plugins(tmp.path(), &TrustedPlugins::none()).unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn from_cairn_toml_absent_file_is_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = TrustedPlugins::from_cairn_toml(tmp.path()).unwrap();
+        assert!(t.get("anything").is_none());
+    }
+
+    #[test]
+    fn from_cairn_toml_reads_legacy_form() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("cairn.toml"),
+            "[plugins]\ntrusted = [\"legacy\"]\n",
+        )
+        .unwrap();
+        let t = TrustedPlugins::from_cairn_toml(tmp.path()).unwrap();
+        assert!(matches!(t.get("legacy"), Some(None)));
+        assert!(t.get("absent").is_none());
+    }
+
+    #[test]
+    fn from_cairn_toml_reads_table_form() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pin = format!("sha256:{}", "a".repeat(64));
+        std::fs::write(
+            tmp.path().join("cairn.toml"),
+            format!("[[plugins.trusted]]\ndir = \"pinned\"\nhash = \"{pin}\"\n"),
+        )
+        .unwrap();
+        let t = TrustedPlugins::from_cairn_toml(tmp.path()).unwrap();
+        assert!(matches!(t.get("pinned"), Some(Some(_))));
+        assert!(t.get("absent").is_none());
+    }
+
+    #[test]
+    fn from_cairn_toml_rejects_bad_pin() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("cairn.toml"),
+            "[[plugins.trusted]]\ndir = \"a\"\nhash = \"bogus\"\n",
+        )
+        .unwrap();
+        assert!(TrustedPlugins::from_cairn_toml(tmp.path()).is_err());
+    }
+
+    #[test]
+    fn from_cairn_toml_rejects_unknown_field_in_pin_table() {
+        // A typo'd key in a [[plugins.trusted]] table must fail loudly, not
+        // silently drop the pin and run the plugin unpinned.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("cairn.toml"),
+            "[[plugins.trusted]]\ndir = \"a\"\nhsah = \"sha256:x\"\n",
+        )
+        .unwrap();
+        assert!(TrustedPlugins::from_cairn_toml(tmp.path()).is_err());
+    }
+
     #[test]
     fn sandbox_caps_sets_net_only_when_declared() {
         use cairn_ports::SandboxCapabilities;
         assert_eq!(
-            super::sandbox_caps(&["net".to_string()]),
+            super::sandbox_caps(&[Capability::Net]),
             SandboxCapabilities { net: true }
         );
         assert_eq!(
-            super::sandbox_caps(&["fs:read".to_string(), "events".to_string()]),
+            super::sandbox_caps(&[Capability::FsRead, Capability::VaultEvents]),
             SandboxCapabilities { net: false }
         );
         assert_eq!(super::sandbox_caps(&[]), SandboxCapabilities::default());

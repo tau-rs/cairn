@@ -38,11 +38,11 @@
 //! a plugin runs, not *what it can do*. The `capabilities` declared in a plugin's
 //! manifest serve two distinct roles:
 //!
-//! - `fs:read`, `fs:write`, and `events` gate host-callback methods on [`Host`]
-//!   (`read_note`/`write_note`/`search`/`list_notes`). They only narrow that
-//!   host-RPC surface and are orthogonal to the OS sandbox, which separately
-//!   denies the plugin process direct filesystem writes and vault reads
-//!   regardless of what it declares.
+//! - `vault:read`, `vault:write`, and `vault:events` gate host-callback methods
+//!   on [`Host`] (`read_note`/`write_note`/`search`/`list_notes`). They only
+//!   narrow that host-RPC surface and are orthogonal to the OS sandbox, which
+//!   separately denies the plugin process direct filesystem writes and vault
+//!   reads regardless of what it declares.
 //! - `net` is consumed by the OS sandbox (bubblewrap on Linux, sandbox-exec on
 //!   macOS). If a plugin does **not** declare `net`, the jail denies all outbound
 //!   network connections at the OS level. Declaring `net` lifts that restriction.
@@ -147,7 +147,7 @@ impl Host<'_> {
             .ok_or_else(|| PluginError::new("empty callback response"))
     }
 
-    /// Read a note's raw contents (`host/readNote`, requires `fs:read`).
+    /// Read a note's raw contents (`host/readNote`, requires `vault:read`).
     ///
     /// # Errors
     /// [`PluginError`] if the host denies/fails the callback.
@@ -160,7 +160,7 @@ impl Host<'_> {
         Ok(rn.contents)
     }
 
-    /// Create or overwrite a note (`host/writeNote`, requires `fs:write`).
+    /// Create or overwrite a note (`host/writeNote`, requires `vault:write`).
     ///
     /// # Errors
     /// [`PluginError`] if the host denies/fails the callback.
@@ -174,7 +174,7 @@ impl Host<'_> {
         Ok(())
     }
 
-    /// Delete a note (`host/deleteNote`, requires `fs:write`).
+    /// Delete a note (`host/deleteNote`, requires `vault:write`).
     ///
     /// # Errors
     /// [`PluginError`] if the host denies/fails the callback.
@@ -187,7 +187,7 @@ impl Host<'_> {
         Ok(())
     }
 
-    /// Ranked full-text search (`host/search`, requires `fs:read`).
+    /// Ranked full-text search (`host/search`, requires `vault:read`).
     ///
     /// # Errors
     /// [`PluginError`] if the host denies/fails the callback.
@@ -200,7 +200,7 @@ impl Host<'_> {
         Ok(sr.hits)
     }
 
-    /// List all notes (`host/listNotes`, requires `fs:read`).
+    /// List all notes (`host/listNotes`, requires `vault:read`).
     ///
     /// # Errors
     /// [`PluginError`] if the host denies/fails the callback.
@@ -492,7 +492,7 @@ mod host_tests {
             result: None,
             error: Some(RpcError {
                 code: -32001,
-                message: "capability fs:read not declared".to_string(),
+                message: "capability vault:read not declared".to_string(),
             }),
         };
         write_message(&mut response_bytes, &resp).unwrap();
@@ -507,7 +507,7 @@ mod host_tests {
         };
         let err = host.read_note("note.md").unwrap_err();
         assert_eq!(err.code, -32001);
-        assert!(err.message.contains("fs:read"));
+        assert!(err.message.contains("vault:read"));
     }
 }
 

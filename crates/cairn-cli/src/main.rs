@@ -6,7 +6,10 @@ use std::process::ExitCode;
 
 use cairn_app::{Event, EventSink};
 use cairn_contract::{Command as WireCommand, CommandResponse, Query as WireQuery, QueryResponse};
-use cairn_infra::{NotifyWatcher, MIN_QUERY_CHARS};
+use cairn_infra::{
+    inspect_plugins, InspectedManifest, NotifyWatcher, PinnedHash, PluginInspection, TrustStatus,
+    TrustedPlugins, MIN_QUERY_CHARS,
+};
 use cairn_ports::Watcher;
 use cairn_service::{app_event_to_wire, dispatch_command, dispatch_query, run_watch_loop};
 use cairn_startup::{build_engine, ensure_cairn};
@@ -159,6 +162,22 @@ enum Command {
         /// A git revspec to restore from.
         revision: String,
     },
+    /// Inspect and approve engine plugins.
+    Plugin {
+        #[command(subcommand)]
+        action: PluginAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum PluginAction {
+    /// List discovered plugins, their trust status, and declared capabilities.
+    List,
+    /// Review a plugin and print the cairn.toml entry needed to trust it.
+    Trust {
+        /// The plugin's directory name under `.cairn/plugins/`.
+        dir: String,
+    },
 }
 
 /// Whether a command needs the O(vault) startup reindex. `search` consults the
@@ -199,6 +218,138 @@ fn short_query_hint(query: &str) -> Option<String> {
     }
 }
 
+fn run_plugin(root: &Path, action: &PluginAction) -> Result<(), String> {
+    let plugins_dir = root.join(".cairn").join("plugins");
+    let trusted = TrustedPlugins::from_cairn_toml(root).map_err(|e| e.to_string())?;
+    let inspections = inspect_plugins(&plugins_dir, &trusted).map_err(|e| e.to_string())?;
+    match action {
+        PluginAction::List => {
+            print_plugin_list(&inspections);
+            Ok(())
+        }
+        PluginAction::Trust { dir } => run_plugin_trust(&inspections, dir),
+    }
+}
+
+/// Human label for a trust status.
+fn status_label(status: TrustStatus) -> &'static str {
+    match status {
+        TrustStatus::Untrusted => "untrusted",
+        TrustStatus::TrustedUnpinned => "trusted (unpinned)",
+        TrustStatus::Pinned => "trusted (pinned)",
+        TrustStatus::Drift => "DRIFT — contents changed since pinned",
+        TrustStatus::Unreadable => "unreadable manifest",
+    }
+}
+
+fn print_plugin_list(inspections: &[PluginInspection]) {
+    if inspections.is_empty() {
+        println!("no plugins found under .cairn/plugins");
+        return;
+    }
+    for insp in inspections {
+        let (name, version, caps) = match &insp.manifest {
+            Some(m) if !m.capabilities.is_empty() => (
+                m.name.as_str(),
+                m.version.as_str(),
+                m.capabilities
+                    .iter()
+                    .map(|c| c.wire())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+            Some(m) => (m.name.as_str(), m.version.as_str(), "(none)".to_string()),
+            None => ("?", "?", "(unknown)".to_string()),
+        };
+        println!(
+            "{}  v{}  [{}]  {}",
+            insp.dir_name,
+            version,
+            status_label(insp.status),
+            name
+        );
+        println!("  capabilities: {caps}");
+    }
+}
+
+fn run_plugin_trust(inspections: &[PluginInspection], dir: &str) -> Result<(), String> {
+    let insp = inspections
+        .iter()
+        .find(|i| i.dir_name == dir)
+        .ok_or_else(|| format!("no plugin directory named {dir:?} under .cairn/plugins"))?;
+    let manifest = insp
+        .manifest
+        .as_ref()
+        .ok_or_else(|| format!("plugin {dir:?} has an unreadable manifest; cannot trust it"))?;
+    let hash = insp
+        .computed_hash
+        .as_ref()
+        .ok_or_else(|| format!("plugin {dir:?} could not be hashed; cannot trust it"))?;
+
+    print_approval_screen(manifest, hash);
+
+    if !confirm_yes("  Approve and trust this exact version? [y/N]: ")? {
+        println!("  Not trusted.");
+        return Ok(());
+    }
+
+    println!();
+    println!("  Add this to your cairn.toml to trust {dir}:");
+    println!();
+    println!("      [[plugins.trusted]]");
+    println!("      dir = \"{dir}\"");
+    println!("      hash = \"{hash}\"");
+    Ok(())
+}
+
+/// Render the first-run approval screen for a plugin under review.
+fn print_approval_screen(m: &InspectedManifest, hash: &PinnedHash) {
+    println!();
+    println!("  Plugin:   {}  ({}  v{})", m.id, m.name, m.version);
+    println!("  Command:  {}", m.command);
+    println!("            (runs as a sandboxed child of the daemon)");
+    println!("  Content:  {hash}");
+    println!();
+    if m.capabilities.is_empty() {
+        println!("  This plugin declares no capabilities.");
+    } else {
+        println!("  Capabilities this plugin declares:");
+        for cap in &m.capabilities {
+            let suffix = if cap.enforced_today() {
+                ""
+            } else {
+                "   (enforced in a future release)"
+            };
+            println!(
+                "    \u{2022} {:<13} {}{}",
+                cap.wire(),
+                cap.summary(),
+                suffix
+            );
+        }
+    }
+    println!();
+}
+
+/// Prompt on stdout and read a yes/no answer from stdin. Empty input, EOF
+/// (non-interactive pipe), or anything other than y/yes is treated as **no** —
+/// a scripted pipe must never silently approve a plugin.
+fn confirm_yes(prompt: &str) -> Result<bool, String> {
+    print!("{prompt}");
+    std::io::stdout().flush().map_err(|e| e.to_string())?;
+    let mut line = String::new();
+    let n = std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| e.to_string())?;
+    if n == 0 {
+        return Ok(false); // EOF: non-interactive
+    }
+    Ok(matches!(
+        line.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
+}
+
 fn run() -> Result<(), String> {
     let cli = Cli::parse();
     let root = cli.cairn;
@@ -211,6 +362,12 @@ fn run() -> Result<(), String> {
     let is_cairn = cairn_startup::is_cairn(&root);
     if !matches!(cli.command, Command::Init) {
         ensure_cairn(&root).map_err(|e| e.to_string())?;
+    }
+
+    // Plugin inspection/approval needs only the plugins dir + cairn.toml, not
+    // the engine — handle it before the (potentially expensive) engine build.
+    if let Command::Plugin { action } = &cli.command {
+        return run_plugin(&root, action);
     }
 
     let mut engine = build_engine(&root).map_err(|e| e.to_string())?;
@@ -390,6 +547,8 @@ fn run() -> Result<(), String> {
                 }
             });
         }
+        // Dispatched early (before build_engine); unreachable here.
+        Command::Plugin { .. } => unreachable!("plugin commands handled before engine build"),
     }
     Ok(())
 }
@@ -455,6 +614,9 @@ mod tests {
             path: "a.md".into()
         }));
         assert!(!needs_startup_reindex(&Command::Init));
+        assert!(!needs_startup_reindex(&Command::Plugin {
+            action: PluginAction::List
+        }));
     }
 
     #[test]
