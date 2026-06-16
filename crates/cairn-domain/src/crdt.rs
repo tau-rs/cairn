@@ -78,6 +78,9 @@ struct Entry {
     id: BlockId,
     after: Option<BlockId>,
     ins_lamport: Lamport,
+    /// Block taxonomy carried through inserts; metadata only, does not affect
+    /// convergence or materialized output, so not yet read.
+    #[allow(dead_code)]
     kind: BlockKind,
     text: String,
     content_lamport: Lamport,
@@ -111,7 +114,10 @@ impl BlockDoc {
         let mut prev: Option<BlockId> = None;
         for block in crate::block::parse_blocks(src) {
             doc.clock += 1;
-            let id = BlockId { replica, counter: doc.counter };
+            let id = BlockId {
+                replica,
+                counter: doc.counter,
+            };
             doc.counter += 1;
             doc.entries.insert(
                 id,
@@ -159,7 +165,13 @@ impl BlockDoc {
     /// Merge a replicated op. Commutative and idempotent.
     pub fn merge(&mut self, op: BlockOp) {
         match op {
-            BlockOp::Insert { id, after, lamport, kind, text } => {
+            BlockOp::Insert {
+                id,
+                after,
+                lamport,
+                kind,
+                text,
+            } => {
                 self.clock = self.clock.max(lamport);
                 self.entries.entry(id).or_insert(Entry {
                     id,
@@ -194,7 +206,11 @@ impl BlockDoc {
             children.entry(e.after).or_default().push(e);
         }
         for v in children.values_mut() {
-            v.sort_by(|a, b| b.ins_lamport.cmp(&a.ins_lamport).then_with(|| b.id.cmp(&a.id)));
+            v.sort_by(|a, b| {
+                b.ins_lamport
+                    .cmp(&a.ins_lamport)
+                    .then_with(|| b.id.cmp(&a.id))
+            });
         }
         let mut out = Vec::new();
         fn walk(
@@ -215,8 +231,83 @@ impl BlockDoc {
         out
     }
 
-    fn merge_set_content(&mut self, _op: BlockOp) {
-        // Filled in Task 7.
+    fn merge_set_content(&mut self, op: BlockOp) {
+        let BlockOp::SetContent {
+            id,
+            text,
+            lamport,
+            author,
+        } = op
+        else {
+            return;
+        };
+        self.clock = self.clock.max(lamport);
+        let Some(e) = self.entries.get_mut(&id) else {
+            return;
+        };
+        // Deterministic total order: (author_rank, lamport, replica). Higher
+        // wins. Human always beats Agent; the loser's text is stashed.
+        let incoming = (author_rank(author), lamport, id.replica);
+        let current = (
+            author_rank(e.content_author),
+            e.content_lamport,
+            e.content_replica,
+        );
+        if incoming > current {
+            e.stash.push(std::mem::replace(&mut e.text, text));
+            e.content_author = author;
+            e.content_lamport = lamport;
+            e.content_replica = id.replica;
+        } else if incoming < current {
+            e.stash.push(text);
+        }
+        // incoming == current ⇒ identical winner key: ignore (idempotent).
+    }
+
+    /// Apply a local edit, mutating this doc and returning the op(s) to share.
+    pub fn apply_local(&mut self, edit: Edit) -> Vec<BlockOp> {
+        self.clock += 1;
+        let lamport = self.clock;
+        let op = match edit {
+            Edit::InsertAfter {
+                after,
+                kind,
+                text,
+                author,
+            } => {
+                let id = BlockId {
+                    replica: self.replica,
+                    counter: self.counter,
+                };
+                self.counter += 1;
+                let _ = author; // insert content author defaults to Human seed; refined later
+                BlockOp::Insert {
+                    id,
+                    after,
+                    lamport,
+                    kind,
+                    text,
+                }
+            }
+            Edit::UpdateText { id, text, author } => BlockOp::SetContent {
+                id,
+                text,
+                lamport,
+                author,
+            },
+            Edit::Remove { id } => BlockOp::Delete { id, lamport },
+        };
+        self.merge(op.clone());
+        vec![op]
+    }
+
+    /// Stashed loser content versions for a block (recoverable). Test/inspect aid.
+    #[must_use]
+    pub fn stashed(&self, id: BlockId) -> Vec<String> {
+        self.entries
+            .get(&id)
+            .map(|e| e.stash.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -242,8 +333,14 @@ mod tests {
 
     #[test]
     fn block_id_is_ordered_and_unique() {
-        let a = BlockId { replica: 1, counter: 0 };
-        let b = BlockId { replica: 1, counter: 1 };
+        let a = BlockId {
+            replica: 1,
+            counter: 0,
+        };
+        let b = BlockId {
+            replica: 1,
+            counter: 1,
+        };
         assert!(a < b);
         assert_ne!(a, b);
     }
@@ -270,7 +367,10 @@ mod tests {
     fn merge_insert_is_idempotent() {
         let mut doc = BlockDoc::from_markdown(1, "a\n");
         let op = BlockOp::Insert {
-            id: BlockId { replica: 2, counter: 0 },
+            id: BlockId {
+                replica: 2,
+                counter: 0,
+            },
             after: None,
             lamport: 5,
             kind: BlockKind::Paragraph,
@@ -287,7 +387,74 @@ mod tests {
         let mut doc = BlockDoc::from_markdown(1, "keep\n\ndrop\n");
         // Find the id of the second block ("drop").
         let drop_id = doc.block_ids_in_order()[1];
-        doc.merge(BlockOp::Delete { id: drop_id, lamport: 9 });
+        doc.merge(BlockOp::Delete {
+            id: drop_id,
+            lamport: 9,
+        });
         assert_eq!(doc.materialize(), "keep\n");
+    }
+
+    #[test]
+    fn human_edit_beats_agent_edit_same_block_and_stashes_loser() {
+        let mut doc = BlockDoc::from_markdown(1, "original\n");
+        let id = doc.block_ids_in_order()[0];
+        // Agent writes with a HIGHER lamport, human with a lower one.
+        doc.merge(BlockOp::SetContent {
+            id,
+            text: "agent version".into(),
+            lamport: 10,
+            author: Author::Agent,
+        });
+        doc.merge(BlockOp::SetContent {
+            id,
+            text: "human version".into(),
+            lamport: 3,
+            author: Author::Human,
+        });
+        assert_eq!(doc.materialize(), "human version\n");
+        // Agent's losing text is stashed, not lost.
+        assert!(doc.stashed(id).contains(&"agent version".to_string()));
+    }
+
+    #[test]
+    fn set_content_is_order_independent() {
+        let ops = |seed: bool| {
+            let mut d = BlockDoc::from_markdown(1, "x\n");
+            let id = d.block_ids_in_order()[0];
+            let a = BlockOp::SetContent {
+                id,
+                text: "A".into(),
+                lamport: 4,
+                author: Author::Human,
+            };
+            let b = BlockOp::SetContent {
+                id,
+                text: "B".into(),
+                lamport: 7,
+                author: Author::Human,
+            };
+            if seed {
+                d.merge(a);
+                d.merge(b);
+            } else {
+                d.merge(b);
+                d.merge(a);
+            }
+            d.materialize()
+        };
+        assert_eq!(ops(true), ops(false));
+    }
+
+    #[test]
+    fn apply_local_returns_op_and_applies_it() {
+        let mut doc = BlockDoc::from_markdown(1, "hello\n");
+        let id = doc.block_ids_in_order()[0];
+        let ops = doc.apply_local(Edit::UpdateText {
+            id,
+            text: "hi".into(),
+            author: Author::Human,
+        });
+        assert_eq!(ops.len(), 1);
+        assert_eq!(doc.materialize(), "hi\n");
     }
 }
