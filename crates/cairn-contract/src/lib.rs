@@ -716,6 +716,60 @@ mod tests {
         assert_eq!(iframe_sized["height"].as_u64().unwrap(), 240);
     }
 
+    /// The hand-authored `bindings/pluginValues.ts` arrays (ts-rs emits types
+    /// only) must list every `PluginSlot` / `PluginWidget` variant's wire string.
+    /// This is the lockstep guard its header comment promises — without it a new
+    /// variant (e.g. `panel.main`, `iframe`) silently drifts out of the values.
+    #[test]
+    fn pluginvalues_ts_covers_all_enum_variants() {
+        use serde_json::to_value;
+        let ts = include_str!("../bindings/pluginValues.ts");
+
+        let slots = [
+            PluginSlot::SidebarSection,
+            PluginSlot::TopbarAction,
+            PluginSlot::Command,
+            PluginSlot::PanelMain,
+        ];
+        for s in slots {
+            let wire = to_value(s).unwrap();
+            let wire = wire.as_str().unwrap();
+            assert!(
+                ts.contains(&format!("\"{wire}\"")),
+                "pluginValues.ts is missing slot \"{wire}\""
+            );
+        }
+
+        // Widget kinds are the serde `tag` discriminants.
+        let kinds = [
+            to_value(PluginWidget::Text {
+                text: "x".into(),
+                muted: None,
+            })
+            .unwrap(),
+            to_value(PluginWidget::Action {
+                label: "x".into(),
+                icon: None,
+                command: "c".into(),
+                args: None,
+            })
+            .unwrap(),
+            to_value(PluginWidget::List { items: vec![] }).unwrap(),
+            to_value(PluginWidget::Iframe {
+                entry: "index.html".into(),
+                height: None,
+            })
+            .unwrap(),
+        ];
+        for k in &kinds {
+            let wire = k["kind"].as_str().unwrap();
+            assert!(
+                ts.contains(&format!("\"{wire}\"")),
+                "pluginValues.ts is missing widget kind \"{wire}\""
+            );
+        }
+    }
+
     #[test]
     fn plugin_summary_capabilities_round_trip() {
         // Tier-2 payloads (no `capabilities` / `uiRoot` keys) must still deserialize.
