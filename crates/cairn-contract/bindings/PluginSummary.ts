@@ -30,4 +30,8 @@ contributions: Array<PluginContribution>,
 /**
  * Capabilities a Tier-3 plugin requests. None for plugins that declare none.
  */
-capabilities?: Array<PluginCapability> | null, };
+capabilities?: Array<PluginCapability> | null, 
+/**
+ * Root directory of the plugin's UI bundle (Tier-3). None if it declares no UI.
+ */
+uiRoot?: string | null, };

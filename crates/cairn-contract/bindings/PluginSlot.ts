@@ -3,4 +3,4 @@
 /**
  * A named shell slot a contribution targets.
  */
-export type PluginSlot = "sidebar.section" | "topbar.action" | "command";
+export type PluginSlot = "sidebar.section" | "topbar.action" | "command" | "panel.main";
