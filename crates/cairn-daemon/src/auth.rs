@@ -85,6 +85,44 @@ pub(crate) async fn require_token(
     next.run(req).await
 }
 
+/// axum middleware for `/mcp`: like [`require_token`], but also accepts the token
+/// as a `?token=<token>` query parameter. MCP clients connecting over Streamable
+/// HTTP can send `Authorization: Bearer`, but tau's β.3 MCP config carries only a
+/// bare URL with no header — the query param is that headerless channel. The
+/// secret is the same `.cairn/token`; on a loopback bind, holding it still means
+/// read access to that file. (The `/mcp` request span records a fixed path, never
+/// the raw URI, so the query token is not logged.)
+pub(crate) async fn mcp_require_token(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if let Some(expected) = &state.token {
+        let header_ok = bearer_matches(req.headers(), expected);
+        let query_ok = req
+            .uri()
+            .query()
+            .and_then(token_from_query)
+            .is_some_and(|tok| ct_eq(tok.as_bytes(), expected.as_bytes()));
+        if !header_ok && !query_ok {
+            return (
+                StatusCode::UNAUTHORIZED,
+                [(header::WWW_AUTHENTICATE, "Bearer")],
+            )
+                .into_response();
+        }
+    }
+    next.run(req).await
+}
+
+/// Extract the `token` value from a URL query string. Tokens are 64-char hex, so
+/// no percent-decoding is needed; this avoids a new dependency.
+fn token_from_query(query: &str) -> Option<&str> {
+    query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("token="))
+}
+
 /// True if `headers` carry `Authorization: Bearer <token>` whose token equals
 /// `expected`. Missing, non-UTF-8, or non-`Bearer` headers are rejected
 /// (deny-by-default, mirroring the CORS/Origin gates).

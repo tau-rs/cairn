@@ -10,6 +10,7 @@ members = [
     "crates/cairn-startup",
     "crates/cairn-contract",
     "crates/cairn-service",
+    "crates/cairn-mcp",
     "crates/cairn-cli",
     "crates/cairn-daemon",
     "crates/cairn-plugin-example",

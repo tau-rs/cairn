@@ -20,6 +20,7 @@ cairn-startup = { path = "../cairn-startup" }
 cairn-infra = { path = "../cairn-infra" }
 cairn-contract = { path = "../cairn-contract" }
 cairn-service = { path = "../cairn-service" }
+cairn-mcp = { path = "../cairn-mcp" }
 axum = { workspace = true }
 tokio = { workspace = true }
 futures-util = { workspace = true }
