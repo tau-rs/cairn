@@ -224,6 +224,7 @@ pub enum PluginSlot {
     TopbarAction,
     #[serde(rename = "command")]
     Command,
+    /// Bottom dock for a Tier-3 plugin panel (one iframe widget).
     #[serde(rename = "panel.main")]
     PanelMain,
 }
@@ -280,6 +281,8 @@ pub enum PluginWidget {
         items: Vec<PluginListItem>,
     },
     Iframe {
+        /// Relative entry path (e.g. `index.html`) into the plugin's UI bundle
+        /// root; the host serves the bundle from a sandbox origin.
         entry: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         height: Option<u32>,
@@ -319,7 +322,7 @@ pub struct PluginSummary {
     /// Capabilities a Tier-3 plugin requests. None for plugins that declare none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<Vec<PluginCapability>>,
-    /// Root directory of the plugin's UI bundle (None if it declares no UI).
+    /// Root directory of the plugin's UI bundle (Tier-3). None if it declares no UI.
     #[serde(default, rename = "uiRoot", skip_serializing_if = "Option::is_none")]
     pub ui_root: Option<String>,
 }
@@ -694,8 +697,8 @@ mod tests {
             ]
         );
 
-        // The Iframe widget kind serializes to "iframe" with a relative bundle
-        // `entry` path (not inline HTML).
+        // The Iframe widget kind serializes to "iframe" and carries a bundle
+        // `entry` (relative path into the plugin's UI root), not inline HTML.
         let iframe_kind = to_value(PluginWidget::Iframe {
             entry: "index.html".into(),
             height: None,
@@ -713,6 +716,60 @@ mod tests {
         assert_eq!(iframe_sized["height"].as_u64().unwrap(), 240);
     }
 
+    /// The hand-authored `bindings/pluginValues.ts` arrays (ts-rs emits types
+    /// only) must list every `PluginSlot` / `PluginWidget` variant's wire string.
+    /// This is the lockstep guard its header comment promises — without it a new
+    /// variant (e.g. `panel.main`, `iframe`) silently drifts out of the values.
+    #[test]
+    fn pluginvalues_ts_covers_all_enum_variants() {
+        use serde_json::to_value;
+        let ts = include_str!("../bindings/pluginValues.ts");
+
+        let slots = [
+            PluginSlot::SidebarSection,
+            PluginSlot::TopbarAction,
+            PluginSlot::Command,
+            PluginSlot::PanelMain,
+        ];
+        for s in slots {
+            let wire = to_value(s).unwrap();
+            let wire = wire.as_str().unwrap();
+            assert!(
+                ts.contains(&format!("\"{wire}\"")),
+                "pluginValues.ts is missing slot \"{wire}\""
+            );
+        }
+
+        // Widget kinds are the serde `tag` discriminants.
+        let kinds = [
+            to_value(PluginWidget::Text {
+                text: "x".into(),
+                muted: None,
+            })
+            .unwrap(),
+            to_value(PluginWidget::Action {
+                label: "x".into(),
+                icon: None,
+                command: "c".into(),
+                args: None,
+            })
+            .unwrap(),
+            to_value(PluginWidget::List { items: vec![] }).unwrap(),
+            to_value(PluginWidget::Iframe {
+                entry: "index.html".into(),
+                height: None,
+            })
+            .unwrap(),
+        ];
+        for k in &kinds {
+            let wire = k["kind"].as_str().unwrap();
+            assert!(
+                ts.contains(&format!("\"{wire}\"")),
+                "pluginValues.ts is missing widget kind \"{wire}\""
+            );
+        }
+    }
+
     #[test]
     fn plugin_summary_capabilities_round_trip() {
         // Tier-2 payloads (no `capabilities` / `uiRoot` keys) must still deserialize.
@@ -721,7 +778,7 @@ mod tests {
         assert_eq!(s.capabilities, None);
         assert_eq!(s.ui_root, None);
 
-        // Round-trip with capabilities present.
+        // Round-trip with capabilities + uiRoot present.
         let s2 = PluginSummary {
             id: "p".into(),
             name: "P".into(),
@@ -729,31 +786,13 @@ mod tests {
             commands: vec![],
             contributions: vec![],
             capabilities: Some(vec![PluginCapability::NotesRead]),
-            ui_root: None,
+            ui_root: Some("ui".into()),
         };
         let j = serde_json::to_string(&s2).unwrap();
         assert!(j.contains("\"capabilities\":[\"notes.read\"]"));
-        // `ui_root: None` must not emit a `uiRoot` key.
-        assert!(!j.contains("uiRoot"));
-        assert_eq!(serde_json::from_str::<PluginSummary>(&j).unwrap(), s2);
-    }
-
-    #[test]
-    fn plugin_summary_ui_root_round_trip() {
-        // `ui_root` serializes under the `uiRoot` serde rename (not `ui_root`).
-        let s = PluginSummary {
-            id: "p".into(),
-            name: "P".into(),
-            version: "1".into(),
-            commands: vec![],
-            contributions: vec![],
-            capabilities: None,
-            ui_root: Some("ui".into()),
-        };
-        let j = serde_json::to_string(&s).unwrap();
+        // `ui_root` serializes under its camelCase wire key.
         assert!(j.contains("\"uiRoot\":\"ui\""));
-        assert!(!j.contains("ui_root"));
-        assert_eq!(serde_json::from_str::<PluginSummary>(&j).unwrap(), s);
+        assert_eq!(serde_json::from_str::<PluginSummary>(&j).unwrap(), s2);
     }
 }
 

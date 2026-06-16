@@ -6,4 +6,9 @@ import type { JsonValue } from "./serde_json/JsonValue";
 /**
  * A host-renderable widget. Closed vocabulary; first cut: text / action / list.
  */
-export type PluginWidget = { "kind": "text", text: string, muted: boolean | null, } | { "kind": "action", label: string, icon: PluginIcon | null, command: string, args: JsonValue | null, } | { "kind": "list", items: Array<PluginListItem>, } | { "kind": "iframe", entry: string, height: number | null, };
+export type PluginWidget = { "kind": "text", text: string, muted: boolean | null, } | { "kind": "action", label: string, icon: PluginIcon | null, command: string, args: JsonValue | null, } | { "kind": "list", items: Array<PluginListItem>, } | { "kind": "iframe", 
+/**
+ * Relative entry path (e.g. `index.html`) into the plugin's UI bundle
+ * root; the host serves the bundle from a sandbox origin.
+ */
+entry: string, height: number | null, };

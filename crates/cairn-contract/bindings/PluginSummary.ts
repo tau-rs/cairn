@@ -32,6 +32,6 @@ contributions: Array<PluginContribution>,
  */
 capabilities?: Array<PluginCapability> | null, 
 /**
- * Root directory of the plugin's UI bundle (None if it declares no UI).
+ * Root directory of the plugin's UI bundle (Tier-3). None if it declares no UI.
  */
 uiRoot?: string | null, };
