@@ -39,8 +39,14 @@ permissions: {}
 jobs:
   review-pr:
     name: review PR
+    # Skip Dependabot PRs: their runs use GitHub's separate *Dependabot*
+    # secret store, where CLAUDE_CODE_OAUTH_TOKEN is absent, so the action
+    # fails env-var validation and reds out an (unrequired) check on every
+    # bump. To review Dependabot PRs, add the OAuth token under
+    # Settings → Secrets → Dependabot and drop this actor guard.
     if: |
-      vars.CLAUDE_REVIEW_ENABLED == 'true' && (
+      vars.CLAUDE_REVIEW_ENABLED == 'true' &&
+      github.actor != 'dependabot[bot]' && (
         (github.event.action == 'labeled' &&
           github.event.label.name == 'claude:review') ||
         (github.event.action != 'labeled' &&
@@ -65,8 +71,9 @@ jobs:
           # (claude-sonnet-4-20250514) has been retired and now 404s, so
           # relying on it breaks every review run. Bump as newer Sonnets ship.
           model: "claude-sonnet-4-6"
-          # Dependabot PRs run as a Bot actor; allow it so dependency
-          # bumps still get an AI review.
+          # Retained so that, once CLAUDE_CODE_OAUTH_TOKEN is added to the
+          # Dependabot secret store and the actor guard above is dropped,
+          # Dependabot bumps are reviewed without further changes here.
           allowed_bots: "dependabot"
           direct_prompt: |
             Review this pull request as a senior engineer would.
