@@ -119,7 +119,10 @@ impl Vcs for GitVcs {
             if commit_touched_path(&commit, p).map_err(adapt)? {
                 revs.push(Revision {
                     id: oid.to_string()[..7].to_string(),
-                    message: commit.summary().unwrap_or("").to_string(),
+                    // git2 0.21 made `summary()` fallible (surfaces UTF-8
+                    // errors); treat both a UTF-8 error and a missing
+                    // summary as an empty message, as before.
+                    message: commit.summary().ok().flatten().unwrap_or("").to_string(),
                     timestamp_secs: commit.time().seconds(),
                     author: commit.author().name().unwrap_or("").to_string(),
                 });
@@ -243,10 +246,11 @@ mod tests {
         vcs.commit_all("first").unwrap();
 
         let commit = repo.head().unwrap().peel_to_commit().unwrap();
-        assert_eq!(commit.author().name(), Some("Ada Lovelace"));
-        assert_eq!(commit.author().email(), Some("ada@example.com"));
-        assert_eq!(commit.committer().name(), Some("Ada Lovelace"));
-        assert_eq!(commit.committer().email(), Some("ada@example.com"));
+        // git2 0.21 made signature accessors return `Result<&str, Error>`.
+        assert_eq!(commit.author().name().unwrap(), "Ada Lovelace");
+        assert_eq!(commit.author().email().unwrap(), "ada@example.com");
+        assert_eq!(commit.committer().name().unwrap(), "Ada Lovelace");
+        assert_eq!(commit.committer().email().unwrap(), "ada@example.com");
     }
 
     #[test]
@@ -256,8 +260,8 @@ mod tests {
         // isolated `Config` to avoid depending on the ambient global identity.
         let empty = git2::Config::new().unwrap();
         let sig = signature_from_config(&empty).unwrap();
-        assert_eq!(sig.name(), Some("Cairn"));
-        assert_eq!(sig.email(), Some("cairn@localhost"));
+        assert_eq!(sig.name().unwrap(), "Cairn");
+        assert_eq!(sig.email().unwrap(), "cairn@localhost");
     }
 
     #[test]
