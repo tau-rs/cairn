@@ -72,10 +72,12 @@ jobs:
         with:
           fetch-depth: 1
 
-      - uses: anthropics/claude-code-action@28f83620103c48a57093dcc2837eec89e036bb9f # beta
+      - uses: anthropics/claude-code-action@4d7e1f0cd85743fdc93b1c8040ab54395da024e2 # v1.0.149
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # Pin the model explicitly: the action's built-in default
           # (claude-sonnet-4-20250514) has been retired and now 404s, so
-          # relying on it breaks every run. Bump as newer Sonnets ship.
-          model: "claude-sonnet-4-6"
+          # relying on it breaks every run. In action v1.x the model is set
+          # via claude_args, not the removed `model:` input. Bump as newer
+          # Sonnets ship.
+          claude_args: "--model claude-sonnet-4-6"
