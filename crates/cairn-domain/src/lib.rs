@@ -8,7 +8,7 @@ pub mod link;
 pub use link::{extract_links, rewrite_link_target, LinkTarget};
 
 pub mod graph;
-pub use graph::Graph;
+pub use graph::{Graph, GraphDelta, GraphScope};
 
 pub mod block;
 pub use block::{Block, BlockKind};
