@@ -640,57 +640,59 @@ Add the setter near `set_plugin_host`:
     }
 ```
 
-- [ ] **Step 2: Write the failing hook test**
+- [ ] **Step 2: Write the failing gate test**
+
+This task introduces the **gate invariant**: writes drive the semantic index only *after* the lazy build flag is set. Until then they're skipped (the lazy build will capture them). That invariant is observable without `suggestions()` — a recording index sees zero upserts from a pre-build write. (The *post*-build live behavior is covered in Task 5, where `suggestions()` sets the flag.)
 
 Add to the `tests` module in `crates/cairn-app/src/lib.rs`:
 
 ```rust
-    /// A SemanticIndex that records the calls made to it.
-    #[derive(Default)]
+    use std::sync::{Arc, Mutex};
+
+    /// A SemanticIndex that records upsert/remove calls via a shared handle, so a
+    /// test can inspect them after the index is boxed into the engine.
+    #[derive(Clone, Default)]
     struct RecordingSemantic {
-        upserts: std::cell::RefCell<Vec<String>>,
-        removes: std::cell::RefCell<Vec<String>>,
-        built: std::cell::Cell<bool>,
+        upserts: Arc<Mutex<Vec<String>>>,
+        removes: Arc<Mutex<Vec<String>>>,
     }
     impl cairn_ports::SemanticIndex for RecordingSemantic {
         fn upsert(&mut self, note: &Note) -> Result<(), PortError> {
-            self.upserts.borrow_mut().push(note.path.as_str().to_string());
+            self.upserts.lock().unwrap().push(note.path.as_str().to_string());
             Ok(())
         }
         fn remove(&mut self, path: &NotePath) -> Result<(), PortError> {
-            self.removes.borrow_mut().push(path.as_str().to_string());
+            self.removes.lock().unwrap().push(path.as_str().to_string());
             Ok(())
         }
-        fn reindex(&mut self, _notes: &[Note]) -> Result<(), PortError> {
-            self.built.set(true);
-            Ok(())
-        }
+        fn reindex(&mut self, _notes: &[Note]) -> Result<(), PortError> { Ok(()) }
         fn neighbors(&self, _f: &NotePath, _k: usize) -> Result<Vec<cairn_ports::Similarity>, PortError> {
             Ok(Vec::new())
         }
     }
 
     #[test]
-    fn writes_and_deletes_drive_semantic_index_after_build() {
+    fn writes_skip_semantic_index_until_built() {
         let tmp = tempfile::tempdir().unwrap();
         let mut eng = engine(tmp.path());
-        eng.set_semantic_index(Box::new(RecordingSemantic::default()));
-        let mut ev = Vec::new();
-        let a = NotePath::new("a.md").unwrap();
+        let rec = RecordingSemantic::default();
+        let upserts = rec.upserts.clone(); // shared handle survives the move into the engine
+        eng.set_semantic_index(Box::new(rec));
 
-        // Before any suggestions() build, writes do NOT upsert (lazy build will capture).
-        eng.write_note(&a, "rust ownership", &mut ev).unwrap();
-        // Force the built flag via a suggestions() call (Task 5 adds it); until then,
-        // assert the gate by calling the internal builder. See Task 5 for the live test.
+        let mut ev = Vec::new();
+        // semantic_built is false (no suggestions() call yet) → the write must NOT upsert.
+        eng.write_note(&NotePath::new("a.md").unwrap(), "rust ownership", &mut ev).unwrap();
+        assert!(
+            upserts.lock().unwrap().is_empty(),
+            "a write before the lazy build must not reach the semantic index"
+        );
     }
 ```
 
-> Note: the *observable* live behavior (writes upsert only after build) is fully tested in Task 5 once `suggestions()` exists. This task's test just confirms the field + setter compile and a write through a recording index does not panic. Keep this minimal test; Task 5 adds the behavioral assertions.
+- [ ] **Step 3: Run test to verify it fails**
 
-- [ ] **Step 3: Run test to verify it compiles/fails appropriately**
-
-Run: `cargo nextest run -p cairn-app writes_and_deletes_drive_semantic_index_after_build`
-Expected: FAIL to compile until Step 1 is done; PASS once Step 1 compiles (the test body asserts nothing yet).
+Run: `cargo nextest run -p cairn-app writes_skip_semantic_index_until_built`
+Expected: FAIL to compile — `no method set_semantic_index` / missing fields — until Step 1 is applied. (Step 1 + Step 4 together make it pass.)
 
 - [ ] **Step 4: Add the gated hooks in the three change sites**
 
@@ -726,7 +728,7 @@ Expected: PASS (existing tests unaffected; new test passes).
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/cairn-ports/src/lib.rs crates/cairn-app/src/lib.rs
+git add crates/cairn-app/src/lib.rs
 git commit -m "feat(app): Engine semantic-index field, setter, incremental hooks"
 ```
 
