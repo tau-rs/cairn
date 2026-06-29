@@ -315,6 +315,12 @@ pub fn dispatch_query(engine: &Engine, query: &Query) -> Result<QueryResponse, S
                 .collect();
             Ok(QueryResponse::Plugins { plugins })
         }
+        Query::GetSuggestions { scope: _ } => {
+            // SEAM: real adapter wired in Task 6.
+            Ok(QueryResponse::Suggestions {
+                suggestions: Vec::new(),
+            })
+        }
     }
 }
 

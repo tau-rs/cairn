@@ -363,6 +363,11 @@ pub fn render_query_result(resp: &QueryResponse) -> ToolResult {
             ToolResult::text(format!("{} plugins", plugins.len()))
                 .with_structured(json!({ "plugins": plugins }))
         }
+        QueryResponse::Suggestions { suggestions } => {
+            // SEAM: rich rendering added in Task 6.
+            ToolResult::text(format!("{} suggestions", suggestions.len()))
+                .with_structured(json!({ "suggestions": suggestions }))
+        }
     }
 }
 
