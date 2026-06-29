@@ -32,6 +32,35 @@ struct StatePayload {
     entries: Vec<StateEntry>,
 }
 
+/// What to compute suggestions over (the app-layer mirror of the wire `GraphScope`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Scope {
+    /// One focus note.
+    Note(NotePath),
+    /// The whole vault.
+    Vault,
+}
+
+/// A suggested non-explicit edge (the app-layer mirror of the wire `SuggestedEdge`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SuggestedEdgeData {
+    /// Source note.
+    pub from: NotePath,
+    /// Target note.
+    pub to: NotePath,
+    /// Cosine similarity, `0..1` — ranking only.
+    pub weight: f32,
+    /// Provenance (shared terms), or `None`.
+    pub why: Option<String>,
+}
+
+/// Suggestions returned per focus note.
+const SUGGEST_TOP_K: usize = 5;
+/// Similarity below this is dropped as noise.
+const SUGGEST_FLOOR: f32 = 0.1;
+/// Max edges returned for a `Vault` scope.
+const VAULT_EDGE_CAP: usize = 100;
+
 /// A domain event emitted as a side effect of a command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
@@ -507,6 +536,99 @@ impl Engine {
             out.sort();
             out
         })
+    }
+
+    /// Ensure the semantic index is built from the current notes (lazy, once).
+    fn ensure_semantic_built(&self) -> Result<(), PortError> {
+        if self.semantic_built.get() {
+            return Ok(());
+        }
+        let notes: Vec<Note> = self.with_notes(|m| m.values().cloned().collect())?;
+        self.semantic.borrow_mut().reindex(&notes)?;
+        self.semantic_built.set(true);
+        Ok(())
+    }
+
+    /// Format `why` provenance from shared terms.
+    fn why_from(shared: &[String]) -> Option<String> {
+        if shared.is_empty() {
+            None
+        } else {
+            Some(format!("shared: {}", shared.join(", ")))
+        }
+    }
+
+    /// Suggested non-explicit edges within `scope`. Excludes self, already-linked
+    /// pairs, and sub-floor similarities.
+    ///
+    /// # Errors
+    /// [`PortError::NotFound`] if a `Note` scope's path is unknown; [`PortError`]
+    /// on a port failure.
+    pub fn suggestions(&self, scope: &Scope) -> Result<Vec<SuggestedEdgeData>, PortError> {
+        self.ensure_semantic_built()?;
+        let graph = self.graph()?;
+        match scope {
+            Scope::Note(path) => {
+                // Unknown focus → NotFound (mirrors read_note semantics).
+                if !self.with_notes(|m| m.contains_key(path))? {
+                    return Err(PortError::NotFound(path.as_str().to_string()));
+                }
+                let mut linked: HashSet<NotePath> = HashSet::new();
+                linked.extend(graph.forward_links(path).iter().cloned());
+                linked.extend(graph.backlinks(path).iter().cloned());
+                let mut out = Vec::new();
+                for s in self.semantic.borrow().neighbors(path, SUGGEST_TOP_K)? {
+                    if s.score < SUGGEST_FLOOR || &s.path == path || linked.contains(&s.path) {
+                        continue;
+                    }
+                    out.push(SuggestedEdgeData {
+                        from: path.clone(),
+                        to: s.path,
+                        weight: s.score,
+                        why: Self::why_from(&s.shared),
+                    });
+                }
+                Ok(out)
+            }
+            Scope::Vault => {
+                let paths: Vec<NotePath> = self.with_notes(|m| m.keys().cloned().collect())?;
+                let mut seen: HashSet<(NotePath, NotePath)> = HashSet::new();
+                let mut out: Vec<SuggestedEdgeData> = Vec::new();
+                for focus in &paths {
+                    let mut linked: HashSet<NotePath> = HashSet::new();
+                    linked.extend(graph.forward_links(focus).iter().cloned());
+                    linked.extend(graph.backlinks(focus).iter().cloned());
+                    for s in self.semantic.borrow().neighbors(focus, SUGGEST_TOP_K)? {
+                        if s.score < SUGGEST_FLOOR || &s.path == focus || linked.contains(&s.path) {
+                            continue;
+                        }
+                        // Canonical undirected pair (from < to) for dedup.
+                        let (from, to) = if focus < &s.path {
+                            (focus.clone(), s.path.clone())
+                        } else {
+                            (s.path.clone(), focus.clone())
+                        };
+                        if !seen.insert((from.clone(), to.clone())) {
+                            continue;
+                        }
+                        out.push(SuggestedEdgeData {
+                            from,
+                            to,
+                            weight: s.score,
+                            why: Self::why_from(&s.shared),
+                        });
+                    }
+                }
+                out.sort_by(|a, b| {
+                    b.weight
+                        .partial_cmp(&a.weight)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| (&a.from, &a.to).cmp(&(&b.from, &b.to)))
+                });
+                out.truncate(VAULT_EDGE_CAP);
+                Ok(out)
+            }
+        }
     }
 
     /// Commit all changes.
@@ -1714,5 +1836,135 @@ mod tests {
 
         // The engine is still usable afterward — its state was not corrupted.
         assert_eq!(eng.read_note(&a).unwrap(), "hello body");
+    }
+
+    use cairn_infra::LexicalSemanticIndex;
+
+    fn lexical_engine(dir: &std::path::Path) -> Engine {
+        let mut e = engine(dir);
+        e.set_semantic_index(Box::new(LexicalSemanticIndex::new()));
+        e
+    }
+
+    #[test]
+    fn suggestions_exclude_self_and_already_linked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = lexical_engine(tmp.path());
+        let mut ev = Vec::new();
+        // a links to b explicitly; c is unlinked but topically identical to a.
+        eng.write_note(
+            &NotePath::new("a.md").unwrap(),
+            "rust ownership borrow [[b]]",
+            &mut ev,
+        )
+        .unwrap();
+        eng.write_note(
+            &NotePath::new("b.md").unwrap(),
+            "rust ownership borrow lifetime",
+            &mut ev,
+        )
+        .unwrap();
+        eng.write_note(
+            &NotePath::new("c.md").unwrap(),
+            "rust ownership borrow lifetime",
+            &mut ev,
+        )
+        .unwrap();
+
+        let s = eng
+            .suggestions(&Scope::Note(NotePath::new("a.md").unwrap()))
+            .unwrap();
+        // self never appears; already-linked b never appears; c (unlinked, related) does.
+        assert!(s.iter().all(|e| e.to.as_str() != "a.md"));
+        assert!(
+            s.iter().all(|e| e.to.as_str() != "b.md"),
+            "already-linked excluded"
+        );
+        assert!(
+            s.iter().any(|e| e.to.as_str() == "c.md"),
+            "unlinked related surfaced"
+        );
+        assert!(s.iter().all(|e| e.from.as_str() == "a.md"));
+    }
+
+    #[test]
+    fn suggestions_below_floor_excluded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = lexical_engine(tmp.path());
+        let mut ev = Vec::new();
+        eng.write_note(
+            &NotePath::new("a.md").unwrap(),
+            "rust ownership borrow",
+            &mut ev,
+        )
+        .unwrap();
+        eng.write_note(
+            &NotePath::new("z.md").unwrap(),
+            "tomato basil pasta garlic",
+            &mut ev,
+        )
+        .unwrap();
+        let s = eng
+            .suggestions(&Scope::Note(NotePath::new("a.md").unwrap()))
+            .unwrap();
+        assert!(
+            s.iter().all(|e| e.to.as_str() != "z.md"),
+            "unrelated note below floor excluded"
+        );
+    }
+
+    #[test]
+    fn vault_scope_dedups_pairs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = lexical_engine(tmp.path());
+        let mut ev = Vec::new();
+        eng.write_note(
+            &NotePath::new("a.md").unwrap(),
+            "rust ownership borrow lifetime",
+            &mut ev,
+        )
+        .unwrap();
+        eng.write_note(
+            &NotePath::new("b.md").unwrap(),
+            "rust ownership borrow lifetime",
+            &mut ev,
+        )
+        .unwrap();
+        let s = eng.suggestions(&Scope::Vault).unwrap();
+        // exactly one undirected pair (a,b), canonical from < to.
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].from.as_str(), "a.md");
+        assert_eq!(s[0].to.as_str(), "b.md");
+    }
+
+    #[test]
+    fn suggestions_lazy_build_then_stays_live() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = lexical_engine(tmp.path());
+        let mut ev = Vec::new();
+        eng.write_note(
+            &NotePath::new("a.md").unwrap(),
+            "rust ownership borrow",
+            &mut ev,
+        )
+        .unwrap();
+        // First call lazily builds from existing notes.
+        let _ = eng
+            .suggestions(&Scope::Note(NotePath::new("a.md").unwrap()))
+            .unwrap();
+        // A later write must be reflected (index is now live).
+        eng.write_note(
+            &NotePath::new("d.md").unwrap(),
+            "rust ownership borrow lifetime",
+            &mut ev,
+        )
+        .unwrap();
+        let s = eng
+            .suggestions(&Scope::Note(NotePath::new("a.md").unwrap()))
+            .unwrap();
+        assert!(
+            s.iter().any(|e| e.to.as_str() == "d.md"),
+            "post-build write surfaced"
+        );
     }
 }
