@@ -406,6 +406,50 @@ mod tests {
     }
 
     #[test]
+    fn read_tree_at_mtime_uses_earlier_commit_for_file_unchanged_at_rev() {
+        use git2::{Signature, Time};
+        let tmp = tempfile::tempdir().unwrap();
+        let vcs = GitVcs::open_or_init(tmp.path()).unwrap();
+        let repo = Repository::open(tmp.path()).unwrap();
+
+        // Commit the current working tree with an explicit committer time.
+        let commit_at = |secs: i64, msg: &str| -> git2::Oid {
+            let mut index = repo.index().unwrap();
+            index
+                .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+                .unwrap();
+            index.write().unwrap();
+            let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+            let sig = Signature::new("T", "t@e", &Time::new(secs, 0)).unwrap();
+            let parent = repo
+                .head()
+                .ok()
+                .and_then(|h| h.target())
+                .and_then(|o| repo.find_commit(o).ok());
+            let parents: Vec<&git2::Commit> = parent.iter().collect();
+            repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &parents)
+                .unwrap()
+        };
+
+        fs::write(tmp.path().join("a.md"), "v1").unwrap();
+        commit_at(1_000, "c1 add a");
+        // a.md is NOT modified in c2; only b.md is added.
+        fs::write(tmp.path().join("b.md"), "new").unwrap();
+        let c2 = commit_at(2_000, "c2 add b");
+
+        let blobs = vcs.read_tree_at(&c2.to_string()).unwrap();
+        let a = blobs.iter().find(|b| b.path == "a.md").unwrap();
+        let b = blobs.iter().find(|b| b.path == "b.md").unwrap();
+        // a.md's last touch is c1 (1000), NOT the snapshot commit c2 (2000).
+        assert_eq!(
+            a.mtime_secs, 1_000,
+            "unchanged file keeps its earlier touch time"
+        );
+        assert_eq!(b.mtime_secs, 2_000, "new file gets the c2 time");
+        assert!(a.mtime_secs < b.mtime_secs);
+    }
+
+    #[test]
     fn read_tree_at_notfound_on_bad_revspec() {
         let tmp = tempfile::tempdir().unwrap();
         let vcs = GitVcs::open_or_init(tmp.path()).unwrap();
