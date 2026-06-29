@@ -3,11 +3,11 @@
 
 use cairn_domain::{rewrite_link_target, Graph, Note, NotePath};
 use cairn_ports::{
-    AdapterError, EventDispatchError, FileStamp, FsChange, NoopPluginHost, PluginCallbacks,
-    PluginEvent, PluginHost, PluginInfo, PortError, Revision, SearchHit, SearchIndex, VaultStore,
-    Vcs,
+    AdapterError, EventDispatchError, FileStamp, FsChange, InertSemanticIndex, NoopPluginHost,
+    PluginCallbacks, PluginEvent, PluginHost, PluginInfo, PortError, Revision, SearchHit,
+    SearchIndex, SemanticIndex, VaultStore, Vcs,
 };
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -72,6 +72,8 @@ pub struct Engine {
     stamps: HashMap<NotePath, FileStamp>,
     notes_cache: RefCell<Option<HashMap<NotePath, Note>>>,
     plugins: Box<dyn PluginHost>,
+    semantic: RefCell<Box<dyn SemanticIndex + Send>>,
+    semantic_built: Cell<bool>,
 }
 
 impl Engine {
@@ -90,6 +92,8 @@ impl Engine {
             stamps: HashMap::new(),
             notes_cache: RefCell::new(None),
             plugins: Box::new(NoopPluginHost),
+            semantic: RefCell::new(Box::new(InertSemanticIndex)),
+            semantic_built: Cell::new(false),
         }
     }
 
@@ -290,6 +294,9 @@ impl Engine {
                     return Ok(());
                 }
                 self.index.upsert(&note)?;
+                if self.semantic_built.get() {
+                    self.semantic.get_mut().upsert(&note)?;
+                }
                 self.memo.insert(path.clone(), hash);
                 sink.emit(Event::NoteChanged(path.clone()));
                 sink.emit(Event::Reindexed(self.memo.len()));
@@ -314,6 +321,9 @@ impl Engine {
             // Fallible op first, then the infallible memo drop, so index and
             // memo stay consistent if a future index adapter's remove fails.
             self.index.remove(path)?;
+            if self.semantic_built.get() {
+                self.semantic.get_mut().remove(path)?;
+            }
             self.memo.remove(path);
             sink.emit(Event::NoteDeleted(path.clone()));
             sink.emit(Event::Reindexed(self.memo.len()));
@@ -343,6 +353,9 @@ impl Engine {
             return Ok(());
         }
         self.index.upsert(&note)?;
+        if self.semantic_built.get() {
+            self.semantic.get_mut().upsert(&note)?;
+        }
         self.memo.insert(path.clone(), hash);
         sink.emit(Event::NoteChanged(path.clone()));
         sink.emit(Event::Reindexed(self.memo.len()));
@@ -553,6 +566,13 @@ impl Engine {
         self.plugins = host;
     }
 
+    /// Replace the semantic index (the composition root injects the real one).
+    /// Resets the lazy-build flag so the next `suggestions` call rebuilds it.
+    pub fn set_semantic_index(&mut self, index: Box<dyn SemanticIndex + Send>) {
+        self.semantic = RefCell::new(index);
+        self.semantic_built.set(false);
+    }
+
     /// Loaded plugins and their declared commands.
     #[must_use]
     pub fn list_plugins(&self) -> Vec<PluginInfo> {
@@ -717,7 +737,56 @@ mod tests {
     use super::*;
     use cairn_infra::{GitVcs, InMemoryIndex, LocalFsStore, TantivyIndex};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
+
+    /// A SemanticIndex that records upsert/remove calls via a shared handle, so a
+    /// test can inspect them after the index is boxed into the engine.
+    #[derive(Clone, Default)]
+    struct RecordingSemantic {
+        upserts: Arc<Mutex<Vec<String>>>,
+        removes: Arc<Mutex<Vec<String>>>,
+    }
+    impl cairn_ports::SemanticIndex for RecordingSemantic {
+        fn upsert(&mut self, note: &Note) -> Result<(), PortError> {
+            self.upserts
+                .lock()
+                .unwrap()
+                .push(note.path.as_str().to_string());
+            Ok(())
+        }
+        fn remove(&mut self, path: &NotePath) -> Result<(), PortError> {
+            self.removes.lock().unwrap().push(path.as_str().to_string());
+            Ok(())
+        }
+        fn reindex(&mut self, _notes: &[Note]) -> Result<(), PortError> {
+            Ok(())
+        }
+        fn neighbors(
+            &self,
+            _f: &NotePath,
+            _k: usize,
+        ) -> Result<Vec<cairn_ports::Similarity>, PortError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn writes_skip_semantic_index_until_built() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let rec = RecordingSemantic::default();
+        let upserts = rec.upserts.clone(); // shared handle survives the move into the engine
+        eng.set_semantic_index(Box::new(rec));
+
+        let mut ev = Vec::new();
+        // semantic_built is false (no suggestions() call yet) → the write must NOT upsert.
+        eng.write_note(&NotePath::new("a.md").unwrap(), "rust ownership", &mut ev)
+            .unwrap();
+        assert!(
+            upserts.lock().unwrap().is_empty(),
+            "a write before the lazy build must not reach the semantic index"
+        );
+    }
 
     /// A `VaultStore` that counts `read` calls, delegating everything else to
     /// an inner `LocalFsStore`.
