@@ -173,6 +173,17 @@ pub trait SearchIndex {
     fn remove(&mut self, path: &NotePath) -> Result<(), PortError>;
 }
 
+/// A markdown note as of a revision: tree path, raw content, and last-touch time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoricalBlob {
+    /// Forward-slash relative path inside the tree.
+    pub path: String,
+    /// Raw file contents (lossy UTF-8, matching `show`).
+    pub content: String,
+    /// Newest commit time ≤ the revision that touched this note (Unix seconds).
+    pub mtime_secs: i64,
+}
+
 /// One commit in a note's history.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Revision {
@@ -216,6 +227,20 @@ pub trait Vcs {
     /// # Errors
     /// [`PortError::Adapter`] on a git failure.
     fn is_dirty(&self) -> Result<bool, PortError>;
+
+    /// Resolve a revspec to its full commit oid (40-hex). Cheap; for cache keying.
+    ///
+    /// # Errors
+    /// [`PortError::NotFound`] if the revspec does not resolve to a commit.
+    fn resolve(&self, revision: &str) -> Result<String, PortError>;
+
+    /// Every `.md` blob in the tree at `revision`, each tagged with the newest
+    /// commit time (Unix seconds) ≤ `revision` that touched it.
+    ///
+    /// # Errors
+    /// [`PortError::NotFound`] if the revspec does not resolve; [`PortError::Adapter`]
+    /// on a git failure.
+    fn read_tree_at(&self, revision: &str) -> Result<Vec<HistoricalBlob>, PortError>;
 }
 
 /// A change to a note detected on disk.
