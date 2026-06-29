@@ -1,7 +1,7 @@
 //! Application use-cases: orchestrate ports to fulfill commands and queries,
 //! emitting domain events. No transport or serialization lives here.
 
-use cairn_domain::{rewrite_link_target, Graph, Note, NotePath};
+use cairn_domain::{rewrite_link_target, Graph, GraphScope, Note, NotePath};
 use cairn_ports::{
     AdapterError, EventDispatchError, FileStamp, FsChange, NoopPluginHost, PluginCallbacks,
     PluginEvent, PluginHost, PluginInfo, PortError, Revision, SearchHit, SearchIndex, VaultStore,
@@ -9,6 +9,7 @@ use cairn_ports::{
 };
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
 /// Schema version of `.cairn/state.json`. Tags the hash regime: bump this
@@ -57,6 +58,92 @@ impl EventSink for Vec<Event> {
     }
 }
 
+/// A capacity-bounded LRU: most-recently-used at the back, evict from the front.
+struct LruCache<K: Eq, V> {
+    cap: usize,
+    items: Vec<(K, V)>,
+}
+impl<K: Eq, V> LruCache<K, V> {
+    fn new(cap: usize) -> Self {
+        Self {
+            cap,
+            items: Vec::new(),
+        }
+    }
+    fn get(&mut self, key: &K) -> Option<&V> {
+        let i = self.items.iter().position(|(k, _)| k == key)?;
+        let item = self.items.remove(i);
+        self.items.push(item);
+        self.items.last().map(|(_, v)| v)
+    }
+    fn put(&mut self, key: K, val: V) {
+        if let Some(i) = self.items.iter().position(|(k, _)| *k == key) {
+            self.items.remove(i);
+        } else if self.items.len() >= self.cap {
+            self.items.remove(0);
+        }
+        self.items.push((key, val));
+    }
+}
+
+/// A built graph plus per-note enrichment, cached whole (scope `Full`).
+struct BuiltGraph {
+    graph: Graph,
+    meta: HashMap<NotePath, (String, i64)>,
+}
+
+/// Flattened, scoped, enriched graph for the service layer.
+pub struct GraphResult {
+    /// `(path, title, mtime_secs)` per node.
+    pub nodes: Vec<(NotePath, String, i64)>,
+    /// `(from, to)` link edges.
+    pub edges: Vec<(NotePath, NotePath)>,
+}
+
+/// The enriched diff of two graphs.
+pub struct GraphDeltaResult {
+    /// Nodes in `to` not in `from` (enriched from `to`).
+    pub nodes_added: Vec<(NotePath, String, i64)>,
+    /// Nodes in `from` not in `to` (enriched from `from`).
+    pub nodes_removed: Vec<(NotePath, String, i64)>,
+    /// Edges added.
+    pub edges_added: Vec<(NotePath, NotePath)>,
+    /// Edges removed.
+    pub edges_removed: Vec<(NotePath, NotePath)>,
+}
+
+/// Flatten a built graph through a scope into wire-ready node/edge tuples.
+fn scope_and_flatten(built: &BuiltGraph, scope: &GraphScope) -> GraphResult {
+    let g = built.graph.scoped(scope);
+    let nodes = g
+        .nodes()
+        .into_iter()
+        .map(|p| {
+            let (title, mtime) = built.meta.get(p).cloned().unwrap_or_default();
+            (p.clone(), title, mtime)
+        })
+        .collect();
+    let edges = g
+        .edges()
+        .into_iter()
+        .map(|(a, b)| (a.clone(), b.clone()))
+        .collect();
+    GraphResult { nodes, edges }
+}
+
+/// Look a node's enrichment up, defaulting to empty title / 0 time.
+fn enrich(p: &NotePath, meta: &HashMap<NotePath, (String, i64)>) -> (NotePath, String, i64) {
+    let (title, mtime) = meta.get(p).cloned().unwrap_or_default();
+    (p.clone(), title, mtime)
+}
+
+/// Unix seconds from a filesystem `SystemTime` (0 if before the epoch).
+fn system_secs(t: std::time::SystemTime) -> i64 {
+    t.duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// The engine: owns the ports and runs use-cases.
 ///
 /// The ports are held as boxed trait objects (like `plugins`), so the engine is
@@ -71,6 +158,7 @@ pub struct Engine {
     memo: HashMap<NotePath, u64>,
     stamps: HashMap<NotePath, FileStamp>,
     notes_cache: RefCell<Option<HashMap<NotePath, Note>>>,
+    graph_at_cache: RefCell<LruCache<String, Arc<BuiltGraph>>>,
     plugins: Box<dyn PluginHost>,
 }
 
@@ -89,6 +177,7 @@ impl Engine {
             memo: HashMap::new(),
             stamps: HashMap::new(),
             notes_cache: RefCell::new(None),
+            graph_at_cache: RefCell::new(LruCache::new(16)),
             plugins: Box::new(NoopPluginHost),
         }
     }
@@ -461,6 +550,96 @@ impl Engine {
     /// Returns [`PortError`] if the cache must be populated and a port fails.
     pub fn graph(&self) -> Result<Graph, PortError> {
         self.with_notes(|m| Graph::build(m.values()))
+    }
+
+    /// The HEAD link graph, scoped and enriched. `mtime_secs` is the filesystem
+    /// mtime (`VaultStore::stamp`).
+    ///
+    /// # Errors
+    /// [`PortError`] if a port fails.
+    pub fn graph_view(&self, scope: &GraphScope) -> Result<GraphResult, PortError> {
+        let (graph, titles) = self.with_notes(|m| {
+            let graph = Graph::build(m.values());
+            let titles: Vec<(NotePath, String)> = m
+                .iter()
+                .map(|(p, n)| (p.clone(), n.display_title()))
+                .collect();
+            (graph, titles)
+        })?;
+        let mut meta = HashMap::new();
+        for (p, title) in titles {
+            let mtime = self
+                .store
+                .stamp(&p)
+                .map(|s| system_secs(s.modified))
+                .unwrap_or(0);
+            meta.insert(p, (title, mtime));
+        }
+        Ok(scope_and_flatten(&BuiltGraph { graph, meta }, scope))
+    }
+
+    /// The link graph as of a past `revision`, scoped and enriched. Cached by
+    /// resolved commit oid (immutable history → no invalidation).
+    ///
+    /// # Errors
+    /// [`PortError::NotFound`] if the revision does not resolve; [`PortError`] on a port failure.
+    pub fn graph_at(&self, revision: &str, scope: &GraphScope) -> Result<GraphResult, PortError> {
+        let built = self.built_at(revision)?;
+        Ok(scope_and_flatten(&built, scope))
+    }
+
+    /// The diff of the link graph between `from` (older) and `to` (newer).
+    ///
+    /// # Errors
+    /// [`PortError::NotFound`] if either revision does not resolve.
+    pub fn graph_diff(
+        &self,
+        from: &str,
+        to: &str,
+        scope: &GraphScope,
+    ) -> Result<GraphDeltaResult, PortError> {
+        let a = self.built_at(from)?;
+        let b = self.built_at(to)?;
+        let delta = a.graph.scoped(scope).diff(&b.graph.scoped(scope));
+        Ok(GraphDeltaResult {
+            nodes_added: delta
+                .nodes_added
+                .iter()
+                .map(|p| enrich(p, &b.meta))
+                .collect(),
+            nodes_removed: delta
+                .nodes_removed
+                .iter()
+                .map(|p| enrich(p, &a.meta))
+                .collect(),
+            edges_added: delta.edges_added,
+            edges_removed: delta.edges_removed,
+        })
+    }
+
+    /// Resolve → cache-or-build the Full enriched graph as of `revision`.
+    fn built_at(&self, revision: &str) -> Result<Arc<BuiltGraph>, PortError> {
+        let oid = self.vcs.resolve(revision)?;
+        if let Some(hit) = self.graph_at_cache.borrow_mut().get(&oid).cloned() {
+            return Ok(hit);
+        }
+        let blobs = self.vcs.read_tree_at(revision)?;
+        let mut notes = Vec::with_capacity(blobs.len());
+        let mut meta = HashMap::new();
+        for b in &blobs {
+            let Ok(path) = NotePath::new(&b.path) else {
+                continue; // dotfiles / control paths are not notes
+            };
+            let note = Note::parse(path.clone(), &b.content);
+            meta.insert(path.clone(), (note.display_title(), b.mtime_secs));
+            notes.push(note);
+        }
+        let built = Arc::new(BuiltGraph {
+            graph: Graph::build(notes.iter()),
+            meta,
+        });
+        self.graph_at_cache.borrow_mut().put(oid, built.clone());
+        Ok(built)
     }
 
     /// All tags across the cairn with note counts, sorted by tag.
@@ -1645,5 +1824,121 @@ mod tests {
 
         // The engine is still usable afterward — its state was not corrupted.
         assert_eq!(eng.read_note(&a).unwrap(), "hello body");
+    }
+
+    use std::sync::atomic::{AtomicUsize as Au, Ordering as Ord2};
+
+    /// A `Vcs` that counts `read_tree_at` calls, delegating to an inner `GitVcs`.
+    struct CountingVcs {
+        inner: GitVcs,
+        tree_reads: Arc<Au>,
+    }
+    impl Vcs for CountingVcs {
+        fn commit_all(&mut self, m: &str) -> Result<String, PortError> {
+            self.inner.commit_all(m)
+        }
+        fn history(&self, p: &str) -> Result<Vec<cairn_ports::Revision>, PortError> {
+            self.inner.history(p)
+        }
+        fn show(&self, p: &str, r: &str) -> Result<String, PortError> {
+            self.inner.show(p, r)
+        }
+        fn is_dirty(&self) -> Result<bool, PortError> {
+            self.inner.is_dirty()
+        }
+        fn resolve(&self, r: &str) -> Result<String, PortError> {
+            self.inner.resolve(r)
+        }
+        fn read_tree_at(&self, r: &str) -> Result<Vec<cairn_ports::HistoricalBlob>, PortError> {
+            self.tree_reads.fetch_add(1, Ord2::SeqCst);
+            self.inner.read_tree_at(r)
+        }
+    }
+
+    #[test]
+    fn graph_at_builds_historical_graph() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut ev = Vec::new();
+        let a = NotePath::new("a.md").unwrap();
+        let b = NotePath::new("b.md").unwrap();
+        eng.write_note(&a, "[[b]]", &mut ev).unwrap();
+        eng.write_note(&b, "x", &mut ev).unwrap();
+        let c1 = eng.commit("c1", &mut ev).unwrap();
+        eng.write_note(&a, "no link now", &mut ev).unwrap();
+        eng.commit("c2", &mut ev).unwrap();
+
+        // As of c1: a -> b present.
+        let at = eng.graph_at(&c1, &GraphScope::Full).unwrap();
+        assert!(at
+            .edges
+            .iter()
+            .any(|(x, y)| x.as_str() == "a.md" && y.as_str() == "b.md"));
+        // At HEAD: the link is gone.
+        let head = eng.graph_view(&GraphScope::Full).unwrap();
+        assert!(!head
+            .edges
+            .iter()
+            .any(|(x, y)| x.as_str() == "a.md" && y.as_str() == "b.md"));
+        // Nodes are enriched with a title (stem fallback here).
+        assert!(at
+            .nodes
+            .iter()
+            .any(|(p, title, _)| p.as_str() == "a.md" && title == "a"));
+    }
+
+    #[test]
+    fn graph_at_caches_by_oid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reads = Arc::new(Au::new(0));
+        let vcs = CountingVcs {
+            inner: GitVcs::open_or_init(tmp.path()).unwrap(),
+            tree_reads: reads.clone(),
+        };
+        let mut eng = Engine::new(
+            LocalFsStore::open(tmp.path()).unwrap(),
+            InMemoryIndex::default(),
+            vcs,
+        );
+        let mut ev = Vec::new();
+        eng.write_note(&NotePath::new("a.md").unwrap(), "[[b]]", &mut ev)
+            .unwrap();
+        let c1 = eng.commit("c1", &mut ev).unwrap();
+
+        let _ = eng.graph_at(&c1, &GraphScope::Full).unwrap();
+        let _ = eng.graph_at(&c1, &GraphScope::Full).unwrap(); // same oid
+        let _ = eng
+            .graph_at(
+                &c1,
+                &GraphScope::Focused {
+                    path: NotePath::new("a.md").unwrap(),
+                    depth: 0,
+                },
+            )
+            .unwrap(); // different scope, same oid -> still cached
+        assert_eq!(reads.load(Ord2::SeqCst), 1, "tree walked once per oid");
+    }
+
+    #[test]
+    fn graph_diff_reports_added_link_between_revisions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut ev = Vec::new();
+        let a = NotePath::new("a.md").unwrap();
+        let b = NotePath::new("b.md").unwrap();
+        let c = NotePath::new("c.md").unwrap();
+        eng.write_note(&a, "[[b]]", &mut ev).unwrap();
+        eng.write_note(&b, "x", &mut ev).unwrap();
+        let c1 = eng.commit("c1", &mut ev).unwrap();
+        eng.write_note(&c, "[[b]]", &mut ev).unwrap();
+        let c2 = eng.commit("c2", &mut ev).unwrap();
+
+        let d = eng.graph_diff(&c1, &c2, &GraphScope::Full).unwrap();
+        assert!(d.nodes_added.iter().any(|(p, _, _)| p.as_str() == "c.md"));
+        assert!(d
+            .edges_added
+            .iter()
+            .any(|(x, y)| x.as_str() == "c.md" && y.as_str() == "b.md"));
+        assert!(d.nodes_removed.is_empty());
     }
 }
