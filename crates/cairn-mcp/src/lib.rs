@@ -364,9 +364,17 @@ pub fn render_query_result(resp: &QueryResponse) -> ToolResult {
                 .with_structured(json!({ "plugins": plugins }))
         }
         QueryResponse::Suggestions { suggestions } => {
-            // SEAM: rich rendering added in Task 6.
-            ToolResult::text(format!("{} suggestions", suggestions.len()))
-                .with_structured(json!({ "suggestions": suggestions }))
+            let text = suggestions
+                .iter()
+                .map(|e| format!("{} → {} ({:.2})", e.from, e.to, e.weight))
+                .collect::<Vec<_>>()
+                .join("\n");
+            ToolResult::text(if text.is_empty() {
+                "(no suggestions)".into()
+            } else {
+                text
+            })
+            .with_structured(json!({ "suggestions": suggestions }))
         }
     }
 }
@@ -601,6 +609,26 @@ mod tests {
         assert!(
             r.structured_content.is_some(),
             "search is a structured tool"
+        );
+    }
+
+    #[test]
+    fn render_suggestions_result_names_both_paths_and_attaches_structured() {
+        use cairn_contract::SuggestedEdge;
+        let r = render_query_result(&QueryResponse::Suggestions {
+            suggestions: vec![SuggestedEdge {
+                from: "a.md".into(),
+                to: "c.md".into(),
+                weight: 0.5,
+                why: None,
+            }],
+        });
+        let text = text_of(&r);
+        assert!(text.contains("a.md"));
+        assert!(text.contains("c.md"));
+        assert!(
+            r.structured_content.is_some(),
+            "suggestions is a structured tool"
         );
     }
 
