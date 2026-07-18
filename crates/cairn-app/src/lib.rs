@@ -623,7 +623,7 @@ impl Engine {
         if let Some(hit) = self.graph_at_cache.borrow_mut().get(&oid).cloned() {
             return Ok(hit);
         }
-        let blobs = self.vcs.read_tree_at(revision)?;
+        let blobs = self.vcs.read_tree_at(&oid)?;
         let mut notes = Vec::with_capacity(blobs.len());
         let mut meta = HashMap::new();
         for b in &blobs {
