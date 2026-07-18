@@ -152,6 +152,18 @@ enum Command {
         /// A git revspec (short/full hash, `HEAD~1`…).
         revision: String,
     },
+    /// Print the link graph as of a past revision.
+    GraphAt {
+        /// A git revspec (short/full hash, `HEAD~1`…).
+        revision: String,
+    },
+    /// Print what changed in the link graph between two revisions.
+    GraphDiff {
+        /// Older revspec.
+        from: String,
+        /// Newer revspec.
+        to: String,
+    },
     /// Restore a note to a past revision (writes that version as current).
     Restore {
         /// Relative note path.
@@ -330,6 +342,54 @@ fn run() -> Result<(), String> {
                 }
                 for edge in edges {
                     println!("{} -> {}", edge.from, edge.to);
+                }
+            }
+        }
+        Command::GraphAt { revision } => {
+            if let QueryResponse::Graph { nodes, edges } = dispatch_query(
+                &engine,
+                &WireQuery::GraphAt {
+                    revision,
+                    scope: cairn_contract::GraphScope::Full,
+                },
+            )
+            .map_err(|e| e.to_string())?
+            {
+                for n in &nodes {
+                    println!("{}\t{}", n.path, n.title);
+                }
+                for edge in edges {
+                    println!("{} -> {}", edge.from, edge.to);
+                }
+            }
+        }
+        Command::GraphDiff { from, to } => {
+            if let QueryResponse::GraphDiff {
+                nodes_added,
+                nodes_removed,
+                edges_added,
+                edges_removed,
+            } = dispatch_query(
+                &engine,
+                &WireQuery::GraphDiff {
+                    from,
+                    to,
+                    scope: cairn_contract::GraphScope::Full,
+                },
+            )
+            .map_err(|e| e.to_string())?
+            {
+                for n in &nodes_added {
+                    println!("+ {}", n.path);
+                }
+                for n in &nodes_removed {
+                    println!("- {}", n.path);
+                }
+                for e in &edges_added {
+                    println!("+ {} -> {}", e.from, e.to);
+                }
+                for e in &edges_removed {
+                    println!("- {} -> {}", e.from, e.to);
                 }
             }
         }
