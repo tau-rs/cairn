@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use cairn_ports::{AdapterError, PortError, Revision, Vcs};
+use cairn_ports::{AdapterError, HistoricalBlob, PortError, Revision, Vcs};
 use git2::{Repository, Signature};
 
 fn adapt<E: std::error::Error + Send + Sync + 'static>(e: E) -> PortError {
@@ -129,6 +129,85 @@ impl Vcs for GitVcs {
             }
         }
         Ok(revs)
+    }
+
+    fn resolve(&self, revision: &str) -> Result<String, PortError> {
+        let repo = Repository::open(&self.root).map_err(adapt)?;
+        let commit = repo
+            .revparse_single(revision)
+            .and_then(|o| o.peel_to_commit())
+            .map_err(|_| PortError::NotFound(format!("revision {revision}")))?;
+        Ok(commit.id().to_string())
+    }
+
+    fn read_tree_at(&self, revision: &str) -> Result<Vec<HistoricalBlob>, PortError> {
+        let repo = Repository::open(&self.root).map_err(adapt)?;
+        let commit = repo
+            .revparse_single(revision)
+            .and_then(|o| o.peel_to_commit())
+            .map_err(|_| PortError::NotFound(format!("revision {revision}")))?;
+        let tree = commit.tree().map_err(adapt)?;
+
+        // 1. Collect every `.md` blob (path + content). `dir` ends in '/' or is "".
+        let mut paths: Vec<String> = Vec::new();
+        let mut contents: Vec<String> = Vec::new();
+        tree.walk(git2::TreeWalkMode::PreOrder, |dir, entry| {
+            if entry.kind() == Some(git2::ObjectType::Blob) {
+                if let Ok(name) = entry.name() {
+                    if name.ends_with(".md") {
+                        if let Ok(blob) = entry.to_object(&repo).and_then(|o| o.peel_to_blob()) {
+                            paths.push(format!("{dir}{name}"));
+                            contents.push(String::from_utf8_lossy(blob.content()).into_owned());
+                        }
+                    }
+                }
+            }
+            git2::TreeWalkResult::Ok
+        })
+        .map_err(adapt)?;
+
+        // 2. One backward revwalk: newest touching-commit time per path.
+        let snapshot_secs = commit.time().seconds();
+        let mut mtimes: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        if !paths.is_empty() {
+            let mut remaining: std::collections::HashSet<String> = paths.iter().cloned().collect();
+            let mut walk = repo.revwalk().map_err(adapt)?;
+            walk.push(commit.id()).map_err(adapt)?;
+            walk.set_sorting(git2::Sort::TIME | git2::Sort::TOPOLOGICAL)
+                .map_err(adapt)?;
+            for oid in walk {
+                if remaining.is_empty() {
+                    break;
+                }
+                let oid = oid.map_err(adapt)?;
+                let c = repo.find_commit(oid).map_err(adapt)?;
+                let secs = c.time().seconds();
+                let mut done = Vec::new();
+                for p in &remaining {
+                    if commit_touched_path(&c, Path::new(p)).map_err(adapt)? {
+                        mtimes.insert(p.clone(), secs);
+                        done.push(p.clone());
+                    }
+                }
+                for p in done {
+                    remaining.remove(&p);
+                }
+            }
+        }
+
+        // 3. Zip. Any path unresolved by the walk falls back to the snapshot time.
+        Ok(paths
+            .into_iter()
+            .zip(contents)
+            .map(|(path, content)| {
+                let mtime_secs = mtimes.get(&path).copied().unwrap_or(snapshot_secs);
+                HistoricalBlob {
+                    path,
+                    content,
+                    mtime_secs,
+                }
+            })
+            .collect())
     }
 
     fn show(&self, path: &str, revision: &str) -> Result<String, PortError> {
@@ -274,5 +353,109 @@ mod tests {
         // A second commit with no changes still succeeds (empty commit).
         let id2 = vcs.commit_all("second").unwrap();
         assert_eq!(id2.len(), 7);
+    }
+
+    #[test]
+    fn resolve_returns_full_oid_and_notfound_on_bad_revspec() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut vcs = GitVcs::open_or_init(tmp.path()).unwrap();
+        fs::write(tmp.path().join("a.md"), "v1").unwrap();
+        vcs.commit_all("v1").unwrap();
+        let oid = vcs.resolve("HEAD").unwrap();
+        assert_eq!(oid.len(), 40);
+        assert!(matches!(
+            vcs.resolve("no-such-rev"),
+            Err(PortError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn read_tree_at_collects_md_blobs_excluding_non_md_and_nested() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut vcs = GitVcs::open_or_init(tmp.path()).unwrap();
+        fs::write(tmp.path().join("a.md"), "[[b]]").unwrap();
+        fs::create_dir_all(tmp.path().join("sub")).unwrap();
+        fs::write(tmp.path().join("sub/b.md"), "x").unwrap();
+        fs::write(tmp.path().join("notes.txt"), "ignored").unwrap();
+        vcs.commit_all("c1").unwrap();
+
+        let mut blobs = vcs.read_tree_at("HEAD").unwrap();
+        blobs.sort_by(|x, y| x.path.cmp(&y.path));
+        let paths: Vec<&str> = blobs.iter().map(|b| b.path.as_str()).collect();
+        assert_eq!(paths, vec!["a.md", "sub/b.md"]); // .txt excluded, nested included
+        assert_eq!(blobs[0].content, "[[b]]");
+    }
+
+    #[test]
+    fn read_tree_at_mtime_is_newest_touching_commit_at_or_before_rev() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut vcs = GitVcs::open_or_init(tmp.path()).unwrap();
+        fs::write(tmp.path().join("a.md"), "v1").unwrap();
+        vcs.commit_all("c1 add a").unwrap();
+        // sleep not needed: commit times are seconds; assert relative ordering by content.
+        fs::write(tmp.path().join("a.md"), "v2").unwrap();
+        fs::write(tmp.path().join("b.md"), "new").unwrap();
+        let c2 = vcs.commit_all("c2 update a, add b").unwrap();
+
+        let blobs = vcs.read_tree_at(&c2).unwrap();
+        let a = blobs.iter().find(|b| b.path == "a.md").unwrap();
+        let b = blobs.iter().find(|b| b.path == "b.md").unwrap();
+        // Both last touched at c2; a's mtime must be >= its c1 time, and equal to b's (same commit).
+        assert_eq!(a.mtime_secs, b.mtime_secs);
+        assert!(a.mtime_secs > 0);
+    }
+
+    #[test]
+    fn read_tree_at_mtime_uses_earlier_commit_for_file_unchanged_at_rev() {
+        use git2::{Signature, Time};
+        let tmp = tempfile::tempdir().unwrap();
+        let vcs = GitVcs::open_or_init(tmp.path()).unwrap();
+        let repo = Repository::open(tmp.path()).unwrap();
+
+        // Commit the current working tree with an explicit committer time.
+        let commit_at = |secs: i64, msg: &str| -> git2::Oid {
+            let mut index = repo.index().unwrap();
+            index
+                .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+                .unwrap();
+            index.write().unwrap();
+            let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+            let sig = Signature::new("T", "t@e", &Time::new(secs, 0)).unwrap();
+            let parent = repo
+                .head()
+                .ok()
+                .and_then(|h| h.target())
+                .and_then(|o| repo.find_commit(o).ok());
+            let parents: Vec<&git2::Commit> = parent.iter().collect();
+            repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &parents)
+                .unwrap()
+        };
+
+        fs::write(tmp.path().join("a.md"), "v1").unwrap();
+        commit_at(1_000, "c1 add a");
+        // a.md is NOT modified in c2; only b.md is added.
+        fs::write(tmp.path().join("b.md"), "new").unwrap();
+        let c2 = commit_at(2_000, "c2 add b");
+
+        let blobs = vcs.read_tree_at(&c2.to_string()).unwrap();
+        let a = blobs.iter().find(|b| b.path == "a.md").unwrap();
+        let b = blobs.iter().find(|b| b.path == "b.md").unwrap();
+        // a.md's last touch is c1 (1000), NOT the snapshot commit c2 (2000).
+        assert_eq!(
+            a.mtime_secs, 1_000,
+            "unchanged file keeps its earlier touch time"
+        );
+        assert_eq!(b.mtime_secs, 2_000, "new file gets the c2 time");
+        assert!(a.mtime_secs < b.mtime_secs);
+    }
+
+    #[test]
+    fn read_tree_at_notfound_on_bad_revspec() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vcs = GitVcs::open_or_init(tmp.path()).unwrap();
+        assert!(matches!(
+            vcs.read_tree_at("nope"),
+            Err(PortError::NotFound(_))
+        ));
     }
 }
