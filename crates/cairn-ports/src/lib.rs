@@ -173,6 +173,44 @@ pub trait SearchIndex {
     fn remove(&mut self, path: &NotePath) -> Result<(), PortError>;
 }
 
+/// One semantically-similar note, with the terms behind the similarity.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Similarity {
+    /// The similar note.
+    pub path: NotePath,
+    /// Cosine similarity in `0..1`. Relative ordering only.
+    pub score: f32,
+    /// Top overlapping high-weight terms — the provenance for `why`.
+    pub shared: Vec<String>,
+}
+
+/// Embedding/vector index over note content. Seam: [`InertSemanticIndex`].
+/// Mirrors [`SearchIndex`]'s lifecycle so the engine can drive it from the
+/// same write/change/remove call sites.
+pub trait SemanticIndex {
+    /// Insert or replace a single note's vector.
+    ///
+    /// # Errors
+    /// Returns [`PortError`] if the adapter fails.
+    fn upsert(&mut self, note: &Note) -> Result<(), PortError>;
+    /// Remove a single note's vector.
+    ///
+    /// # Errors
+    /// Returns [`PortError`] if the adapter fails.
+    fn remove(&mut self, path: &NotePath) -> Result<(), PortError>;
+    /// Rebuild the whole index from the given notes.
+    ///
+    /// # Errors
+    /// Returns [`PortError`] if the adapter fails.
+    fn reindex(&mut self, notes: &[Note]) -> Result<(), PortError>;
+    /// The `top_k` notes most similar to `focus`, nearest first. Never includes
+    /// `focus` itself. An unknown `focus` yields `Ok(vec![])`.
+    ///
+    /// # Errors
+    /// Returns [`PortError`] if the adapter fails.
+    fn neighbors(&self, focus: &NotePath, top_k: usize) -> Result<Vec<Similarity>, PortError>;
+}
+
 /// One commit in a note's history.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Revision {
@@ -459,6 +497,24 @@ impl PluginHost for NoopPluginHost {
     }
 }
 
+/// Inert semantic-index seam — the engine's no-suggestions default.
+#[derive(Debug, Default)]
+pub struct InertSemanticIndex;
+impl SemanticIndex for InertSemanticIndex {
+    fn upsert(&mut self, _note: &Note) -> Result<(), PortError> {
+        Ok(())
+    }
+    fn remove(&mut self, _path: &NotePath) -> Result<(), PortError> {
+        Ok(())
+    }
+    fn reindex(&mut self, _notes: &[Note]) -> Result<(), PortError> {
+        Ok(())
+    }
+    fn neighbors(&self, _focus: &NotePath, _top_k: usize) -> Result<Vec<Similarity>, PortError> {
+        Ok(Vec::new())
+    }
+}
+
 /// Why a [`Sandbox`] could not confine a child.
 #[derive(Debug, thiserror::Error)]
 pub enum SandboxError {
@@ -540,6 +596,20 @@ mod tests {
         let err = PortError::Adapter(AdapterError::from("non-UTF-8 path".to_string()));
         assert_eq!(err.to_string(), "non-UTF-8 path");
         assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn inert_semantic_index_is_inert() {
+        use cairn_domain::{Note, NotePath};
+        let mut idx = InertSemanticIndex;
+        let note = Note::parse(NotePath::new("a.md").unwrap(), "hello");
+        assert!(idx.upsert(&note).is_ok());
+        assert!(idx.reindex(&[note]).is_ok());
+        assert!(idx.remove(&NotePath::new("a.md").unwrap()).is_ok());
+        assert!(idx
+            .neighbors(&NotePath::new("a.md").unwrap(), 5)
+            .unwrap()
+            .is_empty());
     }
 }
 

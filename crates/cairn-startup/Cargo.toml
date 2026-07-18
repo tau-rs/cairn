@@ -11,6 +11,7 @@ cairn-infra = { path = "../cairn-infra" }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+cairn-domain = { path = "../cairn-domain" }
 tempfile = { workspace = true }
 
 [lints]

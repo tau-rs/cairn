@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use cairn_app::Engine;
-use cairn_infra::{GitVcs, LocalFsStore, TantivyIndex};
+use cairn_infra::{GitVcs, LexicalSemanticIndex, LocalFsStore, TantivyIndex};
 
 /// Failures starting up against a cairn directory.
 #[derive(Debug, thiserror::Error)]
@@ -55,7 +55,9 @@ pub fn build_engine(root: &Path) -> Result<Engine, StartupError> {
     let store = LocalFsStore::open(root).map_err(|e| StartupError::Build(e.to_string()))?;
     let vcs = GitVcs::open_or_init(root).map_err(|e| StartupError::Build(e.to_string()))?;
     let index = TantivyIndex::in_memory().map_err(|e| StartupError::Build(e.to_string()))?;
-    Ok(Engine::new(store, index, vcs))
+    let mut engine = Engine::new(store, index, vcs);
+    engine.set_semantic_index(Box::new(LexicalSemanticIndex::new()));
+    Ok(engine)
 }
 
 #[cfg(test)]
@@ -76,5 +78,34 @@ mod tests {
         assert!(is_cairn(tmp.path()));
         ensure_cairn(tmp.path()).unwrap();
         build_engine(tmp.path()).unwrap();
+    }
+
+    #[test]
+    fn build_engine_wires_semantic_suggestions() {
+        use cairn_app::Scope;
+        use cairn_domain::NotePath;
+        let tmp = tempfile::tempdir().unwrap();
+        GitVcs::open_or_init(tmp.path()).unwrap();
+        let mut eng = build_engine(tmp.path()).unwrap();
+        let mut ev = Vec::new();
+        eng.write_note(
+            &NotePath::new("a.md").unwrap(),
+            "rust ownership borrow",
+            &mut ev,
+        )
+        .unwrap();
+        eng.write_note(
+            &NotePath::new("c.md").unwrap(),
+            "rust ownership borrow lifetime",
+            &mut ev,
+        )
+        .unwrap();
+        let s = eng
+            .suggestions(&Scope::Note(NotePath::new("a.md").unwrap()))
+            .unwrap();
+        assert!(
+            s.iter().any(|e| e.to.as_str() == "c.md"),
+            "real adapter wired by build_engine"
+        );
     }
 }

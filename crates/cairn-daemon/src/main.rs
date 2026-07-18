@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use cairn_app::{Engine, Event};
 use cairn_daemon::{build_router, cors_layer, AppState, Config};
-use cairn_infra::{GitVcs, LocalFsStore, NotifyWatcher, TantivyIndex};
+use cairn_infra::{GitVcs, LexicalSemanticIndex, LocalFsStore, NotifyWatcher, TantivyIndex};
 use cairn_ports::Watcher;
 use cairn_startup::{build_engine, ensure_cairn};
 use clap::Parser;
@@ -67,6 +67,7 @@ async fn run() -> Result<(), String> {
         let vcs = GitVcs::open_or_init(&cli.cairn).map_err(|e| e.to_string())?;
         let index = TantivyIndex::open_at(&index_dir).map_err(|e| e.to_string())?;
         let mut eng = Engine::new(store, index, vcs);
+        eng.set_semantic_index(Box::new(LexicalSemanticIndex::new()));
         eng.reconcile(&mut startup).map_err(|e| e.to_string())?;
         tracing::info!("persisting index at {}", index_dir.display());
         eng
