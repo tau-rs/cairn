@@ -4,7 +4,8 @@
 use cairn_app::{Engine, Event as AppEvent, EventSink};
 use cairn_contract::{
     Command, CommandResponse, ContractError, Event as WireEvent, GraphEdge, GraphNode, NoteSummary,
-    PluginCommandSummary, PluginSummary, Query, QueryResponse, Revision, SearchResult, TagCount,
+    PluginCommandSummary, PluginSummary, Query, QueryResponse, Revision, SearchResult,
+    SuggestedEdge, TagCount,
 };
 use cairn_domain::NotePath;
 use cairn_ports::{AdapterError, AgentRuntime, AgentSink, FsChange, PortError, WatchHandle};
@@ -140,6 +141,23 @@ pub fn app_event_to_wire(e: AppEvent) -> WireEvent {
 
 fn parse_path(raw: &str) -> Result<NotePath, ServiceError> {
     NotePath::new(raw).map_err(|e| ServiceError::InvalidRequest(e.to_string()))
+}
+
+fn map_scope(scope: &cairn_contract::SuggestionScope) -> Result<cairn_app::Scope, ServiceError> {
+    use cairn_contract::SuggestionScope;
+    Ok(match scope {
+        SuggestionScope::Note { path } => cairn_app::Scope::Note(parse_path(path)?),
+        SuggestionScope::Vault => cairn_app::Scope::Vault,
+    })
+}
+
+fn map_suggested_edge(e: cairn_app::SuggestedEdgeData) -> SuggestedEdge {
+    SuggestedEdge {
+        from: e.from.as_str().to_string(),
+        to: e.to.as_str().to_string(),
+        weight: e.weight,
+        why: e.why,
+    }
 }
 
 /// Dispatch a mutating command, emitting produced events via `sink`.
@@ -349,6 +367,15 @@ pub fn dispatch_query(engine: &Engine, query: &Query) -> Result<QueryResponse, S
                 })
                 .collect();
             Ok(QueryResponse::Plugins { plugins })
+        }
+        Query::GetSuggestions { scope } => {
+            let scope = map_scope(scope)?;
+            let suggestions = engine
+                .suggestions(&scope)?
+                .into_iter()
+                .map(map_suggested_edge)
+                .collect();
+            Ok(QueryResponse::Suggestions { suggestions })
         }
     }
 }
@@ -1135,6 +1162,70 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, ServiceError::InvalidRequest(_)));
+    }
+
+    fn lexical_engine(dir: &std::path::Path) -> cairn_app::Engine {
+        let mut e = cairn_startup::build_engine(dir).unwrap();
+        e.set_semantic_index(Box::new(cairn_infra::LexicalSemanticIndex::new()));
+        e
+    }
+
+    #[test]
+    fn get_suggestions_dispatch_returns_unlinked_related() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = lexical_engine(tmp.path());
+        let mut ev: Vec<AppEvent> = Vec::new();
+        dispatch_command(
+            &mut eng,
+            &Command::WriteNote {
+                path: "a.md".into(),
+                contents: "rust ownership borrow".into(),
+            },
+            &mut ev,
+        )
+        .unwrap();
+        dispatch_command(
+            &mut eng,
+            &Command::WriteNote {
+                path: "c.md".into(),
+                contents: "rust ownership borrow lifetime".into(),
+            },
+            &mut ev,
+        )
+        .unwrap();
+
+        let resp = dispatch_query(
+            &eng,
+            &Query::GetSuggestions {
+                scope: cairn_contract::SuggestionScope::Note {
+                    path: "a.md".into(),
+                },
+            },
+        )
+        .unwrap();
+        match resp {
+            QueryResponse::Suggestions { suggestions } => {
+                assert!(suggestions.iter().any(|e| e.to == "c.md"));
+                assert!(suggestions.iter().all(|e| e.from == "a.md"));
+            }
+            other => panic!("expected Suggestions, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_suggestions_unknown_focus_is_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let eng = cairn_startup::build_engine(tmp.path()).unwrap();
+        let err = dispatch_query(
+            &eng,
+            &Query::GetSuggestions {
+                scope: cairn_contract::SuggestionScope::Note {
+                    path: "missing.md".into(),
+                },
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, ServiceError::NotFound(_)));
     }
 
     #[test]

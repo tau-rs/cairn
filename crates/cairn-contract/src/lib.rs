@@ -104,6 +104,11 @@ pub enum Query {
         /// The tag to filter by.
         tag: String,
     },
+    /// Suggested (non-explicit) semantic edges within a scope.
+    GetSuggestions {
+        /// What to compute suggestions over.
+        scope: SuggestionScope,
+    },
     /// List loaded plugins and their commands.
     ListPlugins,
     /// A note's commit history (newest first).
@@ -417,6 +422,35 @@ pub enum GraphScope {
     },
 }
 
+/// What a `GetSuggestions` query computes suggestions over.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SuggestionScope {
+    /// Suggestions for one focus note (the related-notes panel).
+    Note {
+        /// Relative note path.
+        path: String,
+    },
+    /// Top suggested edges across the whole vault (the graph overlay).
+    Vault,
+}
+
+/// A suggested, non-explicit edge between two notes by path. `weight` is a
+/// similarity *ranking* in `0..1`, not a plottable distance.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SuggestedEdge {
+    /// Source note path.
+    pub from: String,
+    /// Target note path.
+    pub to: String,
+    /// Cosine similarity, `0..1`. Relative ordering only.
+    pub weight: f32,
+    /// Human-readable provenance, e.g. `"shared: ownership, borrow"`. `None` if unknown.
+    pub why: Option<String>,
+}
+
 /// One ranked search result.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -503,6 +537,11 @@ pub enum QueryResponse {
         /// One per commit, newest first.
         revisions: Vec<Revision>,
     },
+    /// Suggested semantic edges (response to `GetSuggestions`).
+    Suggestions {
+        /// Best match first.
+        suggestions: Vec<SuggestedEdge>,
+    },
 }
 
 /// A typed error returned across the contract boundary.
@@ -530,6 +569,42 @@ pub enum ContractError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn get_suggestions_query_roundtrips() {
+        let q = Query::GetSuggestions {
+            scope: SuggestionScope::Note {
+                path: "a.md".into(),
+            },
+        };
+        let j = serde_json::to_string(&q).unwrap();
+        assert!(j.contains("\"type\":\"get_suggestions\""));
+        assert!(j.contains("\"type\":\"note\""));
+        assert_eq!(serde_json::from_str::<Query>(&j).unwrap(), q);
+
+        let vault = Query::GetSuggestions {
+            scope: SuggestionScope::Vault,
+        };
+        let jv = serde_json::to_string(&vault).unwrap();
+        assert!(jv.contains("\"scope\":{\"type\":\"vault\"}"));
+        assert_eq!(serde_json::from_str::<Query>(&jv).unwrap(), vault);
+    }
+
+    #[test]
+    fn suggestions_response_roundtrips() {
+        let r = QueryResponse::Suggestions {
+            suggestions: vec![SuggestedEdge {
+                from: "a.md".into(),
+                to: "b.md".into(),
+                weight: 0.42,
+                why: Some("shared: rust, ownership".into()),
+            }],
+        };
+        let j = serde_json::to_string(&r).unwrap();
+        assert!(j.contains("\"type\":\"suggestions\""));
+        assert!(j.contains("\"weight\":0.42"));
+        assert_eq!(serde_json::from_str::<QueryResponse>(&j).unwrap(), r);
+    }
 
     #[test]
     fn command_serializes_with_type_tag() {

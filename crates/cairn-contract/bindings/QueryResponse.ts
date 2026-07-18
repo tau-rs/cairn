@@ -5,6 +5,7 @@ import type { NoteSummary } from "./NoteSummary";
 import type { PluginSummary } from "./PluginSummary";
 import type { Revision } from "./Revision";
 import type { SearchResult } from "./SearchResult";
+import type { SuggestedEdge } from "./SuggestedEdge";
 import type { TagCount } from "./TagCount";
 
 /**
@@ -62,4 +63,8 @@ plugins: Array<PluginSummary>, } | { "type": "history",
 /**
  * One per commit, newest first.
  */
-revisions: Array<Revision>, };
+revisions: Array<Revision>, } | { "type": "suggestions", 
+/**
+ * Best match first.
+ */
+suggestions: Array<SuggestedEdge>, };
