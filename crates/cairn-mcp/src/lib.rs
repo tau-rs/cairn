@@ -343,6 +343,24 @@ pub fn render_query_result(resp: &QueryResponse) -> ToolResult {
             ToolResult::text(format!("{} notes, {} links", nodes.len(), edges.len()))
                 .with_structured(json!({ "nodes": nodes, "edges": edges }))
         }
+        QueryResponse::GraphDiff {
+            nodes_added,
+            nodes_removed,
+            edges_added,
+            edges_removed,
+        } => ToolResult::text(format!(
+            "+{} -{} notes, +{} -{} links",
+            nodes_added.len(),
+            nodes_removed.len(),
+            edges_added.len(),
+            edges_removed.len()
+        ))
+        .with_structured(json!({
+            "nodes_added": nodes_added,
+            "nodes_removed": nodes_removed,
+            "edges_added": edges_added,
+            "edges_removed": edges_removed,
+        })),
         QueryResponse::Tags { tags } => {
             let text = tags
                 .iter()
@@ -419,7 +437,9 @@ pub fn parse_tool_call(name: &str, args: &Value) -> Result<ToolDispatch, RpcErro
             path: arg(args, "path")?,
         }),
         "list_notes" => Q(Query::ListNotes),
-        "graph" => Q(Query::GetGraph),
+        "graph" => Q(Query::GetGraph {
+            scope: cairn_contract::GraphScope::Full,
+        }),
         "list_tags" => Q(Query::ListTags),
         "notes_by_tag" => Q(Query::NotesByTag {
             tag: arg(args, "tag")?,
@@ -502,7 +522,9 @@ mod tests {
         );
         assert_eq!(
             parse_tool_call("graph", &json!({})).unwrap(),
-            ToolDispatch::Query(Query::GetGraph)
+            ToolDispatch::Query(Query::GetGraph {
+                scope: cairn_contract::GraphScope::Full
+            })
         );
         assert_eq!(
             parse_tool_call("list_tags", &json!({})).unwrap(),

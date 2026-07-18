@@ -1,7 +1,7 @@
 //! Verifies the `#[ts(export)]` bindings generate without error.
 use cairn_contract::{
-    AnswerEvent, AskRequest, Command, CommandResponse, ContractError, Event, GraphEdge,
-    NoteSummary, Query, QueryResponse, TagCount,
+    AnswerEvent, AskRequest, Command, CommandResponse, ContractError, Event, GraphEdge, GraphNode,
+    GraphScope, NoteSummary, Query, QueryResponse, TagCount,
 };
 use ts_rs::TS;
 
@@ -18,6 +18,8 @@ fn exports_typescript_bindings() {
     assert!(TagCount::decl().contains("TagCount"));
     assert!(AskRequest::decl().contains("AskRequest"));
     assert!(AnswerEvent::decl().contains("AnswerEvent"));
+    assert!(GraphNode::decl().contains("GraphNode"));
+    assert!(GraphScope::decl().contains("GraphScope"));
     Command::export_all().unwrap();
     Query::export_all().unwrap();
     Event::export_all().unwrap();
@@ -29,4 +31,6 @@ fn exports_typescript_bindings() {
     TagCount::export_all().unwrap();
     AskRequest::export_all().unwrap();
     AnswerEvent::export_all().unwrap();
+    GraphNode::export_all().unwrap();
+    GraphScope::export_all().unwrap();
 }

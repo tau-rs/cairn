@@ -76,8 +76,27 @@ pub enum Query {
     },
     /// List every note with a display title.
     ListNotes,
-    /// Fetch the full link graph.
-    GetGraph,
+    /// Fetch the link graph (whole or focused).
+    GetGraph {
+        /// Which slice to return.
+        scope: GraphScope,
+    },
+    /// The link graph as of a past revision.
+    GraphAt {
+        /// A git revspec (short/full hash, `HEAD~1`…).
+        revision: String,
+        /// Which slice to return.
+        scope: GraphScope,
+    },
+    /// The diff of the link graph between two revisions (`from` older, `to` newer).
+    GraphDiff {
+        /// Older revspec.
+        from: String,
+        /// Newer revspec.
+        to: String,
+        /// Which slice to diff.
+        scope: GraphScope,
+    },
     /// List all tags with note counts.
     ListTags,
     /// List the notes carrying a tag.
@@ -369,6 +388,35 @@ pub struct GraphEdge {
     pub to: String,
 }
 
+/// A node in the link graph: a note plus light display metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct GraphNode {
+    /// Relative note path.
+    pub path: String,
+    /// Display title at this revision (frontmatter `title:` → first `# ` → stem).
+    pub title: String,
+    /// Last-modified, Unix seconds. HEAD: filesystem mtime. Historical: newest
+    /// commit ≤ the revision that touched the note.
+    pub mtime_secs: i64,
+}
+
+/// Which slice of the graph to return.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum GraphScope {
+    /// The whole graph.
+    Full,
+    /// The undirected neighborhood of `path` out to `depth` hops (path = depth 0).
+    Focused {
+        /// Focus note path.
+        path: String,
+        /// Hop radius.
+        depth: u32,
+    },
+}
+
 /// One ranked search result.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -422,12 +470,23 @@ pub enum QueryResponse {
         /// One per note.
         notes: Vec<NoteSummary>,
     },
-    /// The link graph (response to `GetGraph`).
+    /// The link graph (response to `GetGraph` / `GraphAt`).
     Graph {
-        /// All note paths.
-        nodes: Vec<String>,
+        /// Enriched nodes.
+        nodes: Vec<GraphNode>,
         /// Directed link edges.
         edges: Vec<GraphEdge>,
+    },
+    /// The diff of two graphs (response to `GraphDiff`).
+    GraphDiff {
+        /// Nodes present in `to` not `from`.
+        nodes_added: Vec<GraphNode>,
+        /// Nodes present in `from` not `to`.
+        nodes_removed: Vec<GraphNode>,
+        /// Edges present in `to` not `from`.
+        edges_added: Vec<GraphEdge>,
+        /// Edges present in `from` not `to`.
+        edges_removed: Vec<GraphEdge>,
     },
     /// All tags with counts (response to `ListTags`).
     Tags {
@@ -528,7 +587,18 @@ mod tests {
         assert_eq!(serde_json::from_str::<QueryResponse>(&j).unwrap(), n);
 
         let g = QueryResponse::Graph {
-            nodes: vec!["a.md".into(), "b.md".into()],
+            nodes: vec![
+                GraphNode {
+                    path: "a.md".into(),
+                    title: "A".into(),
+                    mtime_secs: 1,
+                },
+                GraphNode {
+                    path: "b.md".into(),
+                    title: "B".into(),
+                    mtime_secs: 2,
+                },
+            ],
             edges: vec![GraphEdge {
                 from: "a.md".into(),
                 to: "b.md".into(),
@@ -543,8 +613,11 @@ mod tests {
             "{\"type\":\"list_notes\"}"
         );
         assert_eq!(
-            serde_json::from_str::<Query>("{\"type\":\"get_graph\"}").unwrap(),
-            Query::GetGraph
+            serde_json::from_str::<Query>("{\"type\":\"get_graph\",\"scope\":{\"type\":\"full\"}}")
+                .unwrap(),
+            Query::GetGraph {
+                scope: GraphScope::Full
+            }
         );
     }
 

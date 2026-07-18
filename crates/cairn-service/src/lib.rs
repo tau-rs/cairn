@@ -3,7 +3,7 @@
 
 use cairn_app::{Engine, Event as AppEvent, EventSink};
 use cairn_contract::{
-    Command, CommandResponse, ContractError, Event as WireEvent, GraphEdge, NoteSummary,
+    Command, CommandResponse, ContractError, Event as WireEvent, GraphEdge, GraphNode, NoteSummary,
     PluginCommandSummary, PluginSummary, Query, QueryResponse, Revision, SearchResult, TagCount,
 };
 use cairn_domain::NotePath;
@@ -190,6 +190,43 @@ pub fn dispatch_command(
     }
 }
 
+/// Map the wire scope to the domain scope, validating any focus path.
+fn to_domain_scope(
+    s: &cairn_contract::GraphScope,
+) -> Result<cairn_domain::GraphScope, ServiceError> {
+    Ok(match s {
+        cairn_contract::GraphScope::Full => cairn_domain::GraphScope::Full,
+        cairn_contract::GraphScope::Focused { path, depth } => {
+            let p = NotePath::new(path)
+                .map_err(|_| ServiceError::InvalidRequest(format!("invalid focus path: {path}")))?;
+            cairn_domain::GraphScope::Focused {
+                path: p,
+                depth: *depth,
+            }
+        }
+    })
+}
+
+fn node_to_wire((p, title, mtime): (NotePath, String, i64)) -> GraphNode {
+    GraphNode {
+        path: p.as_str().to_string(),
+        title,
+        mtime_secs: mtime,
+    }
+}
+fn edge_to_wire((a, b): (NotePath, NotePath)) -> GraphEdge {
+    GraphEdge {
+        from: a.as_str().to_string(),
+        to: b.as_str().to_string(),
+    }
+}
+fn graph_to_wire(g: cairn_app::GraphResult) -> QueryResponse {
+    QueryResponse::Graph {
+        nodes: g.nodes.into_iter().map(node_to_wire).collect(),
+        edges: g.edges.into_iter().map(edge_to_wire).collect(),
+    }
+}
+
 /// Dispatch a read-only query.
 ///
 /// # Errors
@@ -256,22 +293,20 @@ pub fn dispatch_query(engine: &Engine, query: &Query) -> Result<QueryResponse, S
                 .collect();
             Ok(QueryResponse::Notes { notes })
         }
-        Query::GetGraph => {
-            let graph = engine.graph()?;
-            let nodes = graph
-                .nodes()
-                .into_iter()
-                .map(|p| p.as_str().to_string())
-                .collect();
-            let edges = graph
-                .edges()
-                .into_iter()
-                .map(|(from, to)| GraphEdge {
-                    from: from.as_str().to_string(),
-                    to: to.as_str().to_string(),
-                })
-                .collect();
-            Ok(QueryResponse::Graph { nodes, edges })
+        Query::GetGraph { scope } => {
+            Ok(graph_to_wire(engine.graph_view(&to_domain_scope(scope)?)?))
+        }
+        Query::GraphAt { revision, scope } => Ok(graph_to_wire(
+            engine.graph_at(revision, &to_domain_scope(scope)?)?,
+        )),
+        Query::GraphDiff { from, to, scope } => {
+            let d = engine.graph_diff(from, to, &to_domain_scope(scope)?)?;
+            Ok(QueryResponse::GraphDiff {
+                nodes_added: d.nodes_added.into_iter().map(node_to_wire).collect(),
+                nodes_removed: d.nodes_removed.into_iter().map(node_to_wire).collect(),
+                edges_added: d.edges_added.into_iter().map(edge_to_wire).collect(),
+                edges_removed: d.edges_removed.into_iter().map(edge_to_wire).collect(),
+            })
         }
         Query::ListTags => {
             let tags = engine
@@ -668,9 +703,17 @@ mod tests {
             other => panic!("expected Notes, got {other:?}"),
         }
 
-        match dispatch_query(&eng, &Query::GetGraph).unwrap() {
+        match dispatch_query(
+            &eng,
+            &Query::GetGraph {
+                scope: cairn_contract::GraphScope::Full,
+            },
+        )
+        .unwrap()
+        {
             QueryResponse::Graph { nodes, edges } => {
-                assert_eq!(nodes, vec!["a.md".to_string(), "b.md".to_string()]);
+                assert!(nodes.iter().any(|n| n.path == "a.md"));
+                assert!(nodes.iter().any(|n| n.path == "b.md"));
                 assert_eq!(
                     edges,
                     vec![GraphEdge {
@@ -1146,6 +1189,51 @@ mod tests {
             }
             other => panic!("expected Plugins, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn graph_at_dispatch_returns_enriched_historical_graph() {
+        use cairn_contract::{GraphScope, QueryResponse};
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut ev = Vec::new();
+        eng.write_note(&NotePath::new("a.md").unwrap(), "[[b]]", &mut ev)
+            .unwrap();
+        eng.write_note(&NotePath::new("b.md").unwrap(), "x", &mut ev)
+            .unwrap();
+        let c1 = eng.commit("c1", &mut ev).unwrap();
+
+        let resp = dispatch_query(
+            &eng,
+            &Query::GraphAt {
+                revision: c1,
+                scope: GraphScope::Full,
+            },
+        )
+        .unwrap();
+        match resp {
+            QueryResponse::Graph { nodes, edges } => {
+                assert!(nodes.iter().any(|n| n.path == "a.md" && n.title == "a"));
+                assert!(edges.iter().any(|e| e.from == "a.md" && e.to == "b.md"));
+            }
+            _ => panic!("expected Graph"),
+        }
+    }
+
+    #[test]
+    fn graph_at_bad_revision_is_not_found() {
+        use cairn_contract::GraphScope;
+        let tmp = tempfile::tempdir().unwrap();
+        let eng = engine(tmp.path());
+        let err = dispatch_query(
+            &eng,
+            &Query::GraphAt {
+                revision: "no-such-rev".into(),
+                scope: GraphScope::Full,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, ServiceError::NotFound(_)));
     }
 }
 
