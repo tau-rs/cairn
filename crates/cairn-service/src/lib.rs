@@ -293,7 +293,7 @@ pub fn dispatch_query(engine: &Engine, query: &Query) -> Result<QueryResponse, S
                     .unwrap_or_else(|| (p.stem().to_string(), Vec::new()));
                 nodes.push(GraphNode {
                     degree: graph.degree(&p),
-                    mtime_secs: engine.note_mtime_secs(&p)?,
+                    mtime_secs: engine.note_mtime_secs(&p).unwrap_or(0),
                     path: p.as_str().to_string(),
                     title,
                     tags,
@@ -816,6 +816,83 @@ mod tests {
                 assert!(
                     !paths.contains(&"far.md"),
                     "far.md is outside the depth-1 neighborhood"
+                );
+            }
+            other => panic!("expected Graph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_graph_global_degrades_mtime_for_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut sink: Vec<AppEvent> = Vec::new();
+
+        // Write two notes: a.md links to b.md
+        dispatch_command(
+            &mut eng,
+            &Command::WriteNote {
+                path: "a.md".into(),
+                contents: "see [[b]]".into(),
+            },
+            &mut sink,
+        )
+        .unwrap();
+        dispatch_command(
+            &mut eng,
+            &Command::WriteNote {
+                path: "b.md".into(),
+                contents: "hi".into(),
+            },
+            &mut sink,
+        )
+        .unwrap();
+
+        // Warm the cache: run a global GetGraph once
+        let scope = cairn_contract::GraphScope {
+            focus: None,
+            depth: None,
+        };
+        let initial = dispatch_query(
+            &eng,
+            &Query::GetGraph {
+                scope: scope.clone(),
+            },
+        )
+        .unwrap();
+        match &initial {
+            QueryResponse::Graph { nodes, .. } => {
+                assert_eq!(nodes.len(), 2, "baseline: both notes present");
+                let a = nodes.iter().find(|n| n.path == "a.md").unwrap();
+                let b = nodes.iter().find(|n| n.path == "b.md").unwrap();
+                assert!(a.mtime_secs > 0, "a.md mtime should be positive");
+                assert!(b.mtime_secs > 0, "b.md mtime should be positive");
+            }
+            other => panic!("expected Graph, got {other:?}"),
+        }
+
+        // Delete b.md's file directly on disk to create cache-vs-disk skew.
+        // The note stays in the warm cache but its file is gone.
+        std::fs::remove_file(tmp.path().join("b.md")).unwrap();
+
+        // Query again: should still return Ok, both nodes still present.
+        let result = dispatch_query(&eng, &Query::GetGraph { scope }).unwrap();
+        match result {
+            QueryResponse::Graph { nodes, .. } => {
+                assert_eq!(
+                    nodes.len(),
+                    2,
+                    "graph still returns both nodes despite b.md missing on disk"
+                );
+                let a = nodes.iter().find(|n| n.path == "a.md").unwrap();
+                let b = nodes.iter().find(|n| n.path == "b.md").unwrap();
+                assert!(
+                    a.mtime_secs > 0,
+                    "a.md mtime should still be positive (file exists)"
+                );
+                assert_eq!(
+                    b.mtime_secs, 0,
+                    "b.md mtime should degrade to 0 (file missing)"
                 );
             }
             other => panic!("expected Graph, got {other:?}"),
