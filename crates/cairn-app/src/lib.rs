@@ -447,6 +447,20 @@ impl Engine {
         self.with_notes(|m| Graph::build(m.values()).backlinks(path).to_vec())
     }
 
+    /// The note's last-modified time as whole Unix seconds, via the store
+    /// stamp. mtime is a filesystem fact, so it is sourced here (infra) rather
+    /// than carried on the pure domain `Note`.
+    ///
+    /// # Errors
+    /// [`PortError::NotFound`] if the note is missing; [`PortError`] on a stamp failure.
+    pub fn note_mtime_secs(&self, path: &NotePath) -> Result<u64, PortError> {
+        let stamp = self.store.stamp(path)?;
+        Ok(stamp
+            .modified
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs()))
+    }
+
     /// All parsed notes in the cairn (from the cache).
     ///
     /// # Errors
@@ -1645,5 +1659,23 @@ mod tests {
 
         // The engine is still usable afterward — its state was not corrupted.
         assert_eq!(eng.read_note(&a).unwrap(), "hello body");
+    }
+
+    #[test]
+    fn note_mtime_secs_reflects_a_written_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut sink: Vec<Event> = Vec::new();
+        let p = NotePath::new("a.md").unwrap();
+        eng.write_note(&p, "hello", &mut sink).unwrap();
+
+        let secs = eng.note_mtime_secs(&p).unwrap();
+        assert!(secs > 0, "a just-written note has a nonzero unix mtime");
+
+        // A missing note surfaces NotFound (from the store stamp).
+        assert!(matches!(
+            eng.note_mtime_secs(&NotePath::new("gone.md").unwrap()),
+            Err(PortError::NotFound(_))
+        ));
     }
 }
