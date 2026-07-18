@@ -6,7 +6,7 @@
 //!
 //! Hand-rolled (JSON-RPC 2.0, MCP-style), mirroring `cairn-plugin-protocol`.
 
-use cairn_contract::{Command, CommandResponse, ContractError, Query, QueryResponse};
+use cairn_contract::{Command, CommandResponse, ContractError, GraphScope, Query, QueryResponse};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -363,6 +363,10 @@ pub fn render_query_result(resp: &QueryResponse) -> ToolResult {
             ToolResult::text(format!("{} plugins", plugins.len()))
                 .with_structured(json!({ "plugins": plugins }))
         }
+        QueryResponse::Suggestions { suggestions } => {
+            ToolResult::text(format!("{} suggestions", suggestions.len()))
+                .with_structured(json!({ "suggestions": suggestions }))
+        }
     }
 }
 
@@ -385,6 +389,7 @@ pub fn map_error(err: &ContractError) -> ToolResult {
         ContractError::NotFound { what } => format!("not found: {what}"),
         ContractError::InvalidRequest { message } => format!("invalid request: {message}"),
         ContractError::Internal { message } => format!("internal error: {message}"),
+        ContractError::Unsupported { message } => format!("unsupported: {message}"),
     };
     ToolResult {
         content: vec![Content::Text { text: message }],
@@ -419,7 +424,12 @@ pub fn parse_tool_call(name: &str, args: &Value) -> Result<ToolDispatch, RpcErro
             path: arg(args, "path")?,
         }),
         "list_notes" => Q(Query::ListNotes),
-        "graph" => Q(Query::GetGraph),
+        "graph" => Q(Query::GetGraph {
+            scope: GraphScope {
+                focus: None,
+                depth: None,
+            },
+        }),
         "list_tags" => Q(Query::ListTags),
         "notes_by_tag" => Q(Query::NotesByTag {
             tag: arg(args, "tag")?,
@@ -502,7 +512,12 @@ mod tests {
         );
         assert_eq!(
             parse_tool_call("graph", &json!({})).unwrap(),
-            ToolDispatch::Query(Query::GetGraph)
+            ToolDispatch::Query(Query::GetGraph {
+                scope: GraphScope {
+                    focus: None,
+                    depth: None
+                }
+            })
         );
         assert_eq!(
             parse_tool_call("list_tags", &json!({})).unwrap(),

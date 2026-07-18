@@ -278,6 +278,7 @@ fn status_for(err: &ServiceError) -> StatusCode {
         ServiceError::NotFound(_) => StatusCode::NOT_FOUND,
         ServiceError::InvalidRequest(_) => StatusCode::BAD_REQUEST,
         ServiceError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        ServiceError::Unsupported(_) => StatusCode::NOT_IMPLEMENTED,
     }
 }
 
@@ -326,7 +327,9 @@ fn query_kind(query: &Query) -> &'static str {
         Query::Search { .. } => "search",
         Query::GetBacklinks { .. } => "get_backlinks",
         Query::ListNotes => "list_notes",
-        Query::GetGraph => "get_graph",
+        Query::GetGraph { .. } => "get_graph",
+        Query::GetSuggestions => "get_suggestions",
+        Query::GraphAt { .. } => "graph_at",
         Query::ListTags => "list_tags",
         Query::NotesByTag { .. } => "notes_by_tag",
         Query::ListPlugins => "list_plugins",

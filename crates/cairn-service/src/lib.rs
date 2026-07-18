@@ -3,11 +3,12 @@
 
 use cairn_app::{Engine, Event as AppEvent, EventSink};
 use cairn_contract::{
-    Command, CommandResponse, ContractError, Event as WireEvent, GraphEdge, NoteSummary,
+    Command, CommandResponse, ContractError, Event as WireEvent, GraphEdge, GraphNode, NoteSummary,
     PluginCommandSummary, PluginSummary, Query, QueryResponse, Revision, SearchResult, TagCount,
 };
 use cairn_domain::NotePath;
 use cairn_ports::{AdapterError, AgentRuntime, AgentSink, FsChange, PortError, WatchHandle};
+use std::collections::HashMap;
 
 /// Drain a watch handle until its sender drops, invoking `on_change` for each
 /// debounced change. Blocking — run on a dedicated thread (CLI `watch`) or via
@@ -93,6 +94,9 @@ pub enum ServiceError {
     /// boundary (`ContractError`), which never leaks internals to clients.
     #[error(transparent)]
     Internal(AdapterError),
+    /// A recognized request that is not yet supported (e.g. `GraphAt`).
+    #[error("unsupported: {0}")]
+    Unsupported(String),
 }
 
 impl From<PortError> for ServiceError {
@@ -114,6 +118,7 @@ impl From<ServiceError> for ContractError {
             ServiceError::Internal(a) => ContractError::Internal {
                 message: a.to_string(),
             },
+            ServiceError::Unsupported(message) => ContractError::Unsupported { message },
         }
     }
 }
@@ -256,15 +261,45 @@ pub fn dispatch_query(engine: &Engine, query: &Query) -> Result<QueryResponse, S
                 .collect();
             Ok(QueryResponse::Notes { notes })
         }
-        Query::GetGraph => {
+        Query::GetGraph { scope } => {
             let graph = engine.graph()?;
-            let nodes = graph
-                .nodes()
+            // path -> (display title, tags) for the notes currently on disk.
+            let meta: HashMap<String, (String, Vec<String>)> = engine
+                .list_notes()?
                 .into_iter()
-                .map(|p| p.as_str().to_string())
+                .map(|n| (n.path.as_str().to_string(), (n.display_title(), n.tags())))
                 .collect();
-            let edges = graph
-                .edges()
+
+            let (node_paths, edge_pairs) = match &scope.focus {
+                Some(focus_raw) => {
+                    let focus = parse_path(focus_raw)?;
+                    graph.neighborhood(&focus, scope.depth.unwrap_or(1))
+                }
+                None => (
+                    graph.nodes().into_iter().cloned().collect(),
+                    graph
+                        .edges()
+                        .into_iter()
+                        .map(|(a, b)| (a.clone(), b.clone()))
+                        .collect(),
+                ),
+            };
+
+            let mut nodes = Vec::with_capacity(node_paths.len());
+            for p in node_paths {
+                let (title, tags) = meta
+                    .get(p.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| (p.stem().to_string(), Vec::new()));
+                nodes.push(GraphNode {
+                    degree: graph.degree(&p),
+                    mtime_secs: engine.note_mtime_secs(&p)?,
+                    path: p.as_str().to_string(),
+                    title,
+                    tags,
+                });
+            }
+            let edges = edge_pairs
                 .into_iter()
                 .map(|(from, to)| GraphEdge {
                     from: from.as_str().to_string(),
@@ -273,6 +308,12 @@ pub fn dispatch_query(engine: &Engine, query: &Query) -> Result<QueryResponse, S
                 .collect();
             Ok(QueryResponse::Graph { nodes, edges })
         }
+        Query::GetSuggestions => Ok(QueryResponse::Suggestions {
+            suggestions: vec![],
+        }),
+        Query::GraphAt { .. } => Err(ServiceError::Unsupported(
+            "graph_at not yet supported".into(),
+        )),
         Query::ListTags => {
             let tags = engine
                 .list_tags()?
@@ -668,9 +709,20 @@ mod tests {
             other => panic!("expected Notes, got {other:?}"),
         }
 
-        match dispatch_query(&eng, &Query::GetGraph).unwrap() {
+        match dispatch_query(
+            &eng,
+            &Query::GetGraph {
+                scope: cairn_contract::GraphScope {
+                    focus: None,
+                    depth: None,
+                },
+            },
+        )
+        .unwrap()
+        {
             QueryResponse::Graph { nodes, edges } => {
-                assert_eq!(nodes, vec!["a.md".to_string(), "b.md".to_string()]);
+                let paths: Vec<&str> = nodes.iter().map(|n| n.path.as_str()).collect();
+                assert_eq!(paths, vec!["a.md", "b.md"]);
                 assert_eq!(
                     edges,
                     vec![GraphEdge {
@@ -681,6 +733,119 @@ mod tests {
             }
             other => panic!("expected Graph, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn get_graph_global_returns_graphnodes_with_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut sink: Vec<AppEvent> = Vec::new();
+        dispatch_command(
+            &mut eng,
+            &Command::WriteNote {
+                path: "a.md".into(),
+                contents: "---\ntitle: Alpha\ntags: [rust]\n---\nsee [[b]]".into(),
+            },
+            &mut sink,
+        )
+        .unwrap();
+        dispatch_command(
+            &mut eng,
+            &Command::WriteNote {
+                path: "b.md".into(),
+                contents: "hi".into(),
+            },
+            &mut sink,
+        )
+        .unwrap();
+
+        let scope = cairn_contract::GraphScope {
+            focus: None,
+            depth: None,
+        };
+        match dispatch_query(&eng, &Query::GetGraph { scope }).unwrap() {
+            QueryResponse::Graph { nodes, edges } => {
+                let a = nodes.iter().find(|n| n.path == "a.md").unwrap();
+                assert_eq!(a.title, "Alpha");
+                assert_eq!(a.tags, vec!["rust".to_string()]);
+                assert_eq!(a.degree, 1);
+                assert!(a.mtime_secs > 0);
+                assert_eq!(
+                    edges,
+                    vec![cairn_contract::GraphEdge {
+                        from: "a.md".into(),
+                        to: "b.md".into()
+                    }]
+                );
+            }
+            other => panic!("expected Graph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_graph_scoped_bounds_to_neighborhood() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut sink: Vec<AppEvent> = Vec::new();
+        for (p, c) in [
+            ("hub.md", "[[a]] [[b]]"),
+            ("a.md", "x"),
+            ("b.md", "x"),
+            ("far.md", "unrelated"),
+        ] {
+            dispatch_command(
+                &mut eng,
+                &Command::WriteNote {
+                    path: p.into(),
+                    contents: c.into(),
+                },
+                &mut sink,
+            )
+            .unwrap();
+        }
+        let scope = cairn_contract::GraphScope {
+            focus: Some("hub.md".into()),
+            depth: Some(1),
+        };
+        match dispatch_query(&eng, &Query::GetGraph { scope }).unwrap() {
+            QueryResponse::Graph { nodes, .. } => {
+                let paths: Vec<&str> = nodes.iter().map(|n| n.path.as_str()).collect();
+                assert!(
+                    paths.contains(&"hub.md") && paths.contains(&"a.md") && paths.contains(&"b.md")
+                );
+                assert!(
+                    !paths.contains(&"far.md"),
+                    "far.md is outside the depth-1 neighborhood"
+                );
+            }
+            other => panic!("expected Graph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_suggestions_is_empty_and_graph_at_is_unsupported() {
+        let tmp = tempfile::tempdir().unwrap();
+        let eng = engine(tmp.path());
+        match dispatch_query(&eng, &Query::GetSuggestions).unwrap() {
+            QueryResponse::Suggestions { suggestions } => assert!(suggestions.is_empty()),
+            other => panic!("expected Suggestions, got {other:?}"),
+        }
+        let err = dispatch_query(
+            &eng,
+            &Query::GraphAt {
+                revision: "HEAD".into(),
+                scope: cairn_contract::GraphScope {
+                    focus: None,
+                    depth: None,
+                },
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, ServiceError::Unsupported(_)));
+        assert!(matches!(
+            ContractError::from(err),
+            ContractError::Unsupported { .. }
+        ));
     }
 
     #[test]

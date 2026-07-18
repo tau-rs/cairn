@@ -15,4 +15,8 @@ message: string, } | { "type": "internal",
 /**
  * Human-readable detail.
  */
+message: string, } | { "type": "unsupported", 
+/**
+ * Human-readable detail.
+ */
 message: string, };

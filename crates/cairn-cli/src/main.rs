@@ -317,8 +317,16 @@ fn run() -> Result<(), String> {
             }
         }
         Command::Graph => {
-            if let QueryResponse::Graph { edges, .. } =
-                dispatch_query(&engine, &WireQuery::GetGraph).map_err(|e| e.to_string())?
+            if let QueryResponse::Graph { edges, .. } = dispatch_query(
+                &engine,
+                &WireQuery::GetGraph {
+                    scope: cairn_contract::GraphScope {
+                        focus: None,
+                        depth: None,
+                    },
+                },
+            )
+            .map_err(|e| e.to_string())?
             {
                 for edge in edges {
                     println!("{} -> {}", edge.from, edge.to);

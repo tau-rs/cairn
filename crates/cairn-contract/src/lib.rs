@@ -76,8 +76,20 @@ pub enum Query {
     },
     /// List every note with a display title.
     ListNotes,
-    /// Fetch the full link graph.
-    GetGraph,
+    /// Fetch the link graph, bounded by `scope` (global when `scope.focus` is None).
+    GetGraph {
+        /// Scope: focus + depth, or global.
+        scope: GraphScope,
+    },
+    /// Fetch AI-suggested edges (Track 2; currently empty).
+    GetSuggestions,
+    /// The link graph at a past revision (Track 3; currently unsupported).
+    GraphAt {
+        /// A git revspec.
+        revision: String,
+        /// Scope: focus + depth, or global.
+        scope: GraphScope,
+    },
     /// List all tags with note counts.
     ListTags,
     /// List the notes carrying a tag.
@@ -369,6 +381,44 @@ pub struct GraphEdge {
     pub to: String,
 }
 
+/// A node in the link graph, with display metadata for rendering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct GraphNode {
+    /// Relative note path.
+    pub path: String,
+    /// Display title (frontmatter title, first heading, or filename).
+    pub title: String,
+    /// Undirected link degree (forward links + backlinks).
+    pub degree: u32,
+    /// Frontmatter tags of the note.
+    pub tags: Vec<String>,
+    /// Last-modified time, whole seconds since the Unix epoch.
+    pub mtime_secs: u64,
+}
+
+/// Bounds a graph request: a focus note + traversal depth, or global.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct GraphScope {
+    /// The note to center the neighborhood on. `None` ⇒ the whole graph.
+    pub focus: Option<String>,
+    /// Undirected hops from `focus` to include. `None` ⇒ 1.
+    pub depth: Option<u32>,
+}
+
+/// An AI-suggested (not-yet-materialized) link between two notes. Track 2 shape.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SuggestedEdge {
+    /// Source note path.
+    pub from: String,
+    /// Target note path.
+    pub to: String,
+    /// Suggestion strength (relative ordering only).
+    pub score: f32,
+}
+
 /// One ranked search result.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -424,10 +474,15 @@ pub enum QueryResponse {
     },
     /// The link graph (response to `GetGraph`).
     Graph {
-        /// All note paths.
-        nodes: Vec<String>,
-        /// Directed link edges.
+        /// Nodes in scope, with metadata.
+        nodes: Vec<GraphNode>,
+        /// Directed link edges among the in-scope nodes.
         edges: Vec<GraphEdge>,
+    },
+    /// AI-suggested edges (response to `GetSuggestions`).
+    Suggestions {
+        /// Suggested (not-yet-materialized) edges.
+        suggestions: Vec<SuggestedEdge>,
     },
     /// All tags with counts (response to `ListTags`).
     Tags {
@@ -463,6 +518,11 @@ pub enum ContractError {
     },
     /// An internal failure occurred.
     Internal {
+        /// Human-readable detail.
+        message: String,
+    },
+    /// The request is recognized but not yet supported (e.g. `GraphAt`).
+    Unsupported {
         /// Human-readable detail.
         message: String,
     },
@@ -528,7 +588,22 @@ mod tests {
         assert_eq!(serde_json::from_str::<QueryResponse>(&j).unwrap(), n);
 
         let g = QueryResponse::Graph {
-            nodes: vec!["a.md".into(), "b.md".into()],
+            nodes: vec![
+                GraphNode {
+                    path: "a.md".into(),
+                    title: "Alpha".into(),
+                    degree: 1,
+                    tags: vec!["rust".into()],
+                    mtime_secs: 1_700_000_000,
+                },
+                GraphNode {
+                    path: "b.md".into(),
+                    title: "b".into(),
+                    degree: 1,
+                    tags: vec![],
+                    mtime_secs: 0,
+                },
+            ],
             edges: vec![GraphEdge {
                 from: "a.md".into(),
                 to: "b.md".into(),
@@ -542,10 +617,69 @@ mod tests {
             serde_json::to_string(&Query::ListNotes).unwrap(),
             "{\"type\":\"list_notes\"}"
         );
+        // get_graph now carries a scope; Option fields may be omitted (serde ⇒ None).
         assert_eq!(
-            serde_json::from_str::<Query>("{\"type\":\"get_graph\"}").unwrap(),
-            Query::GetGraph
+            serde_json::from_str::<Query>("{\"type\":\"get_graph\",\"scope\":{}}").unwrap(),
+            Query::GetGraph {
+                scope: GraphScope {
+                    focus: None,
+                    depth: None
+                }
+            }
         );
+    }
+
+    #[test]
+    fn graph_seam_track1_shapes_roundtrip() {
+        // Scoped get_graph.
+        let q = Query::GetGraph {
+            scope: GraphScope {
+                focus: Some("a.md".into()),
+                depth: Some(2),
+            },
+        };
+        let j = serde_json::to_string(&q).unwrap();
+        assert!(j.contains("\"type\":\"get_graph\""));
+        assert!(j.contains("\"focus\":\"a.md\""));
+        assert_eq!(serde_json::from_str::<Query>(&j).unwrap(), q);
+
+        // get_suggestions is a unit variant.
+        assert_eq!(
+            serde_json::to_string(&Query::GetSuggestions).unwrap(),
+            "{\"type\":\"get_suggestions\"}"
+        );
+
+        // graph_at carries revision + scope.
+        let ga = Query::GraphAt {
+            revision: "HEAD~1".into(),
+            scope: GraphScope {
+                focus: None,
+                depth: None,
+            },
+        };
+        let j = serde_json::to_string(&ga).unwrap();
+        assert!(j.contains("\"type\":\"graph_at\""));
+        assert_eq!(serde_json::from_str::<Query>(&j).unwrap(), ga);
+
+        // Suggestions response.
+        let s = QueryResponse::Suggestions {
+            suggestions: vec![SuggestedEdge {
+                from: "a.md".into(),
+                to: "b.md".into(),
+                score: 0.5,
+            }],
+        };
+        let j = serde_json::to_string(&s).unwrap();
+        assert!(j.contains("\"type\":\"suggestions\""));
+        assert_eq!(serde_json::from_str::<QueryResponse>(&j).unwrap(), s);
+
+        // Unsupported error.
+        let e = ContractError::Unsupported {
+            message: "graph_at not yet supported".into(),
+        };
+        let j = serde_json::to_string(&e).unwrap();
+        assert!(j.contains("\"type\":\"unsupported\""));
+        assert_eq!(serde_json::from_str::<ContractError>(&j).unwrap(), e);
     }
 
     #[test]
