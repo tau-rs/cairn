@@ -691,7 +691,7 @@ impl Engine {
     /// Replace the semantic index (the composition root injects the real one).
     /// Resets the lazy-build flag so the next `suggestions` call rebuilds it.
     pub fn set_semantic_index(&mut self, index: Box<dyn SemanticIndex + Send>) {
-        self.semantic = RefCell::new(index);
+        *self.semantic.get_mut() = index;
         self.semantic_built.set(false);
     }
 
@@ -857,7 +857,7 @@ fn parse_state(json: &str) -> Result<RestoredState, StateRejection> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cairn_infra::{GitVcs, InMemoryIndex, LocalFsStore, TantivyIndex};
+    use cairn_infra::{GitVcs, InMemoryIndex, LexicalSemanticIndex, LocalFsStore, TantivyIndex};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -1837,8 +1837,6 @@ mod tests {
         // The engine is still usable afterward — its state was not corrupted.
         assert_eq!(eng.read_note(&a).unwrap(), "hello body");
     }
-
-    use cairn_infra::LexicalSemanticIndex;
 
     fn lexical_engine(dir: &std::path::Path) -> Engine {
         let mut e = engine(dir);

@@ -143,7 +143,7 @@ impl SemanticIndex for LexicalSemanticIndex {
                     overlap.push((term.clone(), w * w2));
                 }
             }
-            let score = dot / (fnorm * onorm);
+            let score = (dot / (fnorm * onorm)).min(1.0);
             if score <= 0.0 {
                 continue;
             }

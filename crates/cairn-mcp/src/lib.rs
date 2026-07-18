@@ -366,7 +366,7 @@ pub fn render_query_result(resp: &QueryResponse) -> ToolResult {
         QueryResponse::Suggestions { suggestions } => {
             let text = suggestions
                 .iter()
-                .map(|e| format!("{} → {} ({:.2})", e.from, e.to, e.weight))
+                .map(|e| format!("{} → {} ({:.3})", e.from, e.to, e.weight))
                 .collect::<Vec<_>>()
                 .join("\n");
             ToolResult::text(if text.is_empty() {

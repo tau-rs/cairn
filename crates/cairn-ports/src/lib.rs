@@ -597,11 +597,6 @@ mod tests {
         assert_eq!(err.to_string(), "non-UTF-8 path");
         assert!(std::error::Error::source(&err).is_none());
     }
-}
-
-#[cfg(test)]
-mod semantic_index_tests {
-    use super::*;
 
     #[test]
     fn inert_semantic_index_is_inert() {

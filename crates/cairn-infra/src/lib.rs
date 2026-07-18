@@ -9,7 +9,7 @@ mod plugin_hash;
 mod plugin_host;
 pub mod sandbox;
 pub mod seams;
-pub mod semantic;
+mod semantic;
 mod tantivy_index;
 pub mod tau;
 
