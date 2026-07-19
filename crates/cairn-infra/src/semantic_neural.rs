@@ -6,9 +6,21 @@
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
+#[cfg(feature = "neural")]
+use std::path::{Path, PathBuf};
 
 use cairn_domain::{Note, NotePath};
+#[cfg(feature = "neural")]
+use cairn_ports::AdapterError;
 use cairn_ports::{PortError, SemanticIndex, Similarity};
+#[cfg(feature = "neural")]
+use candle_core::{safetensors, DType, Device, Tensor};
+#[cfg(feature = "neural")]
+use candle_nn::VarBuilder;
+#[cfg(feature = "neural")]
+use candle_transformers::models::bert::{BertModel, Config};
+#[cfg(feature = "neural")]
+use tokenizers::Tokenizer;
 
 /// How many attribution terms to name in `Similarity::shared`.
 const MAX_SHARED_TERMS: usize = 6;
@@ -168,6 +180,115 @@ impl<E: Embedder + Send> SemanticIndex for NeuralSemanticIndex<E> {
     }
 }
 
+/// all-MiniLM-L6-v2 run on-device via candle. Deterministic on CPU (f32,
+/// inference-only). `Send`: `BertModel`/`Tokenizer`/`Device` are all `Send`.
+#[cfg(feature = "neural")]
+pub struct CandleMiniLm {
+    model: BertModel,
+    tokenizer: Tokenizer,
+    device: Device,
+    dim: usize,
+}
+
+#[cfg(feature = "neural")]
+fn adapt(e: impl std::error::Error + Send + Sync + 'static) -> PortError {
+    PortError::Adapter(AdapterError::new(e))
+}
+
+#[cfg(feature = "neural")]
+impl CandleMiniLm {
+    /// Load `config.json`, `tokenizer.json`, `model.safetensors` from `dir`.
+    /// No network: a missing file is an error the caller handles (startup
+    /// falls back to lexical).
+    fn open(dir: &Path) -> Result<Self, PortError> {
+        let device = Device::Cpu;
+        let cfg_text = std::fs::read_to_string(dir.join("config.json")).map_err(adapt)?;
+        let config: Config = serde_json::from_str(&cfg_text).map_err(adapt)?;
+        let dim = config.hidden_size;
+        let tokenizer = Tokenizer::from_file(dir.join("tokenizer.json"))
+            .map_err(|e| PortError::Adapter(AdapterError::message(e.to_string())))?;
+        // SAFE loader (no mmap) — the workspace forbids `unsafe`.
+        let tensors = safetensors::load(dir.join("model.safetensors"), &device).map_err(adapt)?;
+        let vb = VarBuilder::from_tensors(tensors, DType::F32, &device);
+        let model = BertModel::load(vb, &config).map_err(adapt)?;
+        Ok(Self {
+            model,
+            tokenizer,
+            device,
+            dim,
+        })
+    }
+}
+
+#[cfg(feature = "neural")]
+impl NeuralSemanticIndex<CandleMiniLm> {
+    /// Open a neural index backed by weights in `dir`.
+    ///
+    /// # Errors
+    /// [`PortError::Adapter`] if the model/tokenizer fail to load.
+    pub fn open(dir: &Path) -> Result<Self, PortError> {
+        Ok(Self {
+            embedder: CandleMiniLm::open(dir)?,
+            notes: HashMap::new(),
+        })
+    }
+}
+
+#[cfg(feature = "neural")]
+impl Embedder for CandleMiniLm {
+    fn embed_tokens(&self, text: &str) -> Result<Vec<(String, Vec<f32>)>, PortError> {
+        let enc = self
+            .tokenizer
+            .encode(text, true)
+            .map_err(|e| PortError::Adapter(AdapterError::message(e.to_string())))?;
+        let ids = enc.get_ids();
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let toks = enc.get_tokens();
+        let specials = enc.get_special_tokens_mask();
+        let input_ids = Tensor::new(ids, &self.device)
+            .map_err(adapt)?
+            .unsqueeze(0)
+            .map_err(adapt)?;
+        let token_type_ids = input_ids.zeros_like().map_err(adapt)?;
+        let hidden = self
+            .model
+            .forward(&input_ids, &token_type_ids, None)
+            .map_err(adapt)?
+            .squeeze(0)
+            .map_err(adapt)?; // [seq, hidden]
+        let mut out = Vec::new();
+        for (i, tok) in toks.iter().enumerate() {
+            if specials.get(i).copied() == Some(1) {
+                continue; // drop [CLS]/[SEP]/[PAD]
+            }
+            let mut row: Vec<f32> = hidden.get(i).map_err(adapt)?.to_vec1().map_err(adapt)?;
+            unit_normalize(&mut row);
+            out.push((tok.clone(), row));
+        }
+        Ok(out)
+    }
+
+    fn dim(&self) -> usize {
+        self.dim
+    }
+}
+
+/// Resolve the MiniLM weights directory: `$CAIRN_MINILM_WEIGHTS` if set, else
+/// `<cache_dir>/cairn/models/all-MiniLM-L6-v2`. No network — a missing dir is
+/// handled by the caller.
+#[cfg(feature = "neural")]
+#[must_use]
+pub fn minilm_weights_path() -> PathBuf {
+    if let Some(p) = std::env::var_os("CAIRN_MINILM_WEIGHTS") {
+        return PathBuf::from(p);
+    }
+    dirs::cache_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("cairn/models/all-MiniLM-L6-v2")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,5 +424,21 @@ mod tests {
         assert_eq!(na.len(), nb.len());
         assert_eq!(na[0].path, nb[0].path);
         assert_eq!(na[0].score, nb[0].score); // deterministic
+    }
+
+    #[cfg(feature = "neural")]
+    #[test]
+    #[ignore = "requires CAIRN_MINILM_WEIGHTS to point at a MiniLM model dir"]
+    fn candle_minilm_ranks_semantically_related() {
+        let dir = std::env::var("CAIRN_MINILM_WEIGHTS").expect("set CAIRN_MINILM_WEIGHTS");
+        let mut idx = NeuralSemanticIndex::open(std::path::Path::new(&dir)).unwrap();
+        idx.reindex(&[
+            note("a.md", "The cat sat on the mat"),
+            note("b.md", "A feline rested on the rug"), // paraphrase
+            note("c.md", "Quarterly revenue projections"),
+        ])
+        .unwrap();
+        let n = idx.neighbors(&NotePath::new("a.md").unwrap(), 1).unwrap();
+        assert_eq!(n[0].path.as_str(), "b.md");
     }
 }
