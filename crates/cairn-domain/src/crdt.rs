@@ -195,6 +195,45 @@ impl BlockDoc {
         }
     }
 
+    /// The minimal op-set that reconstructs this document's current state when
+    /// merged into a fresh replica. Used to catch up a peer joining a live
+    /// session (and, later, to persist a `.cairn/` resume sidecar). Every block
+    /// is re-created with its live-only `BlockId`, so a joiner adopts the shared
+    /// identities rather than minting fresh ones. Order-independent: `merge` is
+    /// commutative and idempotent, so the receiver may apply these in any order.
+    #[must_use]
+    pub fn state_as_ops(&self) -> Vec<BlockOp> {
+        let mut ops = Vec::with_capacity(self.entries.len());
+        for e in self.entries.values() {
+            // Re-establish the block at its position with its current content.
+            ops.push(BlockOp::Insert {
+                id: e.id,
+                after: e.after,
+                lamport: e.ins_lamport,
+                kind: e.kind,
+                text: e.text.clone(),
+            });
+            // If content advanced past the insert seed, re-affirm it at the right
+            // Lamport/author so a joiner's later edits order correctly against it.
+            if e.content_lamport != e.ins_lamport || e.content_author != Author::Human {
+                ops.push(BlockOp::SetContent {
+                    id: e.id,
+                    text: e.text.clone(),
+                    lamport: e.content_lamport,
+                    author: e.content_author,
+                });
+            }
+            // Preserve deletions.
+            if e.tombstone {
+                ops.push(BlockOp::Delete {
+                    id: e.id,
+                    lamport: e.content_lamport.max(e.ins_lamport),
+                });
+            }
+        }
+        ops
+    }
+
     /// Live (non-tombstoned) block IDs in materialized order. Test/lookup aid.
     #[must_use]
     pub fn block_ids_in_order(&self) -> Vec<BlockId> {
@@ -491,5 +530,38 @@ mod tests {
         });
         assert_eq!(ops.len(), 1);
         assert_eq!(doc.materialize(), "hi\n");
+    }
+
+    #[test]
+    fn state_as_ops_reconstructs_into_a_fresh_replica() {
+        // Build a doc, then mutate: edit a block, append a block, delete a block.
+        let mut a = BlockDoc::from_markdown(1, "# Title\n\nbody\n");
+        let ids = a.block_ids_in_order();
+        let (title, body) = (ids[0], ids[1]);
+        a.apply_local(Edit::UpdateText {
+            id: body,
+            text: "new body".into(),
+            author: Author::Human,
+        });
+        a.apply_local(Edit::InsertAfter {
+            after: Some(body),
+            kind: crate::block::BlockKind::Paragraph,
+            text: "tail".into(),
+            author: Author::Human,
+        });
+        a.apply_local(Edit::Remove { id: title });
+
+        // Replay the snapshot op-set into an empty replica.
+        let mut b = BlockDoc::from_markdown(2, "");
+        for op in a.state_as_ops() {
+            b.merge(op);
+        }
+
+        assert_eq!(a.materialize(), b.materialize());
+        // Replay is idempotent (the CRDT law): applying twice changes nothing.
+        for op in a.state_as_ops() {
+            b.merge(op);
+        }
+        assert_eq!(a.materialize(), b.materialize());
     }
 }
