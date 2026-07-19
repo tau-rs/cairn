@@ -377,6 +377,30 @@ pub fn dispatch_query(engine: &Engine, query: &Query) -> Result<QueryResponse, S
                 .collect();
             Ok(QueryResponse::Suggestions { suggestions })
         }
+        Query::RenderNote { .. } => Err(ServiceError::InvalidRequest(
+            "render_note requires the mutating dispatch path (dispatch_query_mut)".to_string(),
+        )),
+    }
+}
+
+/// Dispatch a read-only query that may need `&mut Engine` (currently only
+/// `RenderNote`, which invokes content processors). Everything else delegates to
+/// [`dispatch_query`] (which auto-reborrows `&mut Engine` as `&Engine`), so the
+/// read-only dispatcher stays `&Engine` and its many callers are untouched.
+///
+/// # Errors
+/// Returns [`ServiceError`] on invalid input or engine failure.
+pub fn dispatch_query_mut(
+    engine: &mut Engine,
+    query: &Query,
+) -> Result<QueryResponse, ServiceError> {
+    match query {
+        Query::RenderNote { path } => {
+            let p = parse_path(path)?;
+            let contents = engine.render_note(&p)?;
+            Ok(QueryResponse::Note { contents })
+        }
+        other => dispatch_query(engine, other),
     }
 }
 
@@ -1308,6 +1332,75 @@ mod tests {
                 assert!(edges.iter().any(|e| e.from == "a.md" && e.to == "b.md"));
             }
             _ => panic!("expected Graph"),
+        }
+    }
+
+    #[test]
+    fn render_note_dispatches_through_processors() {
+        use cairn_ports::{PluginCallbacks, PluginHost, PluginInfo, PortError};
+
+        struct UpcaseHost;
+        impl PluginHost for UpcaseHost {
+            fn plugins(&self) -> Vec<PluginInfo> {
+                vec![]
+            }
+            fn invoke(
+                &mut self,
+                _plugin: &str,
+                _command: &str,
+                _args: &serde_json::Value,
+                _callbacks: &mut dyn PluginCallbacks,
+            ) -> Result<serde_json::Value, PortError> {
+                Ok(serde_json::Value::Null)
+            }
+            fn process_content(
+                &mut self,
+                _path: &str,
+                content: &str,
+                _callbacks: &mut dyn PluginCallbacks,
+            ) -> Result<String, PortError> {
+                Ok(content.to_uppercase())
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut sink: Vec<AppEvent> = Vec::new();
+        dispatch_command(
+            &mut eng,
+            &Command::WriteNote {
+                path: "a.md".into(),
+                contents: "hello".into(),
+            },
+            &mut sink,
+        )
+        .unwrap();
+
+        eng.set_plugin_host(Box::new(UpcaseHost));
+
+        match dispatch_query_mut(
+            &mut eng,
+            &Query::RenderNote {
+                path: "a.md".into(),
+            },
+        )
+        .unwrap()
+        {
+            QueryResponse::Note { contents } => assert_eq!(contents, "HELLO"),
+            other => panic!("expected Note, got {other:?}"),
+        }
+
+        // Raw GetNote stays unprocessed.
+        match dispatch_query(
+            &eng,
+            &Query::GetNote {
+                path: "a.md".into(),
+            },
+        )
+        .unwrap()
+        {
+            QueryResponse::Note { contents } => assert_eq!(contents, "hello"),
+            other => panic!("expected Note, got {other:?}"),
         }
     }
 

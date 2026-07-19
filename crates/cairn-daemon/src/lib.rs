@@ -32,7 +32,7 @@ use cairn_contract::{
 };
 use cairn_ports::{AgentEvent, AgentRuntime, AgentSink};
 use cairn_service::{
-    agent_event_to_wire, app_event_to_wire, dispatch_command, dispatch_query,
+    agent_event_to_wire, app_event_to_wire, dispatch_command, dispatch_query_mut,
     gather_answer_context, ServiceError,
 };
 use tokio::sync::broadcast;
@@ -203,8 +203,8 @@ impl AppState {
     /// # Errors
     /// Returns [`ServiceError`] on invalid input or engine failure.
     pub fn run_query_blocking(&self, query: &Query) -> Result<QueryResponse, ServiceError> {
-        let guard = self.engine();
-        dispatch_query(&guard, query)
+        let mut guard = self.engine();
+        dispatch_query_mut(&mut guard, query)
     }
 
     /// Apply a watcher-reported filesystem change, publishing any resulting
@@ -323,6 +323,7 @@ fn command_kind(command: &Command) -> &'static str {
 fn query_kind(query: &Query) -> &'static str {
     match query {
         Query::GetNote { .. } => "get_note",
+        Query::RenderNote { .. } => "render_note",
         Query::Search { .. } => "search",
         Query::GetBacklinks { .. } => "get_backlinks",
         Query::ListNotes => "list_notes",
