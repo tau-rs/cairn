@@ -131,6 +131,35 @@ impl Vcs for GitVcs {
         Ok(revs)
     }
 
+    fn vault_history(&self, limit: Option<u32>) -> Result<Vec<Revision>, PortError> {
+        let repo = Repository::open(&self.root).map_err(adapt)?;
+        let mut walk = repo.revwalk().map_err(adapt)?;
+        // No HEAD (empty repo) -> no history.
+        if walk.push_head().is_err() {
+            return Ok(Vec::new());
+        }
+        // TOPOLOGICAL keeps children before parents (newest first) even when
+        // commits share a timestamp — matches `history`'s ordering.
+        walk.set_sorting(git2::Sort::TIME | git2::Sort::TOPOLOGICAL)
+            .map_err(adapt)?;
+        let cap = limit.map(|n| n as usize);
+        let mut revs = Vec::new();
+        for oid in walk {
+            if cap.is_some_and(|n| revs.len() >= n) {
+                break;
+            }
+            let oid = oid.map_err(adapt)?;
+            let commit = repo.find_commit(oid).map_err(adapt)?;
+            revs.push(Revision {
+                id: oid.to_string()[..7].to_string(),
+                message: commit.summary().ok().flatten().unwrap_or("").to_string(),
+                timestamp_secs: commit.time().seconds(),
+                author: commit.author().name().unwrap_or("").to_string(),
+            });
+        }
+        Ok(revs)
+    }
+
     fn resolve(&self, revision: &str) -> Result<String, PortError> {
         let repo = Repository::open(&self.root).map_err(adapt)?;
         let commit = repo
@@ -288,6 +317,39 @@ mod tests {
         // A file present but never committed (still no commits in the repo).
         fs::write(tmp.path().join("a.md"), "hi").unwrap();
         assert!(vcs.history("a.md").unwrap().is_empty());
+    }
+
+    #[test]
+    fn vault_history_lists_all_commits_newest_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut vcs = GitVcs::open_or_init(tmp.path()).unwrap();
+        fs::write(tmp.path().join("a.md"), "v1").unwrap();
+        vcs.commit_all("add a").unwrap();
+        fs::write(tmp.path().join("b.md"), "b").unwrap();
+        vcs.commit_all("add b").unwrap();
+        fs::write(tmp.path().join("a.md"), "v2").unwrap();
+        vcs.commit_all("update a").unwrap();
+
+        // Unlike history(path), vault_history spans EVERY commit regardless of path.
+        let all = vcs.vault_history(None).unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].message, "update a"); // newest first
+        assert_eq!(all[1].message, "add b");
+        assert_eq!(all[2].message, "add a");
+        assert_eq!(all[0].id.len(), 7);
+
+        // limit truncates to the newest N.
+        let recent = vcs.vault_history(Some(2)).unwrap();
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].message, "update a");
+        assert_eq!(recent[1].message, "add b");
+    }
+
+    #[test]
+    fn vault_history_empty_for_empty_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vcs = GitVcs::open_or_init(tmp.path()).unwrap();
+        assert!(vcs.vault_history(None).unwrap().is_empty());
     }
 
     #[test]

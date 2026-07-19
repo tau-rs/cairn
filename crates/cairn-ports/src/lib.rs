@@ -251,6 +251,13 @@ pub trait Vcs {
     /// note yields `Ok(vec![])`.
     fn history(&self, path: &str) -> Result<Vec<Revision>, PortError>;
 
+    /// Every commit in the repository, newest first, capped at `limit` (all when
+    /// `None`). Repo-wide analogue of [`Vcs::history`] with no path filter.
+    ///
+    /// # Errors
+    /// [`PortError::Adapter`] on a git failure. An empty repo yields `Ok(vec![])`.
+    fn vault_history(&self, limit: Option<u32>) -> Result<Vec<Revision>, PortError>;
+
     /// The note's contents at `revision` (a git revspec: short/full hash, `HEAD~1`…).
     ///
     /// # Errors

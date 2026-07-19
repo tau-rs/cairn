@@ -274,6 +274,19 @@ pub fn dispatch_query(engine: &Engine, query: &Query) -> Result<QueryResponse, S
                 .collect();
             Ok(QueryResponse::History { revisions })
         }
+        Query::VaultHistory { limit } => {
+            let revisions = engine
+                .vault_history(*limit)?
+                .into_iter()
+                .map(|r| Revision {
+                    id: r.id,
+                    message: r.message,
+                    timestamp_secs: r.timestamp_secs,
+                    author: r.author,
+                })
+                .collect();
+            Ok(QueryResponse::History { revisions })
+        }
         Query::NoteAt { path, revision } => {
             let p = parse_path(path)?;
             let contents = engine.note_at(&p, revision)?;
@@ -1107,6 +1120,49 @@ mod tests {
             QueryResponse::Note { contents } => assert_eq!(contents, "v1"),
             other => panic!("expected Note, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn vault_history_dispatch_returns_all_commits_newest_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut sink: Vec<AppEvent> = Vec::new();
+        for (path, msg) in [("a.md", "add a"), ("b.md", "add b")] {
+            dispatch_command(
+                &mut eng,
+                &Command::WriteNote {
+                    path: path.into(),
+                    contents: "x".into(),
+                },
+                &mut sink,
+            )
+            .unwrap();
+            dispatch_command(
+                &mut eng,
+                &Command::Commit {
+                    message: msg.into(),
+                },
+                &mut sink,
+            )
+            .unwrap();
+        }
+
+        // No path filter: spans every commit, newest first.
+        let all = match dispatch_query(&eng, &Query::VaultHistory { limit: None }).unwrap() {
+            QueryResponse::History { revisions } => revisions,
+            other => panic!("expected History, got {other:?}"),
+        };
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].message, "add b");
+        assert_eq!(all[1].message, "add a");
+
+        // limit caps to the newest N.
+        let recent = match dispatch_query(&eng, &Query::VaultHistory { limit: Some(1) }).unwrap() {
+            QueryResponse::History { revisions } => revisions,
+            other => panic!("expected History, got {other:?}"),
+        };
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].message, "add b");
     }
 
     #[test]

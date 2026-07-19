@@ -895,6 +895,14 @@ impl Engine {
         self.vcs.history(path.as_str())
     }
 
+    /// The whole repository's commit history (newest first), capped at `limit`.
+    ///
+    /// # Errors
+    /// Returns [`PortError`] if the VCS adapter fails.
+    pub fn vault_history(&self, limit: Option<u32>) -> Result<Vec<Revision>, PortError> {
+        self.vcs.vault_history(limit)
+    }
+
     /// A note's contents at a past revision.
     ///
     /// # Errors
@@ -2088,6 +2096,12 @@ mod tests {
         }
         fn history(&self, p: &str) -> Result<Vec<cairn_ports::Revision>, PortError> {
             self.inner.history(p)
+        }
+        fn vault_history(
+            &self,
+            limit: Option<u32>,
+        ) -> Result<Vec<cairn_ports::Revision>, PortError> {
+            self.inner.vault_history(limit)
         }
         fn show(&self, p: &str, r: &str) -> Result<String, PortError> {
             self.inner.show(p, r)
