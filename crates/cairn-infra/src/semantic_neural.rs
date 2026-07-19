@@ -37,12 +37,10 @@ struct NoteEmbedding {
 }
 
 /// Embedding index behind the `SemanticIndex` port. Generic over its
-/// [`Embedder`] so tests inject a deterministic fake.
-// `Embedder` is deliberately private — it's an internal test seam, not part
-// of the public API. Callers only ever see a concrete `NeuralSemanticIndex<E>`
-// (e.g. `NeuralSemanticIndex<CandleMiniLm>`) and never name `E` themselves.
-#[allow(private_bounds)]
-pub struct NeuralSemanticIndex<E: Embedder> {
+/// [`Embedder`] so tests inject a deterministic fake. The `E: Embedder` bound
+/// lives on the methods that need it (`build`, the `SemanticIndex` impl), not
+/// the struct — keeping the private seam out of this `pub` type's signature.
+pub struct NeuralSemanticIndex<E> {
     embedder: E,
     notes: HashMap<NotePath, NoteEmbedding>,
 }
@@ -60,11 +58,13 @@ fn unit_normalize(v: &mut [f32]) {
     }
 }
 
-#[allow(private_bounds)] // see the `Embedder` note on `NeuralSemanticIndex` above
-impl<E: Embedder> NeuralSemanticIndex<E> {
+impl<E> NeuralSemanticIndex<E> {
     /// Build the stored embedding for one note: dedup tokens (first wins),
     /// mean-pool the unique token vectors, unit-normalize the pooled vector.
-    fn build(&self, text: &str) -> Result<NoteEmbedding, PortError> {
+    fn build(&self, text: &str) -> Result<NoteEmbedding, PortError>
+    where
+        E: Embedder,
+    {
         let raw = self.embedder.embed_tokens(text)?;
         let mut seen = std::collections::HashSet::new();
         let mut tokens: Vec<(String, Vec<f32>)> = Vec::new();
