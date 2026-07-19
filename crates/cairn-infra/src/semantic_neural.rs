@@ -154,7 +154,10 @@ impl<E: Embedder + Send> SemanticIndex for NeuralSemanticIndex<E> {
         if f.pooled.iter().all(|x| *x == 0.0) {
             return Ok(Vec::new());
         }
-        let mut scored: Vec<Similarity> = Vec::new();
+        // Rank by cosine first (cheap); compute attribution only for the
+        // survivors, so the expensive token-level pass never runs on notes
+        // that fall outside `top_k`.
+        let mut ranked: Vec<(&NotePath, &NoteEmbedding, f32)> = Vec::new();
         for (path, e) in &self.notes {
             if path == focus {
                 continue;
@@ -163,20 +166,22 @@ impl<E: Embedder + Send> SemanticIndex for NeuralSemanticIndex<E> {
             if score <= 0.0 {
                 continue;
             }
-            scored.push(Similarity {
+            ranked.push((path, e, score));
+        }
+        ranked.sort_by(|a, b| {
+            b.2.partial_cmp(&a.2)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| a.0.cmp(b.0))
+        });
+        ranked.truncate(top_k);
+        Ok(ranked
+            .into_iter()
+            .map(|(path, e, score)| Similarity {
                 path: path.clone(),
                 score,
                 shared: attribute(&f.tokens, &e.tokens),
-            });
-        }
-        scored.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(Ordering::Equal)
-                .then_with(|| a.path.cmp(&b.path))
-        });
-        scored.truncate(top_k);
-        Ok(scored)
+            })
+            .collect())
     }
 }
 
