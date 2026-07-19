@@ -338,6 +338,7 @@ impl Plugin {
                         })
                         .collect(),
                     contributions: self.contributions.clone(),
+                    processors: vec![],
                 };
                 resp.result = Some(serde_json::to_value(init).unwrap_or(Value::Null));
             }
