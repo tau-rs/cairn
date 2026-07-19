@@ -72,7 +72,7 @@ jobs:
         with:
           shared-key: linux
           with-mold: true
-      - uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+      - uses: taiki-e/install-action@9bcaee1dcae34154180f412e2fa69355a7cda9f6 # v2.82.6
         with:
           tool: cargo-hack
       - run: cargo hack --feature-powerset --workspace check --all-targets
@@ -128,7 +128,7 @@ jobs:
           shared-key: linux
           with-nextest: true
           with-mold: true
-      - uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+      - uses: taiki-e/install-action@9bcaee1dcae34154180f412e2fa69355a7cda9f6 # v2.82.6
         with:
           tool: cargo-mutants
       - run: cargo mutants --workspace --no-shuffle --timeout 120 -j 2
@@ -157,7 +157,7 @@ jobs:
           with-nextest: true
           with-sccache: true
           with-mold: true
-      - uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+      - uses: taiki-e/install-action@9bcaee1dcae34154180f412e2fa69355a7cda9f6 # v2.82.6
         with:
           tool: cargo-llvm-cov
       - name: Generate lcov coverage
@@ -295,7 +295,7 @@ jobs:
           fi
           ls -l release
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
         with:
           files: release/*
           generate_release_notes: true
