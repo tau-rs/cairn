@@ -13,6 +13,14 @@ path: string,
  */
 title: string, 
 /**
+ * Undirected link degree (forward links + backlinks) within the returned graph.
+ */
+degree: number, 
+/**
+ * Frontmatter tags of the note at this revision.
+ */
+tags: Array<string>, 
+/**
  * Last-modified, Unix seconds. HEAD: filesystem mtime. Historical: newest
  * commit ≤ the revision that touched the note.
  */

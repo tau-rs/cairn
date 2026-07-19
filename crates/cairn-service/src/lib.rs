@@ -225,11 +225,13 @@ fn to_domain_scope(
     })
 }
 
-fn node_to_wire((p, title, mtime): (NotePath, String, i64)) -> GraphNode {
+fn node_to_wire(n: cairn_app::GraphNodeData) -> GraphNode {
     GraphNode {
-        path: p.as_str().to_string(),
-        title,
-        mtime_secs: mtime,
+        path: n.path.as_str().to_string(),
+        title: n.title,
+        degree: n.degree,
+        tags: n.tags,
+        mtime_secs: n.mtime_secs,
     }
 }
 fn edge_to_wire((a, b): (NotePath, NotePath)) -> GraphEdge {
@@ -748,6 +750,47 @@ mod tests {
                         to: "b.md".into()
                     }]
                 );
+            }
+            other => panic!("expected Graph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_graph_nodes_carry_degree_and_tags() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut sink: Vec<AppEvent> = Vec::new();
+        dispatch_command(
+            &mut eng,
+            &Command::WriteNote {
+                path: "a.md".into(),
+                contents: "---\ntags: [rust]\n---\nsee [[b]]".into(),
+            },
+            &mut sink,
+        )
+        .unwrap();
+        dispatch_command(
+            &mut eng,
+            &Command::WriteNote {
+                path: "b.md".into(),
+                contents: "x".into(),
+            },
+            &mut sink,
+        )
+        .unwrap();
+
+        match dispatch_query(
+            &eng,
+            &Query::GetGraph {
+                scope: cairn_contract::GraphScope::Full,
+            },
+        )
+        .unwrap()
+        {
+            QueryResponse::Graph { nodes, .. } => {
+                let a = nodes.iter().find(|n| n.path == "a.md").unwrap();
+                assert_eq!(a.degree, 1);
+                assert_eq!(a.tags, vec!["rust".to_string()]);
             }
             other => panic!("expected Graph, got {other:?}"),
         }
