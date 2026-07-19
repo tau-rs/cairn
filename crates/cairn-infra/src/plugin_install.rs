@@ -57,6 +57,11 @@ pub enum PluginInstallError {
     /// `remove`/target id has no installed directory.
     #[error("no plugin installed with id {0:?}")]
     NotInstalled(String),
+    /// The plugin's manifest `id` is not a single safe path component (empty,
+    /// `.`/`..`, contains a path separator, or absolute) — refused to prevent
+    /// writing outside `.cairn/plugins/`.
+    #[error("plugin id {0:?} is not a valid single path component")]
+    InvalidId(String),
     /// A filesystem operation failed.
     #[error("{context}: {source}")]
     Io {
@@ -71,6 +76,16 @@ fn io(context: &'static str) -> impl Fn(std::io::Error) -> PluginInstallError {
     move |source| PluginInstallError::Io {
         context: context.to_string(),
         source,
+    }
+}
+
+/// Reject any plugin id that is not exactly one normal path component, so it
+/// cannot escape `.cairn/plugins/` via `..`, an absolute path, or a separator.
+fn validate_id(id: &str) -> Result<(), PluginInstallError> {
+    let mut comps = Path::new(id).components();
+    match (comps.next(), comps.next()) {
+        (Some(std::path::Component::Normal(c)), None) if c == id => Ok(()),
+        _ => Err(PluginInstallError::InvalidId(id.to_string())),
     }
 }
 
@@ -218,6 +233,7 @@ pub fn install(
     let manifest: Manifest =
         toml::from_str(&raw).map_err(|e| PluginInstallError::ManifestInvalid(e.to_string()))?;
     let id = manifest.id.clone();
+    validate_id(&id)?;
 
     let dest = plugins.join(&id);
     let sidecar = sidecar_path(&plugins, &id);
@@ -280,6 +296,7 @@ pub fn install(
 /// [`PluginInstallError::NotInstalled`] if no directory exists for `id`; `Io` on
 /// a filesystem failure.
 pub fn remove(cairn_root: &Path, id: &str) -> Result<(), PluginInstallError> {
+    validate_id(id)?;
     let plugins = plugins_dir(cairn_root);
     let dest = plugins.join(id);
     if !dest.exists() {
@@ -383,7 +400,11 @@ pub fn list(cairn_root: &Path, fetch: bool) -> Result<Vec<InstalledInfo>, Plugin
         let Some(id) = name.strip_suffix(".source.toml") else {
             continue;
         };
-        let rec = read_sidecar(&path)?;
+        // `list` is best-effort: one corrupt/partially-written sidecar must not
+        // abort the whole listing, so skip it and keep going.
+        let Ok(rec) = read_sidecar(&path) else {
+            continue;
+        };
         let update = if !fetch {
             UpdateStatus::Skipped
         } else {
@@ -591,6 +612,63 @@ mod tests {
         assert!(matches!(err, PluginInstallError::ContentRejected(_)));
         assert!(!cairn.path().join(".cairn/plugins/p").exists());
         assert!(!cairn.path().join(".cairn/plugins/.incoming").exists());
+    }
+
+    #[test]
+    fn install_rejects_traversal_id() {
+        let src = tempfile::tempdir().unwrap();
+        init_fixture_repo(src.path(), "../escape", "x");
+        let cairn = tempfile::tempdir().unwrap();
+
+        let err = install(cairn.path(), src.path().to_str().unwrap(), None).unwrap_err();
+        assert!(matches!(err, PluginInstallError::InvalidId(_)));
+
+        // The escape target (a sibling of `.cairn/`) must never be created.
+        let escape_target = cairn.path().join("escape");
+        assert!(!escape_target.exists());
+        // Nor should anything have been committed under plugins/.
+        assert!(!cairn.path().join(".cairn/plugins/../escape").exists());
+    }
+
+    #[test]
+    fn install_rejects_absolute_id() {
+        let evil = std::env::temp_dir().join("cairn-evil-abs");
+        let _ = std::fs::remove_dir_all(&evil); // in case a previous failed run left it
+        let abs_id = evil.to_str().unwrap().to_string();
+
+        let src = tempfile::tempdir().unwrap();
+        init_fixture_repo(src.path(), &abs_id, "x");
+        let cairn = tempfile::tempdir().unwrap();
+
+        let err = install(cairn.path(), src.path().to_str().unwrap(), None).unwrap_err();
+        assert!(matches!(err, PluginInstallError::InvalidId(_)));
+        assert!(!evil.exists(), "absolute id must not be created on disk");
+    }
+
+    #[test]
+    fn remove_rejects_traversal_id() {
+        let cairn = tempfile::tempdir().unwrap();
+        let err = remove(cairn.path(), "../../foo").unwrap_err();
+        assert!(matches!(err, PluginInstallError::InvalidId(_)));
+        assert!(!cairn.path().join("../foo").exists());
+    }
+
+    #[test]
+    fn list_skips_malformed_sidecar() {
+        let src = tempfile::tempdir().unwrap();
+        init_fixture_repo(src.path(), "good", "x");
+        let cairn = tempfile::tempdir().unwrap();
+        install(cairn.path(), src.path().to_str().unwrap(), None).unwrap();
+
+        std::fs::write(
+            cairn.path().join(".cairn/plugins/bad.source.toml"),
+            "not valid toml {{{",
+        )
+        .unwrap();
+
+        let infos = list(cairn.path(), false).unwrap();
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].id, "good");
     }
 
     #[test]
