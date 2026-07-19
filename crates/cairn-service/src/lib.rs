@@ -324,6 +324,7 @@ pub fn dispatch_query(engine: &Engine, query: &Query) -> Result<QueryResponse, S
             Ok(QueryResponse::GraphDiff {
                 nodes_added: d.nodes_added.into_iter().map(node_to_wire).collect(),
                 nodes_removed: d.nodes_removed.into_iter().map(node_to_wire).collect(),
+                nodes_changed: d.nodes_changed.into_iter().map(node_to_wire).collect(),
                 edges_added: d.edges_added.into_iter().map(edge_to_wire).collect(),
                 edges_removed: d.edges_removed.into_iter().map(edge_to_wire).collect(),
             })

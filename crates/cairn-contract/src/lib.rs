@@ -521,6 +521,9 @@ pub enum QueryResponse {
         nodes_added: Vec<GraphNode>,
         /// Nodes present in `from` not `to`.
         nodes_removed: Vec<GraphNode>,
+        /// Nodes present in both revisions whose metadata (title, degree, tags,
+        /// or mtime) changed. Carries the `to`-revision values.
+        nodes_changed: Vec<GraphNode>,
         /// Edges present in `to` not `from`.
         edges_added: Vec<GraphEdge>,
         /// Edges present in `from` not `to`.
