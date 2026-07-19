@@ -171,6 +171,35 @@ enum Command {
         /// A git revspec to restore from.
         revision: String,
     },
+    /// Manage plugins installed from a git URL.
+    Plugin {
+        #[command(subcommand)]
+        action: PluginAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum PluginAction {
+    /// Install a plugin from a git URL. It lands UNTRUSTED - approve it in
+    /// cairn.toml before it will run.
+    Add {
+        /// Git URL (https or ssh).
+        url: String,
+        /// Branch, tag, or commit to check out (default: the remote's HEAD).
+        #[arg(long)]
+        r#ref: Option<String>,
+    },
+    /// List installed plugins with trust and update status.
+    List {
+        /// Skip the network check for available updates.
+        #[arg(long)]
+        offline: bool,
+    },
+    /// Remove an installed plugin's files (does not revoke trust).
+    Remove {
+        /// Plugin id (its directory name under .cairn/plugins).
+        id: String,
+    },
 }
 
 /// Whether a command needs the O(vault) startup reindex. `search` consults the
@@ -223,6 +252,12 @@ fn run() -> Result<(), String> {
     let is_cairn = cairn_startup::is_cairn(&root);
     if !matches!(cli.command, Command::Init) {
         ensure_cairn(&root).map_err(|e| e.to_string())?;
+    }
+
+    // Plugin management is pure fs/git — it needs the cairn root but neither the
+    // engine nor the startup reindex.
+    if let Command::Plugin { action } = &cli.command {
+        return run_plugin(&root, action);
     }
 
     let mut engine = build_engine(&root).map_err(|e| e.to_string())?;
@@ -458,8 +493,68 @@ fn run() -> Result<(), String> {
                 }
             });
         }
+        Command::Plugin { .. } => unreachable!("Plugin short-circuits before build_engine"),
     }
     Ok(())
+}
+
+fn run_plugin(root: &Path, action: &PluginAction) -> Result<(), String> {
+    use cairn_infra::plugin_install;
+    match action {
+        PluginAction::Add { url, r#ref } => {
+            let installed =
+                plugin_install::install(root, url, r#ref.as_deref()).map_err(|e| e.to_string())?;
+            let verb = if installed.updated {
+                "updated"
+            } else {
+                "cloned"
+            };
+            let short = installed.commit.get(..7).unwrap_or(&installed.commit);
+            println!(
+                "{verb} {} @ {} ({short}) -> .cairn/plugins/{}/",
+                installed.id, installed.git_ref, installed.id
+            );
+            println!("UNTRUSTED - will not run until you approve. Add to cairn.toml:\n");
+            println!("  [[plugins.trusted]]");
+            println!("  dir  = \"{}\"", installed.id);
+            println!("  hash = \"{}\"", installed.hash);
+        }
+        PluginAction::List { offline } => {
+            let infos = plugin_install::list(root, !offline).map_err(|e| e.to_string())?;
+            print_plugin_list(&infos);
+        }
+        PluginAction::Remove { id } => {
+            plugin_install::remove(root, id).map_err(|e| e.to_string())?;
+            println!("removed .cairn/plugins/{id}/ and {id}.source.toml");
+            println!(
+                "note: if \"{id}\" is still in cairn.toml [plugins].trusted, \
+                 remove that line to revoke trust."
+            );
+        }
+    }
+    Ok(())
+}
+
+fn print_plugin_list(infos: &[cairn_infra::plugin_install::InstalledInfo]) {
+    use cairn_infra::plugin_install::UpdateStatus;
+    if infos.is_empty() {
+        println!("no plugins installed");
+        return;
+    }
+    println!("ID\tSOURCE\tPINNED\tTRUSTED\tUPDATE");
+    for i in infos {
+        let update = match &i.update {
+            UpdateStatus::Skipped => "-".to_string(),
+            UpdateStatus::UpToDate => "up to date".to_string(),
+            UpdateStatus::Available(c) => format!("{} available", c.get(..7).unwrap_or(c)),
+            UpdateStatus::Unreachable => "unreachable".to_string(),
+        };
+        let trusted = if i.trusted { "yes" } else { "no" };
+        println!(
+            "{}\t{}\t{}\t{}\t{}",
+            i.id, i.source, i.pinned_ref, trusted, update
+        );
+    }
 }
 
 fn main() -> ExitCode {

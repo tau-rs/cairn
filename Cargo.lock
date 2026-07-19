@@ -304,6 +304,7 @@ dependencies = [
  "cairn-service",
  "cairn-startup",
  "clap",
+ "git2",
  "predicates",
  "serde_json",
  "tempfile",
