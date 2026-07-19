@@ -6,10 +6,10 @@
 
 **Architecture:** A pure `BlockDoc` in `cairn-domain` represents one note as an RGA sequence of blocks (each block's text an author-priority LWW register). Markdown is split into blocks by blank lines (code fences atomic, list items per-line); block IDs are live-only and stripped on `materialize`. The existing `CollabSession` port expands from `is_active()`-only to a transport-blind session seam; `LocalCrdt` (cairn-infra) wraps a per-note `BlockDoc`. Convergence (commutativity / associativity / idempotence) and markdown round-trip are property-tested with `proptest`.
 
-**Tech Stack:** Rust (`forbid(unsafe_code)` workspace-wide), `thiserror` (already a domain dep), `proptest` (new dev-dependency), no runtime CRDT library (hand-rolled per ADR-0011 §5).
+**Tech Stack:** Rust (`forbid(unsafe_code)` workspace-wide), `thiserror` (already a domain dep), `proptest` (new dev-dependency), no runtime CRDT library (hand-rolled per ADR-0014 §5).
 
 **Spec:** `docs/superpowers/specs/2026-06-16-crdt-collaboration-design.md`
-**ADR:** `docs/decisions/0011-crdt-collaboration-model.md`
+**ADR:** `docs/decisions/0014-crdt-collaboration-model.md`
 
 **Scope notes (decisions locked here, consistent with spec §9 open questions):**
 - Slice 1 ops are **`Insert`, `Delete`, `SetContent`**. Reordering a block = `Delete` + `Insert` (new id). A native `Move` op is **deferred** (spec open question #4).
@@ -75,7 +75,7 @@ proptest = { workspace = true }
 ```rust
 //! Block-level CRDT for one note: an RGA sequence of blocks whose content is
 //! an author-priority LWW register. Block IDs are live-only and never reach
-//! disk. See docs/decisions/0011-crdt-collaboration-model.md.
+//! disk. See docs/decisions/0014-crdt-collaboration-model.md.
 ```
 
 - [ ] **Step 4: Wire modules into the crate**
@@ -929,7 +929,7 @@ Create `crates/cairn-domain/tests/convergence.rs`:
 
 ```rust
 //! Property tests for BlockDoc convergence (commutativity, associativity,
-//! idempotence) and markdown round-trip. See ADR-0011.
+//! idempotence) and markdown round-trip. See ADR-0014.
 
 use cairn_domain::block::{join_blocks, parse_blocks};
 use cairn_domain::crdt::{Author, BlockDoc, BlockOp};
@@ -1159,7 +1159,7 @@ Create `crates/cairn-infra/src/collab.rs`:
 
 ```rust
 //! `LocalCrdt`: an in-memory `CollabSession` adapter holding one `BlockDoc`
-//! per open note. No transport — ops are returned to the caller. See ADR-0011.
+//! per open note. No transport — ops are returned to the caller. See ADR-0014.
 
 use cairn_domain::{BlockDoc, BlockOp, Edit, NotePath};
 use cairn_ports::CollabSession;

@@ -85,7 +85,7 @@ is regenerated each startup.
 
 The `/mcp` route exposes cairn's note operations as
 [MCP](https://modelcontextprotocol.io) tools (see
-[`docs/decisions/0011-mcp-server.md`](docs/decisions/0011-mcp-server.md)). Write
+[`docs/decisions/0013-mcp-server.md`](docs/decisions/0013-mcp-server.md)). Write
 tools are off by default — pass `--mcp-write` to enable note mutation. Because an
 MCP client's config may carry only a bare URL with no header (e.g. tau), `/mcp`
 also accepts the same token as a `?token=<token>` query parameter; prefer the

@@ -1,4 +1,4 @@
-# ADR-0011: CRDT collaboration — block-level convergence over a git-canonical store
+# ADR-0014: CRDT collaboration — block-level convergence over a git-canonical store
 
 **Status:** Accepted
 **Date:** 2026-06-16

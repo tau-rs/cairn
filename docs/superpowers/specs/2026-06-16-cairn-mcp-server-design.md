@@ -144,7 +144,7 @@ builder.
 
 ### Trust model
 
-See [ADR-0011](../decisions/0011-mcp-server.md). Summary: `/mcp` accepts the
+See [ADR-0013](../decisions/0013-mcp-server.md). Summary: `/mcp` accepts the
 daemon's bearer token **either** as `Authorization: Bearer` (standard clients)
 **or** as a `?token=` query parameter (the headerless fallback for tau β.3's
 bare-URL config), constant-time compared, reusing `.cairn/token`. Write tools are

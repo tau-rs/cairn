@@ -1,4 +1,4 @@
-# ADR-0011: Cairn-as-MCP-server — note operations as agent tools
+# ADR-0013: Cairn-as-MCP-server — note operations as agent tools
 
 **Status:** Accepted
 **Date:** 2026-06-16
