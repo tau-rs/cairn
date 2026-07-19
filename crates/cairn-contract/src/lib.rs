@@ -116,6 +116,11 @@ pub enum Query {
         /// Relative note path.
         path: String,
     },
+    /// The whole repository's commit history (newest first), capped at `limit`.
+    VaultHistory {
+        /// Max commits to return; `None` returns all.
+        limit: Option<u32>,
+    },
     /// A note's contents at a past revision.
     NoteAt {
         /// Relative note path.
