@@ -203,6 +203,7 @@ pub struct Installed {
 ///
 /// # Errors
 /// [`PluginInstallError`] on clone/checkout failure, a missing/invalid manifest,
+/// a manifest `id` that is not a safe single path component ([`PluginInstallError::InvalidId`]),
 /// an id collision with a different source, or a rejected content tree.
 pub fn install(
     cairn_root: &Path,
@@ -293,6 +294,7 @@ pub fn install(
 /// revoke trust — that lives in the user-owned `cairn.toml` (the CLI reminds).
 ///
 /// # Errors
+/// [`PluginInstallError::InvalidId`] if `id` is not a safe single path component;
 /// [`PluginInstallError::NotInstalled`] if no directory exists for `id`; `Io` on
 /// a filesystem failure.
 pub fn remove(cairn_root: &Path, id: &str) -> Result<(), PluginInstallError> {
@@ -382,8 +384,9 @@ fn remote_commit(url: &str, git_ref: &str) -> Result<String, git2::Error> {
 /// `<id>.source.toml` sidecars; with `fetch`, queries each remote best-effort.
 ///
 /// # Errors
-/// [`PluginInstallError`] only on a local IO or sidecar-parse failure; network
-/// failures surface per-row as [`UpdateStatus::Unreachable`], never an error.
+/// [`PluginInstallError`] only on a local IO failure reading the plugins
+/// directory; a malformed `<id>.source.toml` is skipped, not an error, and
+/// network failures surface per-row as [`UpdateStatus::Unreachable`].
 pub fn list(cairn_root: &Path, fetch: bool) -> Result<Vec<InstalledInfo>, PluginInstallError> {
     let plugins = plugins_dir(cairn_root);
     let trusted = read_trusted_ids(cairn_root);
