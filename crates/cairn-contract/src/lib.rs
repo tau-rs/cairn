@@ -566,6 +566,92 @@ pub enum ContractError {
     },
 }
 
+/// A block's live-only identity, mirrored for the wire. See `cairn-domain`
+/// `BlockId`. Stripped on materialize; meaningful only within a live session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WireBlockId {
+    pub replica: u64,
+    pub counter: u64,
+}
+
+/// Who authored an edit (wire mirror of `cairn-domain` `Author`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum WireAuthor {
+    Human,
+    Agent,
+}
+
+/// Block taxonomy (wire mirror of `cairn-domain` `BlockKind`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum WireBlockKind {
+    Frontmatter,
+    Heading,
+    Paragraph,
+    ListItem,
+    CodeFence,
+    BlockQuote,
+    Table,
+    ThematicBreak,
+}
+
+/// A replicated block operation on the wire (mirror of `cairn-domain`
+/// `BlockOp`). The only CRDT type carried by `/collab`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum WireBlockOp {
+    Insert {
+        id: WireBlockId,
+        after: Option<WireBlockId>,
+        lamport: u64,
+        kind: WireBlockKind,
+        text: String,
+    },
+    Delete {
+        id: WireBlockId,
+        lamport: u64,
+    },
+    SetContent {
+        id: WireBlockId,
+        text: String,
+        lamport: u64,
+        author: WireAuthor,
+    },
+}
+
+/// Messages a collaboration client sends to the daemon over `/collab`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CollabClientMsg {
+    /// Seed me from the live session and subscribe to `note`.
+    Join { note: String, replica: u64 },
+    /// One local edit to broadcast.
+    Op { note: String, op: WireBlockOp },
+    /// Unsubscribe from `note`.
+    Leave { note: String },
+}
+
+/// Messages the daemon sends to a collaboration client over `/collab`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CollabServerMsg {
+    /// Acknowledges a `Join`.
+    Joined { note: String },
+    /// Catch-up: the current state expressed as an op-set (apply all).
+    Snapshot { note: String, ops: Vec<WireBlockOp> },
+    /// A peer's edit, fanned out.
+    Op { note: String, op: WireBlockOp },
+    /// A per-note error (e.g. replica-id collision, bad path).
+    Error { note: String, message: String },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1005,5 +1091,39 @@ mod ask_wire_format {
         let r: AskRequest = serde_json::from_str(r#"{"query":"q"}"#).unwrap();
         assert_eq!(r.query, "q");
         assert_eq!(r.top_k, None);
+    }
+}
+
+#[cfg(test)]
+mod collab_wire_tests {
+    use super::*;
+
+    #[test]
+    fn wire_block_op_json_is_tagged_on_op() {
+        let op = WireBlockOp::Insert {
+            id: WireBlockId {
+                replica: 1,
+                counter: 0,
+            },
+            after: None,
+            lamport: 1,
+            kind: WireBlockKind::Paragraph,
+            text: "hi".into(),
+        };
+        let v: serde_json::Value = serde_json::to_value(&op).unwrap();
+        assert_eq!(v["op"], "insert");
+        assert_eq!(v["kind"], "paragraph");
+        assert_eq!(v["id"]["replica"], 1);
+    }
+
+    #[test]
+    fn collab_client_msg_round_trips() {
+        let msg = CollabClientMsg::Join {
+            note: "n.md".into(),
+            replica: 7,
+        };
+        let text = serde_json::to_string(&msg).unwrap();
+        let back: CollabClientMsg = serde_json::from_str(&text).unwrap();
+        assert_eq!(msg, back);
     }
 }
