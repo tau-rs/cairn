@@ -395,6 +395,7 @@ dependencies = [
  "cairn-plugin-protocol",
  "cairn-plugin-sdk",
  "cairn-ports",
+ "git2",
  "serde",
  "serde_json",
  "tempfile",

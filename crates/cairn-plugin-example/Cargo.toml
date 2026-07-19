@@ -15,6 +15,7 @@ serde_json = { workspace = true }
 cairn-domain = { path = "../cairn-domain" }
 cairn-infra = { path = "../cairn-infra" }
 cairn-ports = { path = "../cairn-ports" }
+git2 = { workspace = true }
 tempfile = { workspace = true }
 
 [lints]
