@@ -487,8 +487,10 @@ dependencies = [
  "cairn-app",
  "cairn-domain",
  "cairn-infra",
+ "cairn-ports",
  "tempfile",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
