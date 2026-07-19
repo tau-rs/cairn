@@ -45,6 +45,11 @@ nodes_added: Array<GraphNode>,
  */
 nodes_removed: Array<GraphNode>, 
 /**
+ * Nodes present in both revisions whose metadata (title, degree, tags,
+ * or mtime) changed. Carries the `to`-revision values.
+ */
+nodes_changed: Array<GraphNode>, 
+/**
  * Edges present in `to` not `from`.
  */
 edges_added: Array<GraphEdge>, 

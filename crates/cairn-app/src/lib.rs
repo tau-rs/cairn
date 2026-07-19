@@ -8,7 +8,7 @@ use cairn_ports::{
     SearchIndex, SemanticIndex, VaultStore, Vcs,
 };
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -150,6 +150,9 @@ pub struct GraphDeltaResult {
     pub nodes_added: Vec<GraphNodeData>,
     /// Nodes in `from` not in `to` (enriched from `from`).
     pub nodes_removed: Vec<GraphNodeData>,
+    /// Nodes present in both revisions whose enriched metadata (title, degree,
+    /// tags, or mtime) differs. Enriched from `to`. Sorted by path.
+    pub nodes_changed: Vec<GraphNodeData>,
     /// Edges added.
     pub edges_added: Vec<(NotePath, NotePath)>,
     /// Edges removed.
@@ -677,6 +680,23 @@ impl Engine {
         let a_scoped = a.graph.scoped(scope);
         let b_scoped = b.graph.scoped(scope);
         let delta = a_scoped.diff(&b_scoped);
+        // Present-in-both nodes whose enrichment differs between revisions.
+        // Intersecting sorted node sets keeps `nodes_changed` sorted by path,
+        // mirroring the domain diff's added/removed ordering.
+        let a_nodes: BTreeSet<&NotePath> = a_scoped.nodes().into_iter().collect();
+        let b_nodes: BTreeSet<&NotePath> = b_scoped.nodes().into_iter().collect();
+        let nodes_changed = a_nodes
+            .intersection(&b_nodes)
+            .filter_map(|p| {
+                let before = enrich(p, &a.meta, &a_scoped);
+                let after = enrich(p, &b.meta, &b_scoped);
+                let changed = before.title != after.title
+                    || before.degree != after.degree
+                    || before.tags != after.tags
+                    || before.mtime_secs != after.mtime_secs;
+                changed.then_some(after)
+            })
+            .collect();
         Ok(GraphDeltaResult {
             nodes_added: delta
                 .nodes_added
@@ -688,6 +708,7 @@ impl Engine {
                 .iter()
                 .map(|p| enrich(p, &a.meta, &a_scoped))
                 .collect(),
+            nodes_changed,
             edges_added: delta.edges_added,
             edges_removed: delta.edges_removed,
         })
@@ -2173,6 +2194,49 @@ mod tests {
             .iter()
             .any(|(x, y)| x.as_str() == "c.md" && y.as_str() == "b.md"));
         assert!(d.nodes_removed.is_empty());
+    }
+
+    #[test]
+    fn graph_diff_reports_changed_nodes_between_revisions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut ev = Vec::new();
+        let b = NotePath::new("b.md").unwrap();
+        let x = NotePath::new("x.md").unwrap();
+        let gone = NotePath::new("gone.md").unwrap();
+        // c1: anchor b, x titled "Old" linking b, plus a note that will be removed.
+        eng.write_note(&b, "anchor", &mut ev).unwrap();
+        eng.write_note(&x, "# Old\n[[b]]", &mut ev).unwrap();
+        eng.write_note(&gone, "temp", &mut ev).unwrap();
+        let c1 = eng.commit("c1", &mut ev).unwrap();
+        // c2: x retitled "New" (same path, same links), a genuine add, gone removed.
+        eng.write_note(&x, "# New\n[[b]]", &mut ev).unwrap();
+        eng.write_note(&NotePath::new("added.md").unwrap(), "fresh", &mut ev)
+            .unwrap();
+        eng.delete_note(&gone, &mut ev).unwrap();
+        let c2 = eng.commit("c2", &mut ev).unwrap();
+
+        let d = eng.graph_diff(&c1, &c2, &GraphScope::Full).unwrap();
+
+        // x kept its path but changed title: it is a *changed* node, and it
+        // carries the new-revision title.
+        assert!(
+            d.nodes_changed
+                .iter()
+                .any(|n| n.path.as_str() == "x.md" && n.title == "New"),
+            "x.md should be reported as changed with its new title"
+        );
+        // A changed node is neither added nor removed.
+        assert!(!d.nodes_added.iter().any(|n| n.path.as_str() == "x.md"));
+        assert!(!d.nodes_removed.iter().any(|n| n.path.as_str() == "x.md"));
+        // Genuine add/remove still bucket correctly and are not misreported as changed.
+        assert!(d.nodes_added.iter().any(|n| n.path.as_str() == "added.md"));
+        assert!(d.nodes_removed.iter().any(|n| n.path.as_str() == "gone.md"));
+        assert!(!d
+            .nodes_changed
+            .iter()
+            .any(|n| n.path.as_str() == "added.md"));
+        assert!(!d.nodes_changed.iter().any(|n| n.path.as_str() == "gone.md"));
     }
 
     fn lexical_engine(dir: &std::path::Path) -> Engine {
