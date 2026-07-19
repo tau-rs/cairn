@@ -501,6 +501,24 @@ pub trait PluginHost: Send {
     ) -> Vec<EventDispatchError> {
         Vec::new()
     }
+
+    /// Transform note content through this plugin's content processors on the
+    /// read/render path (host -> plugin `content/process`), servicing any
+    /// read-only host-callbacks each processor makes. Default: identity (a host
+    /// with no processors returns `content` unchanged).
+    ///
+    /// # Errors
+    /// [`PortError`] only on an unexpected host/transport failure; a failing
+    /// individual processor is logged and skipped by the implementation
+    /// (fail-soft), not surfaced here.
+    fn process_content(
+        &mut self,
+        _path: &str,
+        content: &str,
+        _callbacks: &mut dyn PluginCallbacks,
+    ) -> Result<String, PortError> {
+        Ok(content.to_string())
+    }
 }
 
 /// No-plugins seam — the engine's default host.
@@ -635,6 +653,31 @@ mod tests {
             .neighbors(&NotePath::new("a.md").unwrap(), 5)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn noop_host_process_content_is_identity() {
+        struct NoCb;
+        impl PluginCallbacks for NoCb {
+            fn read_note(&mut self, _: &str) -> Result<String, PortError> {
+                unreachable!()
+            }
+            fn write_note(&mut self, _: &str, _: &str) -> Result<(), PortError> {
+                unreachable!()
+            }
+            fn search(&mut self, _: &str) -> Result<Vec<SearchHit>, PortError> {
+                unreachable!()
+            }
+            fn list_notes(&mut self) -> Result<Vec<Note>, PortError> {
+                unreachable!()
+            }
+            fn delete_note(&mut self, _: &str) -> Result<(), PortError> {
+                unreachable!()
+            }
+        }
+        let mut host = NoopPluginHost;
+        let out = host.process_content("a.md", "raw", &mut NoCb).unwrap();
+        assert_eq!(out, "raw");
     }
 }
 
