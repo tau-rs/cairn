@@ -58,14 +58,16 @@ use std::io::{BufRead, Write};
 
 use cairn_plugin_protocol::{
     read_message, write_message, CommandDecl, DeleteNoteParams, InitializeResult, InvokeParams,
-    ListNotesResult, ProcessContentParams, ProcessContentResult, ProcessorDecl, ReadNoteParams,
-    ReadNoteResult, Request, Response, RpcError, SearchParams, SearchResultDto, WriteNoteParams,
-    JSONRPC_VERSION, METHOD_CAIRN_EVENT, METHOD_DELETE_NOTE, METHOD_INITIALIZE, METHOD_INVOKE,
-    METHOD_LIST_NOTES, METHOD_PROCESS_CONTENT, METHOD_READ_NOTE, METHOD_SEARCH, METHOD_WRITE_NOTE,
+    ListNotesResult, ProcessorDecl, ReadNoteParams, ReadNoteResult, Request, Response, RpcError,
+    SearchParams, SearchResultDto, WriteNoteParams, JSONRPC_VERSION, METHOD_CAIRN_EVENT,
+    METHOD_DELETE_NOTE, METHOD_INITIALIZE, METHOD_INVOKE, METHOD_LIST_NOTES,
+    METHOD_PROCESS_CONTENT, METHOD_READ_NOTE, METHOD_SEARCH, METHOD_WRITE_NOTE,
 };
 use serde_json::Value;
 
-pub use cairn_plugin_protocol::{CairnEvent, NoteSummaryDto, SearchHitDto};
+pub use cairn_plugin_protocol::{
+    CairnEvent, NoteSummaryDto, ProcessContentParams, ProcessContentResult, SearchHitDto,
+};
 
 /// An error from a command handler or a host-callback. Maps to a JSON-RPC error
 /// object on the wire.

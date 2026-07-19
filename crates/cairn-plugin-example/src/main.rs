@@ -85,6 +85,26 @@ fn main() {
         Ok(json!(null))
     });
 
+    // Content processor: expand `@include <path>` lines by reading the target
+    // note through the (read-only) host callback. A missing target errors, which
+    // the host handles fail-soft (the note renders raw).
+    plugin.processor(
+        ["md"],
+        |p: cairn_plugin_sdk::ProcessContentParams, host: &mut Host| {
+            let mut out = String::new();
+            for line in p.content.lines() {
+                if let Some(target) = line.strip_prefix("@include ") {
+                    let included = host.read_note(target.trim())?;
+                    out.push_str(&included);
+                } else {
+                    out.push_str(line);
+                }
+                out.push('\n');
+            }
+            Ok(cairn_plugin_sdk::ProcessContentResult { content: out })
+        },
+    );
+
     plugin.contribution(PluginContribution {
         id: "note-count".into(),
         slot: PluginSlot::SidebarSection,
