@@ -272,6 +272,26 @@ pub fn install(
     })
 }
 
+/// Delete an installed plugin's directory and its provenance sidecar. Cannot
+/// revoke trust — that lives in the user-owned `cairn.toml` (the CLI reminds).
+///
+/// # Errors
+/// [`PluginInstallError::NotInstalled`] if no directory exists for `id`; `Io` on
+/// a filesystem failure.
+pub fn remove(cairn_root: &Path, id: &str) -> Result<(), PluginInstallError> {
+    let plugins = plugins_dir(cairn_root);
+    let dest = plugins.join(id);
+    if !dest.exists() {
+        return Err(PluginInstallError::NotInstalled(id.to_string()));
+    }
+    std::fs::remove_dir_all(&dest).map_err(io("removing plugin dir"))?;
+    let sidecar = sidecar_path(&plugins, id);
+    if sidecar.exists() {
+        std::fs::remove_file(&sidecar).map_err(io("removing sidecar"))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,6 +445,23 @@ mod tests {
         let err = install(cairn.path(), src.path().to_str().unwrap(), None).unwrap_err();
         assert!(matches!(err, PluginInstallError::ManifestMissing { .. }));
         assert!(!cairn.path().join(".cairn/plugins/.incoming").exists());
+    }
+
+    #[test]
+    fn remove_deletes_dir_and_sidecar() {
+        let src = tempfile::tempdir().unwrap();
+        init_fixture_repo(src.path(), "p", "x");
+        let cairn = tempfile::tempdir().unwrap();
+        install(cairn.path(), src.path().to_str().unwrap(), None).unwrap();
+
+        remove(cairn.path(), "p").unwrap();
+        assert!(!cairn.path().join(".cairn/plugins/p").exists());
+        assert!(!cairn.path().join(".cairn/plugins/p.source.toml").exists());
+
+        assert!(matches!(
+            remove(cairn.path(), "p").unwrap_err(),
+            PluginInstallError::NotInstalled(_)
+        ));
     }
 
     #[cfg(unix)]
