@@ -5,6 +5,7 @@
 //! sits OUTSIDE the hashed tree and is advisory only — the daemon's authoritative
 //! pin remains the user-edited `cairn.toml` value.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -292,6 +293,119 @@ pub fn remove(cairn_root: &Path, id: &str) -> Result<(), PluginInstallError> {
     Ok(())
 }
 
+/// Whether the remote's copy of the pinned ref moved past the recorded commit.
+#[derive(Debug, Clone, PartialEq)]
+pub enum UpdateStatus {
+    /// Update check skipped (`fetch == false`).
+    Skipped,
+    /// Remote ref matches the recorded commit.
+    UpToDate,
+    /// Remote ref points at a different commit (the new commit id).
+    Available(String),
+    /// The remote could not be reached (never fatal).
+    Unreachable,
+}
+
+/// One row of `cairn plugin list`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InstalledInfo {
+    pub id: String,
+    pub source: String,
+    pub pinned_ref: String,
+    pub pinned_commit: String,
+    /// Whether `cairn.toml [plugins].trusted` lists this id (advisory peek).
+    pub trusted: bool,
+    pub update: UpdateStatus,
+}
+
+/// Best-effort read of the trusted directory names from `cairn.toml`. Lenient by
+/// design — this only powers the advisory TRUSTED column, never a trust decision.
+fn read_trusted_ids(cairn_root: &Path) -> HashSet<String> {
+    let mut set = HashSet::new();
+    let Ok(raw) = std::fs::read_to_string(cairn_root.join("cairn.toml")) else {
+        return set;
+    };
+    let Ok(value) = toml::from_str::<toml::Value>(&raw) else {
+        return set;
+    };
+    let trusted = value
+        .get("plugins")
+        .and_then(|p| p.get("trusted"))
+        .and_then(|t| t.as_array());
+    if let Some(entries) = trusted {
+        for entry in entries {
+            if let Some(name) = entry.as_str() {
+                set.insert(name.to_string());
+            } else if let Some(dir) = entry.get("dir").and_then(|d| d.as_str()) {
+                set.insert(dir.to_string());
+            }
+        }
+    }
+    set
+}
+
+/// The commit id the remote currently advertises for `git_ref` (branch or tag).
+fn remote_commit(url: &str, git_ref: &str) -> Result<String, git2::Error> {
+    let mut remote = git2::Remote::create_detached(url)?;
+    let mut cb = git2::RemoteCallbacks::new();
+    cb.credentials(credentials_cb);
+    remote.connect_auth(git2::Direction::Fetch, Some(cb), None)?;
+    let branch = format!("refs/heads/{git_ref}");
+    let tag = format!("refs/tags/{git_ref}");
+    let list = remote.list()?;
+    for head in list {
+        if head.name() == branch || head.name() == tag {
+            return Ok(head.oid().to_string());
+        }
+    }
+    Err(git2::Error::from_str("ref not advertised by remote"))
+}
+
+/// List installed plugins with trust and (optionally) update status. Reads the
+/// `<id>.source.toml` sidecars; with `fetch`, queries each remote best-effort.
+///
+/// # Errors
+/// [`PluginInstallError`] only on a local IO or sidecar-parse failure; network
+/// failures surface per-row as [`UpdateStatus::Unreachable`], never an error.
+pub fn list(cairn_root: &Path, fetch: bool) -> Result<Vec<InstalledInfo>, PluginInstallError> {
+    let plugins = plugins_dir(cairn_root);
+    let trusted = read_trusted_ids(cairn_root);
+    let mut out = Vec::new();
+    if !plugins.exists() {
+        return Ok(out);
+    }
+    for entry in std::fs::read_dir(&plugins).map_err(io("reading plugins dir"))? {
+        let entry = entry.map_err(io("reading plugins dir entry"))?;
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(id) = name.strip_suffix(".source.toml") else {
+            continue;
+        };
+        let rec = read_sidecar(&path)?;
+        let update = if !fetch {
+            UpdateStatus::Skipped
+        } else {
+            match remote_commit(&rec.source, &rec.git_ref) {
+                Ok(remote) if remote == rec.commit => UpdateStatus::UpToDate,
+                Ok(remote) => UpdateStatus::Available(remote),
+                Err(_) => UpdateStatus::Unreachable,
+            }
+        };
+        out.push(InstalledInfo {
+            id: id.to_string(),
+            source: rec.source,
+            pinned_ref: rec.git_ref,
+            pinned_commit: rec.commit,
+            trusted: trusted.contains(id),
+            update,
+        });
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -477,5 +591,31 @@ mod tests {
         assert!(matches!(err, PluginInstallError::ContentRejected(_)));
         assert!(!cairn.path().join(".cairn/plugins/p").exists());
         assert!(!cairn.path().join(".cairn/plugins/.incoming").exists());
+    }
+
+    #[test]
+    fn list_reports_installed_and_trusted_offline() {
+        let a = tempfile::tempdir().unwrap();
+        init_fixture_repo(a.path(), "alpha", "x");
+        let b = tempfile::tempdir().unwrap();
+        init_fixture_repo(b.path(), "beta", "y");
+        let cairn = tempfile::tempdir().unwrap();
+        install(cairn.path(), a.path().to_str().unwrap(), None).unwrap();
+        install(cairn.path(), b.path().to_str().unwrap(), None).unwrap();
+
+        // Trust only "beta" via cairn.toml (read-only peek — list must never write it).
+        std::fs::write(
+            cairn.path().join("cairn.toml"),
+            "[plugins]\ntrusted = [\"beta\"]\n",
+        )
+        .unwrap();
+
+        let infos = list(cairn.path(), false).unwrap(); // offline
+        assert_eq!(infos.len(), 2);
+        assert_eq!(infos[0].id, "alpha"); // sorted by id
+        assert_eq!(infos[1].id, "beta");
+        assert!(!infos[0].trusted);
+        assert!(infos[1].trusted);
+        assert!(matches!(infos[0].update, UpdateStatus::Skipped));
     }
 }
