@@ -68,6 +68,15 @@ impl Graph {
         self.backward.get(path).map_or(&[], Vec::as_slice)
     }
 
+    /// The note's undirected degree: forward-link count plus backlink count.
+    /// A mutual link (a↔b) contributes to both endpoints. Unknown note ⇒ 0.
+    #[must_use]
+    pub fn degree(&self, path: &NotePath) -> u32 {
+        let f = self.forward.get(path).map_or(0, Vec::len);
+        let b = self.backward.get(path).map_or(0, Vec::len);
+        u32::try_from(f + b).unwrap_or(u32::MAX)
+    }
+
     /// All note paths in the graph, sorted.
     #[must_use]
     pub fn nodes(&self) -> Vec<&NotePath> {
@@ -274,6 +283,25 @@ mod tests {
             }),
             g.focused(&b, 0)
         );
+    }
+
+    #[test]
+    fn degree_counts_forward_and_backlinks_undirected() {
+        // hub -> a,b,c ⇒ hub degree 3 (forward); each leaf degree 1 (back).
+        let notes = [
+            note("hub.md", "[[a]] [[b]] [[c]]"),
+            note("a.md", "x"),
+            note("b.md", "x"),
+            note("c.md", "x"),
+        ];
+        let g = Graph::build(notes.iter());
+        assert_eq!(g.degree(&NotePath::new("hub.md").unwrap()), 3);
+        assert_eq!(g.degree(&NotePath::new("a.md").unwrap()), 1);
+        // Mutual link counts on both sides.
+        let m = Graph::build([note("x.md", "[[y]]"), note("y.md", "[[x]]")].iter());
+        assert_eq!(m.degree(&NotePath::new("x.md").unwrap()), 2);
+        // Unknown note ⇒ 0.
+        assert_eq!(g.degree(&NotePath::new("missing.md").unwrap()), 0);
     }
 
     #[test]

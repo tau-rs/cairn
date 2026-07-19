@@ -8,11 +8,16 @@ repository.workspace = true
 [dependencies]
 cairn-app = { path = "../cairn-app" }
 cairn-infra = { path = "../cairn-infra" }
+cairn-ports = { path = "../cairn-ports" }
 thiserror = { workspace = true }
+tracing = { workspace = true, optional = true }
 
 [dev-dependencies]
 cairn-domain = { path = "../cairn-domain" }
 tempfile = { workspace = true }
+
+[features]
+neural = ["cairn-infra/neural", "dep:tracing"]
 
 [lints]
 workspace = true

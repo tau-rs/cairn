@@ -11,6 +11,7 @@ pub mod plugin_install;
 pub mod sandbox;
 pub mod seams;
 mod semantic;
+mod semantic_neural;
 mod tantivy_index;
 pub mod tau;
 
@@ -26,5 +27,8 @@ pub use sandbox::MacSeatbeltSandbox;
 pub use sandbox::{platform_sandbox, RefusingSandbox};
 pub use seams::{BlockingExecutor, NoCollab, NoopWatcher, NullRuntime};
 pub use semantic::LexicalSemanticIndex;
+pub use semantic_neural::NeuralSemanticIndex;
+#[cfg(feature = "neural")]
+pub use semantic_neural::{minilm_weights_path, CandleMiniLm};
 pub use tantivy_index::{TantivyIndex, MIN_QUERY_CHARS};
 pub use tau::{TauConfig, TauServeRuntime, TauSidecar};

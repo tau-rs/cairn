@@ -225,11 +225,13 @@ fn to_domain_scope(
     })
 }
 
-fn node_to_wire((p, title, mtime): (NotePath, String, i64)) -> GraphNode {
+fn node_to_wire(n: cairn_app::GraphNodeData) -> GraphNode {
     GraphNode {
-        path: p.as_str().to_string(),
-        title,
-        mtime_secs: mtime,
+        path: n.path.as_str().to_string(),
+        title: n.title,
+        degree: n.degree,
+        tags: n.tags,
+        mtime_secs: n.mtime_secs,
     }
 }
 fn edge_to_wire((a, b): (NotePath, NotePath)) -> GraphEdge {
@@ -262,6 +264,19 @@ pub fn dispatch_query(engine: &Engine, query: &Query) -> Result<QueryResponse, S
             let p = parse_path(path)?;
             let revisions = engine
                 .note_history(&p)?
+                .into_iter()
+                .map(|r| Revision {
+                    id: r.id,
+                    message: r.message,
+                    timestamp_secs: r.timestamp_secs,
+                    author: r.author,
+                })
+                .collect();
+            Ok(QueryResponse::History { revisions })
+        }
+        Query::VaultHistory { limit } => {
+            let revisions = engine
+                .vault_history(*limit)?
                 .into_iter()
                 .map(|r| Revision {
                     id: r.id,
@@ -322,6 +337,7 @@ pub fn dispatch_query(engine: &Engine, query: &Query) -> Result<QueryResponse, S
             Ok(QueryResponse::GraphDiff {
                 nodes_added: d.nodes_added.into_iter().map(node_to_wire).collect(),
                 nodes_removed: d.nodes_removed.into_iter().map(node_to_wire).collect(),
+                nodes_changed: d.nodes_changed.into_iter().map(node_to_wire).collect(),
                 edges_added: d.edges_added.into_iter().map(edge_to_wire).collect(),
                 edges_removed: d.edges_removed.into_iter().map(edge_to_wire).collect(),
             })
@@ -754,6 +770,47 @@ mod tests {
     }
 
     #[test]
+    fn get_graph_nodes_carry_degree_and_tags() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut sink: Vec<AppEvent> = Vec::new();
+        dispatch_command(
+            &mut eng,
+            &Command::WriteNote {
+                path: "a.md".into(),
+                contents: "---\ntags: [rust]\n---\nsee [[b]]".into(),
+            },
+            &mut sink,
+        )
+        .unwrap();
+        dispatch_command(
+            &mut eng,
+            &Command::WriteNote {
+                path: "b.md".into(),
+                contents: "x".into(),
+            },
+            &mut sink,
+        )
+        .unwrap();
+
+        match dispatch_query(
+            &eng,
+            &Query::GetGraph {
+                scope: cairn_contract::GraphScope::Full,
+            },
+        )
+        .unwrap()
+        {
+            QueryResponse::Graph { nodes, .. } => {
+                let a = nodes.iter().find(|n| n.path == "a.md").unwrap();
+                assert_eq!(a.degree, 1);
+                assert_eq!(a.tags, vec!["rust".to_string()]);
+            }
+            other => panic!("expected Graph, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn tag_queries() {
         let tmp = tempfile::tempdir().unwrap();
         let mut eng = engine(tmp.path());
@@ -1063,6 +1120,49 @@ mod tests {
             QueryResponse::Note { contents } => assert_eq!(contents, "v1"),
             other => panic!("expected Note, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn vault_history_dispatch_returns_all_commits_newest_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut sink: Vec<AppEvent> = Vec::new();
+        for (path, msg) in [("a.md", "add a"), ("b.md", "add b")] {
+            dispatch_command(
+                &mut eng,
+                &Command::WriteNote {
+                    path: path.into(),
+                    contents: "x".into(),
+                },
+                &mut sink,
+            )
+            .unwrap();
+            dispatch_command(
+                &mut eng,
+                &Command::Commit {
+                    message: msg.into(),
+                },
+                &mut sink,
+            )
+            .unwrap();
+        }
+
+        // No path filter: spans every commit, newest first.
+        let all = match dispatch_query(&eng, &Query::VaultHistory { limit: None }).unwrap() {
+            QueryResponse::History { revisions } => revisions,
+            other => panic!("expected History, got {other:?}"),
+        };
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].message, "add b");
+        assert_eq!(all[1].message, "add a");
+
+        // limit caps to the newest N.
+        let recent = match dispatch_query(&eng, &Query::VaultHistory { limit: Some(1) }).unwrap() {
+            QueryResponse::History { revisions } => revisions,
+            other => panic!("expected History, got {other:?}"),
+        };
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].message, "add b");
     }
 
     #[test]

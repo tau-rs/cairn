@@ -116,6 +116,11 @@ pub enum Query {
         /// Relative note path.
         path: String,
     },
+    /// The whole repository's commit history (newest first), capped at `limit`.
+    VaultHistory {
+        /// Max commits to return; `None` returns all.
+        limit: Option<u32>,
+    },
     /// A note's contents at a past revision.
     NoteAt {
         /// Relative note path.
@@ -401,6 +406,10 @@ pub struct GraphNode {
     pub path: String,
     /// Display title at this revision (frontmatter `title:` → first `# ` → stem).
     pub title: String,
+    /// Undirected link degree (forward links + backlinks) within the returned graph.
+    pub degree: u32,
+    /// Frontmatter tags of the note at this revision.
+    pub tags: Vec<String>,
     /// Last-modified, Unix seconds. HEAD: filesystem mtime. Historical: newest
     /// commit ≤ the revision that touched the note.
     pub mtime_secs: i64,
@@ -517,6 +526,9 @@ pub enum QueryResponse {
         nodes_added: Vec<GraphNode>,
         /// Nodes present in `from` not `to`.
         nodes_removed: Vec<GraphNode>,
+        /// Nodes present in both revisions whose metadata (title, degree, tags,
+        /// or mtime) changed. Carries the `to`-revision values.
+        nodes_changed: Vec<GraphNode>,
         /// Edges present in `to` not `from`.
         edges_added: Vec<GraphEdge>,
         /// Edges present in `from` not `to`.
@@ -666,11 +678,15 @@ mod tests {
                 GraphNode {
                     path: "a.md".into(),
                     title: "A".into(),
+                    degree: 1,
+                    tags: vec!["rust".into()],
                     mtime_secs: 1,
                 },
                 GraphNode {
                     path: "b.md".into(),
                     title: "B".into(),
+                    degree: 0,
+                    tags: vec![],
                     mtime_secs: 2,
                 },
             ],

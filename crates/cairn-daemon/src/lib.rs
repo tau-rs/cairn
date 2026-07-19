@@ -333,6 +333,7 @@ fn query_kind(query: &Query) -> &'static str {
         Query::NotesByTag { .. } => "notes_by_tag",
         Query::ListPlugins => "list_plugins",
         Query::NoteHistory { .. } => "note_history",
+        Query::VaultHistory { .. } => "vault_history",
         Query::NoteAt { .. } => "note_at",
         Query::GetSuggestions { .. } => "get_suggestions",
     }

@@ -56,8 +56,27 @@ pub fn build_engine(root: &Path) -> Result<Engine, StartupError> {
     let vcs = GitVcs::open_or_init(root).map_err(|e| StartupError::Build(e.to_string()))?;
     let index = TantivyIndex::in_memory().map_err(|e| StartupError::Build(e.to_string()))?;
     let mut engine = Engine::new(store, index, vcs);
-    engine.set_semantic_index(Box::new(LexicalSemanticIndex::new()));
+    engine.set_semantic_index(semantic_index());
     Ok(engine)
+}
+
+#[cfg(not(feature = "neural"))]
+fn semantic_index() -> Box<dyn cairn_ports::SemanticIndex + Send> {
+    Box::new(LexicalSemanticIndex::new())
+}
+
+/// Neural when weights load; otherwise warn and fall back to lexical so the
+/// engine always builds (neural is an opt-in upgrade, never a hard dependency).
+#[cfg(feature = "neural")]
+fn semantic_index() -> Box<dyn cairn_ports::SemanticIndex + Send> {
+    let path = cairn_infra::minilm_weights_path();
+    match cairn_infra::NeuralSemanticIndex::open(&path) {
+        Ok(ix) => Box::new(ix),
+        Err(e) => {
+            tracing::warn!(%e, path = %path.display(), "neural weights unavailable; using lexical");
+            Box::new(LexicalSemanticIndex::new())
+        }
+    }
 }
 
 #[cfg(test)]

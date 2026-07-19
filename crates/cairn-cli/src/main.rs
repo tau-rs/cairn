@@ -402,6 +402,9 @@ fn run() -> Result<(), String> {
             if let QueryResponse::GraphDiff {
                 nodes_added,
                 nodes_removed,
+                // `nodes_changed` is wire-only for now (Stream 7 UI); the CLI
+                // diff view intentionally renders only added/removed.
+                nodes_changed: _,
                 edges_added,
                 edges_removed,
             } = dispatch_query(

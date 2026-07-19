@@ -346,18 +346,21 @@ pub fn render_query_result(resp: &QueryResponse) -> ToolResult {
         QueryResponse::GraphDiff {
             nodes_added,
             nodes_removed,
+            nodes_changed,
             edges_added,
             edges_removed,
         } => ToolResult::text(format!(
-            "+{} -{} notes, +{} -{} links",
+            "+{} -{} ~{} notes, +{} -{} links",
             nodes_added.len(),
             nodes_removed.len(),
+            nodes_changed.len(),
             edges_added.len(),
             edges_removed.len()
         ))
         .with_structured(json!({
             "nodes_added": nodes_added,
             "nodes_removed": nodes_removed,
+            "nodes_changed": nodes_changed,
             "edges_added": edges_added,
             "edges_removed": edges_removed,
         })),
