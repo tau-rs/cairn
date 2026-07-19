@@ -11,10 +11,8 @@ use cairn_domain::{Note, NotePath};
 use cairn_ports::{PortError, SemanticIndex, Similarity};
 
 /// How many attribution terms to name in `Similarity::shared`.
-#[allow(dead_code)] // read by cross-token attribution in the next task
 const MAX_SHARED_TERMS: usize = 6;
 /// A focus token must reach this cosine to *some* neighbor token to be named.
-#[allow(dead_code)] // read by cross-token attribution in the next task
 const ATTRIBUTION_THRESHOLD: f32 = 0.3;
 
 /// Text → per-token unit embeddings. Pooling and dedup happen in the index,
@@ -32,7 +30,6 @@ trait Embedder {
 /// memory scales with a note's unique-token count).
 struct NoteEmbedding {
     pooled: Vec<f32>,
-    #[allow(dead_code)] // read by cross-token attribution in the next task
     tokens: Vec<(String, Vec<f32>)>,
 }
 
@@ -56,6 +53,33 @@ fn unit_normalize(v: &mut [f32]) {
             *x /= norm;
         }
     }
+}
+
+/// The focus tokens whose meaning is most echoed by *some* neighbor token.
+/// For each focus token, take its max cosine to any neighbor token; keep those
+/// above [`ATTRIBUTION_THRESHOLD`], top [`MAX_SHARED_TERMS`], ties broken by term.
+/// This is opaque neural provenance made legible (the C-full `why`).
+fn attribute(focus: &[(String, Vec<f32>)], neighbor: &[(String, Vec<f32>)]) -> Vec<String> {
+    let mut scored: Vec<(String, f32)> = focus
+        .iter()
+        .filter_map(|(tok, fv)| {
+            let best = neighbor
+                .iter()
+                .map(|(_, nv)| dot(fv, nv))
+                .fold(f32::MIN, f32::max);
+            (best >= ATTRIBUTION_THRESHOLD).then(|| (tok.clone(), best))
+        })
+        .collect();
+    scored.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    scored
+        .into_iter()
+        .take(MAX_SHARED_TERMS)
+        .map(|(t, _)| t)
+        .collect()
 }
 
 impl<E> NeuralSemanticIndex<E> {
@@ -130,7 +154,7 @@ impl<E: Embedder + Send> SemanticIndex for NeuralSemanticIndex<E> {
             scored.push(Similarity {
                 path: path.clone(),
                 score,
-                shared: Vec::new(), // filled in Task 3
+                shared: attribute(&f.tokens, &e.tokens),
             });
         }
         scored.sort_by(|a, b| {
@@ -244,6 +268,26 @@ mod tests {
             .neighbors(&NotePath::new("a.md").unwrap(), 5)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn shared_surfaces_paraphrase_bridge_tokens() {
+        let mut idx = ix();
+        idx.reindex(&[
+            note("a.md", "cat on the mat"),
+            note("b.md", "feline on the rug"),
+        ])
+        .unwrap();
+        let n = idx.neighbors(&NotePath::new("a.md").unwrap(), 5).unwrap();
+        let shared = &n.iter().find(|s| s.path.as_str() == "b.md").unwrap().shared;
+        // cat≈feline and mat≈rug drive the match, even with no literal overlap.
+        assert!(shared.iter().any(|t| t == "cat"), "got {shared:?}");
+        assert!(shared.iter().any(|t| t == "mat"), "got {shared:?}");
+        // stopword-ish tokens embed to zero → below threshold → not named.
+        assert!(
+            !shared.iter().any(|t| t == "on" || t == "the"),
+            "got {shared:?}"
+        );
     }
 
     #[test]
