@@ -63,9 +63,6 @@ pub enum PluginInstallError {
 }
 
 /// Build a closure mapping an `io::Error` to `PluginInstallError::Io` with context.
-// Only exercised by this module's tests until Task 2 wires up clone/install
-// callers; remove this allow once a non-test caller lands.
-#[allow(dead_code)]
 fn io(context: &'static str) -> impl Fn(std::io::Error) -> PluginInstallError {
     move |source| PluginInstallError::Io {
         context: context.to_string(),
@@ -98,6 +95,70 @@ fn write_sidecar(path: &Path, rec: &SourceRecord) -> Result<(), PluginInstallErr
     std::fs::write(path, body).map_err(io("writing sidecar"))
 }
 
+/// Credentials callback: try ssh-agent for ssh URLs, else default. Public HTTPS
+/// invokes no callback; private HTTPS falls through to a clear clone error.
+// Only exercised via clone_at_ref's RemoteCallbacks until Task 3 wires up the
+// `plugin add` command that actually calls clone_at_ref over the network.
+#[allow(dead_code)] // until Task 3
+fn credentials_cb(
+    _url: &str,
+    username: Option<&str>,
+    allowed: git2::CredentialType,
+) -> Result<git2::Cred, git2::Error> {
+    if allowed.contains(git2::CredentialType::SSH_KEY) {
+        git2::Cred::ssh_key_from_agent(username.unwrap_or("git"))
+    } else {
+        git2::Cred::default()
+    }
+}
+
+/// Clone `url`, check out `git_ref` (or the remote default branch), strip `.git`,
+/// and return `(resolved_ref, commit_id)`. Leaves a content-only tree at `into`.
+#[allow(dead_code)] // until Task 3
+fn clone_at_ref(
+    url: &str,
+    git_ref: Option<&str>,
+    into: &Path,
+) -> Result<(String, String), PluginInstallError> {
+    let err = |source: git2::Error| PluginInstallError::Clone {
+        url: url.to_string(),
+        source,
+    };
+
+    let mut cb = git2::RemoteCallbacks::new();
+    cb.credentials(credentials_cb);
+    let mut fo = git2::FetchOptions::new();
+    fo.remote_callbacks(cb);
+    let mut builder = git2::build::RepoBuilder::new();
+    builder.fetch_options(fo);
+    let repo = builder.clone(url, into).map_err(err)?;
+
+    // Resolve the requested ref (or HEAD) to a commit.
+    let (object, resolved_ref) = match git_ref {
+        Some(r) => (repo.revparse_single(r).map_err(err)?, r.to_string()),
+        None => {
+            let head = repo.head().map_err(err)?;
+            let name = head.shorthand().unwrap_or("HEAD").to_string();
+            (head.peel(git2::ObjectType::Any).map_err(err)?, name)
+        }
+    };
+    let commit = object.peel_to_commit().map_err(err)?;
+    let commit_id = commit.id().to_string();
+
+    // Materialize that commit's tree and detach HEAD onto it.
+    repo.checkout_tree(commit.as_object(), None).map_err(err)?;
+    repo.set_head_detached(commit.id()).map_err(err)?;
+
+    // Drop borrows of `repo` (git2 types have significant `Drop` impls, so NLL
+    // won't shorten their scope for us) before dropping `repo` itself, then
+    // remove `.git` (releases file handles on Windows too).
+    drop(commit);
+    drop(object);
+    drop(repo);
+    std::fs::remove_dir_all(into.join(".git")).map_err(io("stripping .git"))?;
+    Ok((resolved_ref, commit_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,5 +187,65 @@ mod tests {
         )
         .unwrap();
         assert!(read_sidecar(&path).is_err());
+    }
+
+    /// Create a git repo at `dir` with a manifest and one data file; return HEAD id.
+    /// `Signature::now` reads the wall clock — fine in tests (not in workflow scripts).
+    fn init_fixture_repo(dir: &Path, manifest_id: &str, contents: &str) -> String {
+        let repo = git2::Repository::init(dir).unwrap();
+        std::fs::write(
+            dir.join("manifest.toml"),
+            format!(
+                "id=\"{manifest_id}\"\nname=\"X\"\nversion=\"0.1.0\"\n[engine]\ncommand=\"bin\"\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(dir.join("data.txt"), contents).unwrap();
+        commit_all(&repo, "init")
+    }
+
+    /// Add/replace a file in an existing fixture repo and commit; return new HEAD id.
+    // Reused by Tasks 3-4's tests; unused by Task 2's own test.
+    #[allow(dead_code)] // until Task 3
+    fn commit_file(dir: &Path, name: &str, contents: &str) -> String {
+        let repo = git2::Repository::open(dir).unwrap();
+        std::fs::write(dir.join(name), contents).unwrap();
+        commit_all(&repo, "update")
+    }
+
+    fn commit_all(repo: &git2::Repository, msg: &str) -> String {
+        let mut idx = repo.index().unwrap();
+        idx.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+            .unwrap();
+        idx.write().unwrap();
+        let tree_id = idx.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let sig = git2::Signature::now("t", "t@e").unwrap();
+        let parents: Vec<git2::Commit> = repo
+            .head()
+            .ok()
+            .and_then(|h| h.peel_to_commit().ok())
+            .into_iter()
+            .collect();
+        let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
+        repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &parent_refs)
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn clone_at_ref_strips_git_and_resolves_head() {
+        let src = tempfile::tempdir().unwrap();
+        let head = init_fixture_repo(src.path(), "p", "hello");
+
+        let dest = tempfile::tempdir().unwrap();
+        let into = dest.path().join("out");
+        let (git_ref, commit) = clone_at_ref(src.path().to_str().unwrap(), None, &into).unwrap();
+
+        assert_eq!(commit, head);
+        assert!(!git_ref.is_empty()); // default branch name (master/main)
+        assert!(into.join("manifest.toml").exists());
+        assert!(into.join("data.txt").exists());
+        assert!(!into.join(".git").exists(), ".git must be stripped");
     }
 }
