@@ -9,6 +9,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::PinnedHash;
+use cairn_plugin_protocol::Manifest;
+
 /// Provenance recorded beside an installed plugin dir. `deny_unknown_fields` so a
 /// typo (e.g. `hsah`) fails loudly instead of silently dropping a field.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -72,12 +75,10 @@ fn io(context: &'static str) -> impl Fn(std::io::Error) -> PluginInstallError {
 
 /// The `<plugins>/<id>.source.toml` provenance path (sibling of the plugin dir,
 /// so writing it never perturbs the content hash).
-#[allow(dead_code)] // see io() above
 fn sidecar_path(plugins: &Path, id: &str) -> PathBuf {
     plugins.join(format!("{id}.source.toml"))
 }
 
-#[allow(dead_code)] // see io() above
 fn read_sidecar(path: &Path) -> Result<SourceRecord, PluginInstallError> {
     let raw = std::fs::read_to_string(path).map_err(io("reading sidecar"))?;
     toml::from_str(&raw).map_err(|e| PluginInstallError::SidecarInvalid {
@@ -86,7 +87,6 @@ fn read_sidecar(path: &Path) -> Result<SourceRecord, PluginInstallError> {
     })
 }
 
-#[allow(dead_code)] // see io() above
 fn write_sidecar(path: &Path, rec: &SourceRecord) -> Result<(), PluginInstallError> {
     let body = toml::to_string(rec).map_err(|e| PluginInstallError::Io {
         context: "serializing sidecar".to_string(),
@@ -97,9 +97,6 @@ fn write_sidecar(path: &Path, rec: &SourceRecord) -> Result<(), PluginInstallErr
 
 /// Credentials callback: try ssh-agent for ssh URLs, else default. Public HTTPS
 /// invokes no callback; private HTTPS falls through to a clear clone error.
-// Only exercised via clone_at_ref's RemoteCallbacks until Task 3 wires up the
-// `plugin add` command that actually calls clone_at_ref over the network.
-#[allow(dead_code)] // until Task 3
 fn credentials_cb(
     _url: &str,
     username: Option<&str>,
@@ -114,7 +111,6 @@ fn credentials_cb(
 
 /// Clone `url`, check out `git_ref` (or the remote default branch), strip `.git`,
 /// and return `(resolved_ref, commit_id)`. Leaves a content-only tree at `into`.
-#[allow(dead_code)] // until Task 3
 fn clone_at_ref(
     url: &str,
     git_ref: Option<&str>,
@@ -157,6 +153,123 @@ fn clone_at_ref(
     drop(repo);
     std::fs::remove_dir_all(into.join(".git")).map_err(io("stripping .git"))?;
     Ok((resolved_ref, commit_id))
+}
+
+/// `<cairn>/.cairn/plugins`.
+fn plugins_dir(cairn_root: &Path) -> PathBuf {
+    cairn_root.join(".cairn").join("plugins")
+}
+
+/// Removes a staging directory on drop, so an early `?` return leaves no
+/// half-written tree. After a successful rename the path is gone → drop is a
+/// harmless no-op (removing a missing path is ignored).
+struct CleanupDir<'a>(&'a Path);
+impl Drop for CleanupDir<'_> {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(self.0);
+    }
+}
+
+/// The result of a successful [`install`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Installed {
+    pub id: String,
+    pub git_ref: String,
+    pub commit: String,
+    pub hash: String,
+    /// `true` if this replaced an existing same-source install (update).
+    pub updated: bool,
+}
+
+/// Clone `url` at `git_ref` (default: remote HEAD) into
+/// `<cairn>/.cairn/plugins/<id>/`, where `<id>` is the manifest's `id`. Writes a
+/// provenance sidecar; never touches `cairn.toml` (the plugin lands UNTRUSTED).
+///
+/// # Errors
+/// [`PluginInstallError`] on clone/checkout failure, a missing/invalid manifest,
+/// an id collision with a different source, or a rejected content tree.
+pub fn install(
+    cairn_root: &Path,
+    url: &str,
+    git_ref: Option<&str>,
+) -> Result<Installed, PluginInstallError> {
+    let plugins = plugins_dir(cairn_root);
+    std::fs::create_dir_all(&plugins).map_err(io("creating plugins dir"))?;
+
+    // Stage inside the plugins dir so the final rename is same-filesystem.
+    let incoming = plugins.join(".incoming");
+    if incoming.exists() {
+        std::fs::remove_dir_all(&incoming).map_err(io("clearing stale staging dir"))?;
+    }
+    let _guard = CleanupDir(&incoming);
+
+    let (resolved_ref, commit) = clone_at_ref(url, git_ref, &incoming)?;
+
+    // Learn the id from the manifest — it is the trust anchor and must equal the
+    // directory name (the daemon rejects a mismatch), which holds by construction.
+    let manifest_path = incoming.join("manifest.toml");
+    if !manifest_path.exists() {
+        return Err(PluginInstallError::ManifestMissing {
+            url: url.to_string(),
+        });
+    }
+    let raw = std::fs::read_to_string(&manifest_path).map_err(io("reading manifest"))?;
+    let manifest: Manifest =
+        toml::from_str(&raw).map_err(|e| PluginInstallError::ManifestInvalid(e.to_string()))?;
+    let id = manifest.id.clone();
+
+    let dest = plugins.join(&id);
+    let sidecar = sidecar_path(&plugins, &id);
+
+    // Collision: an existing dest must be a same-source update, else hard error.
+    let updated = if dest.exists() {
+        match read_sidecar(&sidecar) {
+            Ok(rec) if rec.source == url => true,
+            Ok(rec) => {
+                return Err(PluginInstallError::IdConflict {
+                    id,
+                    existing_source: rec.source,
+                })
+            }
+            Err(_) => {
+                return Err(PluginInstallError::IdConflict {
+                    id,
+                    existing_source: "an unknown source".to_string(),
+                })
+            }
+        }
+    } else {
+        false
+    };
+
+    // Hash the staged content (refuses symlink / non-regular / non-utf8).
+    let hash = PinnedHash::of_dir(&incoming)
+        .map_err(|e| PluginInstallError::ContentRejected(e.to_string()))?
+        .to_string();
+
+    // Commit the staged tree into place.
+    if dest.exists() {
+        std::fs::remove_dir_all(&dest).map_err(io("removing previous plugin dir"))?;
+    }
+    std::fs::rename(&incoming, &dest).map_err(io("moving plugin into place"))?;
+
+    write_sidecar(
+        &sidecar,
+        &SourceRecord {
+            source: url.to_string(),
+            git_ref: resolved_ref.clone(),
+            commit: commit.clone(),
+            hash: hash.clone(),
+        },
+    )?;
+
+    Ok(Installed {
+        id,
+        git_ref: resolved_ref,
+        commit,
+        hash,
+        updated,
+    })
 }
 
 #[cfg(test)]
@@ -205,8 +318,8 @@ mod tests {
     }
 
     /// Add/replace a file in an existing fixture repo and commit; return new HEAD id.
-    // Reused by Tasks 3-4's tests; unused by Task 2's own test.
-    #[allow(dead_code)] // until Task 3
+    // Reused by Task 4's tests; unused by Tasks 2-3's own tests.
+    #[allow(dead_code)] // until Task 4
     fn commit_file(dir: &Path, name: &str, contents: &str) -> String {
         let repo = git2::Repository::open(dir).unwrap();
         std::fs::write(dir.join(name), contents).unwrap();
@@ -247,5 +360,29 @@ mod tests {
         assert!(into.join("manifest.toml").exists());
         assert!(into.join("data.txt").exists());
         assert!(!into.join(".git").exists(), ".git must be stripped");
+    }
+
+    #[test]
+    fn install_is_named_from_manifest_and_writes_sidecar() {
+        let src = tempfile::tempdir().unwrap();
+        let head = init_fixture_repo(src.path(), "notes-linter", "hello");
+        let cairn = tempfile::tempdir().unwrap();
+
+        let installed = install(cairn.path(), src.path().to_str().unwrap(), None).unwrap();
+
+        assert_eq!(installed.id, "notes-linter"); // id from manifest, not the URL
+        assert_eq!(installed.commit, head);
+        assert!(!installed.updated);
+
+        let dest = cairn.path().join(".cairn/plugins/notes-linter");
+        assert!(dest.join("manifest.toml").exists());
+        assert!(!dest.join(".git").exists());
+
+        // Sidecar records provenance and the hash the daemon will pin against.
+        let rec = read_sidecar(&sidecar_path(dest.parent().unwrap(), "notes-linter")).unwrap();
+        assert_eq!(rec.source, src.path().to_str().unwrap());
+        assert_eq!(rec.commit, head);
+        assert_eq!(rec.hash, installed.hash);
+        assert_eq!(rec.hash, PinnedHash::of_dir(&dest).unwrap().to_string());
     }
 }
