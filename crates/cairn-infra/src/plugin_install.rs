@@ -318,8 +318,6 @@ mod tests {
     }
 
     /// Add/replace a file in an existing fixture repo and commit; return new HEAD id.
-    // Reused by Task 4's tests; unused by Tasks 2-3's own tests.
-    #[allow(dead_code)] // until Task 4
     fn commit_file(dir: &Path, name: &str, contents: &str) -> String {
         let repo = git2::Repository::open(dir).unwrap();
         std::fs::write(dir.join(name), contents).unwrap();
@@ -384,5 +382,63 @@ mod tests {
         assert_eq!(rec.commit, head);
         assert_eq!(rec.hash, installed.hash);
         assert_eq!(rec.hash, PinnedHash::of_dir(&dest).unwrap().to_string());
+    }
+
+    #[test]
+    fn readd_same_source_is_update_with_new_hash() {
+        let src = tempfile::tempdir().unwrap();
+        init_fixture_repo(src.path(), "p", "v1");
+        let cairn = tempfile::tempdir().unwrap();
+        let url = src.path().to_str().unwrap();
+
+        let first = install(cairn.path(), url, None).unwrap();
+        // Change the plugin content and re-add from the same source.
+        commit_file(src.path(), "data.txt", "v2");
+        let second = install(cairn.path(), url, None).unwrap();
+
+        assert!(!first.updated);
+        assert!(second.updated);
+        assert_ne!(first.hash, second.hash); // drift the daemon will refuse until re-pinned
+    }
+
+    #[test]
+    fn readd_different_source_same_id_errors() {
+        let a = tempfile::tempdir().unwrap();
+        init_fixture_repo(a.path(), "p", "a");
+        let b = tempfile::tempdir().unwrap();
+        init_fixture_repo(b.path(), "p", "b"); // same manifest id, different repo
+        let cairn = tempfile::tempdir().unwrap();
+
+        install(cairn.path(), a.path().to_str().unwrap(), None).unwrap();
+        let err = install(cairn.path(), b.path().to_str().unwrap(), None).unwrap_err();
+        assert!(matches!(err, PluginInstallError::IdConflict { .. }));
+    }
+
+    #[test]
+    fn manifest_missing_errors_and_leaves_no_staging() {
+        let src = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(src.path()).unwrap();
+        std::fs::write(src.path().join("data.txt"), "x").unwrap();
+        commit_all(&repo, "no manifest");
+        let cairn = tempfile::tempdir().unwrap();
+
+        let err = install(cairn.path(), src.path().to_str().unwrap(), None).unwrap_err();
+        assert!(matches!(err, PluginInstallError::ManifestMissing { .. }));
+        assert!(!cairn.path().join(".cairn/plugins/.incoming").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_in_repo_is_rejected_and_rolls_back() {
+        let src = tempfile::tempdir().unwrap();
+        init_fixture_repo(src.path(), "p", "x");
+        std::os::unix::fs::symlink("data.txt", src.path().join("link.txt")).unwrap();
+        commit_file(src.path(), ".gitkeep", ""); // commit including the symlink
+        let cairn = tempfile::tempdir().unwrap();
+
+        let err = install(cairn.path(), src.path().to_str().unwrap(), None).unwrap_err();
+        assert!(matches!(err, PluginInstallError::ContentRejected(_)));
+        assert!(!cairn.path().join(".cairn/plugins/p").exists());
+        assert!(!cairn.path().join(".cairn/plugins/.incoming").exists());
     }
 }
