@@ -118,13 +118,28 @@ impl<K: Eq, V> LruCache<K, V> {
 /// A built graph plus per-note enrichment, cached whole (scope `Full`).
 struct BuiltGraph {
     graph: Graph,
-    meta: HashMap<NotePath, (String, i64)>,
+    meta: HashMap<NotePath, (String, Vec<String>, i64)>, // (title, tags, mtime_secs)
+}
+
+/// A wire-ready enriched graph node: identity plus display metadata.
+#[derive(Debug, Clone)]
+pub struct GraphNodeData {
+    /// Relative note path.
+    pub path: NotePath,
+    /// Display title at the node's revision.
+    pub title: String,
+    /// Undirected degree within the returned (scoped) graph.
+    pub degree: u32,
+    /// Frontmatter tags at the node's revision.
+    pub tags: Vec<String>,
+    /// Last-modified, Unix seconds (i64 to allow historical/epoch math).
+    pub mtime_secs: i64,
 }
 
 /// Flattened, scoped, enriched graph for the service layer.
 pub struct GraphResult {
-    /// `(path, title, mtime_secs)` per node.
-    pub nodes: Vec<(NotePath, String, i64)>,
+    /// Enriched nodes.
+    pub nodes: Vec<GraphNodeData>,
     /// `(from, to)` link edges.
     pub edges: Vec<(NotePath, NotePath)>,
 }
@@ -132,9 +147,9 @@ pub struct GraphResult {
 /// The enriched diff of two graphs.
 pub struct GraphDeltaResult {
     /// Nodes in `to` not in `from` (enriched from `to`).
-    pub nodes_added: Vec<(NotePath, String, i64)>,
+    pub nodes_added: Vec<GraphNodeData>,
     /// Nodes in `from` not in `to` (enriched from `from`).
-    pub nodes_removed: Vec<(NotePath, String, i64)>,
+    pub nodes_removed: Vec<GraphNodeData>,
     /// Edges added.
     pub edges_added: Vec<(NotePath, NotePath)>,
     /// Edges removed.
@@ -148,8 +163,14 @@ fn scope_and_flatten(built: &BuiltGraph, scope: &GraphScope) -> GraphResult {
         .nodes()
         .into_iter()
         .map(|p| {
-            let (title, mtime) = built.meta.get(p).cloned().unwrap_or_default();
-            (p.clone(), title, mtime)
+            let (title, tags, mtime) = built.meta.get(p).cloned().unwrap_or_default();
+            GraphNodeData {
+                path: p.clone(),
+                title,
+                degree: g.degree(p),
+                tags,
+                mtime_secs: mtime,
+            }
         })
         .collect();
     let edges = g
@@ -160,10 +181,21 @@ fn scope_and_flatten(built: &BuiltGraph, scope: &GraphScope) -> GraphResult {
     GraphResult { nodes, edges }
 }
 
-/// Look a node's enrichment up, defaulting to empty title / 0 time.
-fn enrich(p: &NotePath, meta: &HashMap<NotePath, (String, i64)>) -> (NotePath, String, i64) {
-    let (title, mtime) = meta.get(p).cloned().unwrap_or_default();
-    (p.clone(), title, mtime)
+/// Enrich a diff node: title/tags/mtime from `meta`, degree from `graph`
+/// (the scoped graph the node belongs to). Defaults to empty title/tags / 0 time.
+fn enrich(
+    p: &NotePath,
+    meta: &HashMap<NotePath, (String, Vec<String>, i64)>,
+    graph: &Graph,
+) -> GraphNodeData {
+    let (title, tags, mtime) = meta.get(p).cloned().unwrap_or_default();
+    GraphNodeData {
+        path: p.clone(),
+        title,
+        degree: graph.degree(p),
+        tags,
+        mtime_secs: mtime,
+    }
 }
 
 /// Unix seconds from a filesystem `SystemTime` (0 if before the epoch).
@@ -600,22 +632,22 @@ impl Engine {
     /// # Errors
     /// [`PortError`] if a port fails.
     pub fn graph_view(&self, scope: &GraphScope) -> Result<GraphResult, PortError> {
-        let (graph, titles) = self.with_notes(|m| {
+        let (graph, per_note) = self.with_notes(|m| {
             let graph = Graph::build(m.values());
-            let titles: Vec<(NotePath, String)> = m
+            let per_note: Vec<(NotePath, String, Vec<String>)> = m
                 .iter()
-                .map(|(p, n)| (p.clone(), n.display_title()))
+                .map(|(p, n)| (p.clone(), n.display_title(), n.tags()))
                 .collect();
-            (graph, titles)
+            (graph, per_note)
         })?;
         let mut meta = HashMap::new();
-        for (p, title) in titles {
+        for (p, title, tags) in per_note {
             let mtime = self
                 .store
                 .stamp(&p)
                 .map(|s| system_secs(s.modified))
                 .unwrap_or(0);
-            meta.insert(p, (title, mtime));
+            meta.insert(p, (title, tags, mtime));
         }
         Ok(scope_and_flatten(&BuiltGraph { graph, meta }, scope))
     }
@@ -642,17 +674,19 @@ impl Engine {
     ) -> Result<GraphDeltaResult, PortError> {
         let a = self.built_at(from)?;
         let b = self.built_at(to)?;
-        let delta = a.graph.scoped(scope).diff(&b.graph.scoped(scope));
+        let a_scoped = a.graph.scoped(scope);
+        let b_scoped = b.graph.scoped(scope);
+        let delta = a_scoped.diff(&b_scoped);
         Ok(GraphDeltaResult {
             nodes_added: delta
                 .nodes_added
                 .iter()
-                .map(|p| enrich(p, &b.meta))
+                .map(|p| enrich(p, &b.meta, &b_scoped))
                 .collect(),
             nodes_removed: delta
                 .nodes_removed
                 .iter()
-                .map(|p| enrich(p, &a.meta))
+                .map(|p| enrich(p, &a.meta, &a_scoped))
                 .collect(),
             edges_added: delta.edges_added,
             edges_removed: delta.edges_removed,
@@ -673,7 +707,10 @@ impl Engine {
                 continue; // dotfiles / control paths are not notes
             };
             let note = Note::parse(path.clone(), &b.content);
-            meta.insert(path.clone(), (note.display_title(), b.mtime_secs));
+            meta.insert(
+                path.clone(),
+                (note.display_title(), note.tags(), b.mtime_secs),
+            );
             notes.push(note);
         }
         let built = Arc::new(BuiltGraph {
@@ -2075,7 +2112,12 @@ mod tests {
         assert!(at
             .nodes
             .iter()
-            .any(|(p, title, _)| p.as_str() == "a.md" && title == "a"));
+            .any(|n| n.path.as_str() == "a.md" && n.title == "a"));
+        // Degree flows through: a->b link gives b.md degree >= 1.
+        assert!(at
+            .nodes
+            .iter()
+            .any(|n| n.path.as_str() == "b.md" && n.degree >= 1));
     }
 
     #[test]
@@ -2125,7 +2167,7 @@ mod tests {
         let c2 = eng.commit("c2", &mut ev).unwrap();
 
         let d = eng.graph_diff(&c1, &c2, &GraphScope::Full).unwrap();
-        assert!(d.nodes_added.iter().any(|(p, _, _)| p.as_str() == "c.md"));
+        assert!(d.nodes_added.iter().any(|n| n.path.as_str() == "c.md"));
         assert!(d
             .edges_added
             .iter()

@@ -401,6 +401,10 @@ pub struct GraphNode {
     pub path: String,
     /// Display title at this revision (frontmatter `title:` → first `# ` → stem).
     pub title: String,
+    /// Undirected link degree (forward links + backlinks) within the returned graph.
+    pub degree: u32,
+    /// Frontmatter tags of the note at this revision.
+    pub tags: Vec<String>,
     /// Last-modified, Unix seconds. HEAD: filesystem mtime. Historical: newest
     /// commit ≤ the revision that touched the note.
     pub mtime_secs: i64,
@@ -666,11 +670,15 @@ mod tests {
                 GraphNode {
                     path: "a.md".into(),
                     title: "A".into(),
+                    degree: 1,
+                    tags: vec!["rust".into()],
                     mtime_secs: 1,
                 },
                 GraphNode {
                     path: "b.md".into(),
                     title: "B".into(),
+                    degree: 0,
+                    tags: vec![],
                     mtime_secs: 2,
                 },
             ],
