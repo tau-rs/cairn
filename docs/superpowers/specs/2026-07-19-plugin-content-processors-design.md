@@ -117,10 +117,29 @@ addition for when two real processors conflict.
 `RenderNote` needs `&mut Engine` (the `mem::replace` host-alias break, unavoidable
 even with read-only callbacks). The daemon already serializes engine access behind
 `Mutex<Engine>`, so `&mut` costs no concurrency. The wire API models the client's
-mental model — rendering *is* a read — so `RenderNote` joins `Query` and
-`dispatch_query` widens to `&mut Engine`. `GetNote`'s arm is unchanged (still raw).
-The lost "queries can't mutate" type-proof is mild: under D4 a render mutates
-nothing observable, so the `&mut` is mechanical, not semantic.
+mental model — rendering *is* a read — so `RenderNote` joins the `Query` enum.
+
+**Implementation refinement (discovered during planning):** rather than widen
+`dispatch_query` itself to `&mut Engine` — which would cascade `&mut` into ~30
+read-only call sites, including `gather_answer_context` (deliberately `&Engine`,
+the read-only half of the Ask streaming split) and the entire CLI — keep
+`dispatch_query(&Engine)` pristine and add a thin wrapper the daemon calls:
+
+```rust
+pub fn dispatch_query_mut(engine: &mut Engine, q: &Query) -> Result<QueryResponse, ServiceError> {
+    match q {
+        Query::RenderNote { path } => { let p = parse_path(path)?;
+            Ok(QueryResponse::Note { contents: engine.render_note(&p)? }) }
+        other => dispatch_query(engine, other),   // &mut auto-reborrows as &Engine
+    }
+}
+```
+
+`dispatch_query` gains a defensive `Query::RenderNote => Err(InvalidRequest(...))`
+guard arm (exhaustiveness; unreachable via the daemon, which routes through
+`dispatch_query_mut`). `GetNote`'s arm is unchanged (still raw). The lost "queries
+can't mutate" type-proof is mild and now localized: only `dispatch_query_mut` takes
+`&mut`; under D4 a render mutates nothing observable, so the `&mut` is mechanical.
 
 ## Data flow
 
@@ -218,10 +237,12 @@ pub fn render_note(&mut self, path: &NotePath) -> Result<String, PortError> {
 
 - Contract: `Query::RenderNote { path }` (+ `TS` export; `query_kind` arm
   `"render_note"`).
-- Service: `dispatch_query(engine: &mut Engine, …)`. `RenderNote` arm →
-  `engine.render_note(&p)? → QueryResponse::Note`. `GetNote` arm unchanged (raw).
-  Other arms take `&mut` harmlessly.
-- Daemon: `run_query_blocking` → `let mut guard`.
+- Service: keep `dispatch_query(engine: &Engine, …)` unchanged except a defensive
+  `RenderNote` guard arm; add `dispatch_query_mut(engine: &mut Engine, …)` handling
+  `RenderNote → engine.render_note(&p)? → QueryResponse::Note` and delegating all
+  other variants to `dispatch_query`. `GetNote` arm unchanged (raw). This avoids
+  cascading `&mut` into the read-only callers (CLI, `gather_answer_context`).
+- Daemon: `run_query_blocking` → `let mut guard; dispatch_query_mut(&mut guard, query)`.
 
 ### SDK (`cairn-plugin-sdk`)
 
