@@ -636,8 +636,13 @@ mod tests {
     #[test]
     fn install_rejects_absolute_id() {
         let evil = std::env::temp_dir().join("cairn-evil-abs");
-        let _ = std::fs::remove_dir_all(&evil); // in case a previous failed run left it
-        let abs_id = evil.to_str().unwrap().to_string();
+        let _ = std::fs::remove_dir_all(&evil);
+        // Embed with forward slashes: on Windows `temp_dir()` yields a `\`-path,
+        // and a `\` inside a double-quoted TOML string is an invalid escape, so
+        // the manifest would fail to parse (ManifestInvalid) before `validate_id`
+        // ever runs. Forward slashes keep it a valid TOML basic string while it
+        // stays absolute (drive prefix / root), so `validate_id` still rejects it.
+        let abs_id = evil.to_str().unwrap().replace('\\', "/");
 
         let src = tempfile::tempdir().unwrap();
         init_fixture_repo(src.path(), &abs_id, "x");
