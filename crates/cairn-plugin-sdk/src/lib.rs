@@ -754,4 +754,39 @@ mod run_tests {
             serde_json::from_value(out[0].result.clone().unwrap()).unwrap();
         assert_eq!(res.content, "HI");
     }
+
+    #[test]
+    fn content_process_without_handler_returns_content_unchanged() {
+        use cairn_plugin_protocol::{ProcessContentResult, METHOD_PROCESS_CONTENT};
+        // No processor registered: the arm returns the content unchanged (identity),
+        // mirroring the host's fail-soft expectation.
+        let plugin = Plugin::new("ex", "0.1.0");
+        let params = serde_json::json!({ "path": "a.md", "content": "hi" });
+        let out = drive(plugin, &request_line(1, METHOD_PROCESS_CONTENT, params));
+        let res: ProcessContentResult =
+            serde_json::from_value(out[0].result.clone().unwrap()).unwrap();
+        assert_eq!(res.content, "hi");
+    }
+
+    #[test]
+    fn content_process_bad_params_is_minus_32602() {
+        use cairn_plugin_protocol::METHOD_PROCESS_CONTENT;
+        let mut plugin = Plugin::new("ex", "0.1.0");
+        plugin.processor(
+            ["md"],
+            |p: cairn_plugin_protocol::ProcessContentParams, _h| {
+                Ok(cairn_plugin_protocol::ProcessContentResult { content: p.content })
+            },
+        );
+        // `path` wrong type + `content` missing => ProcessContentParams deserialize fails.
+        let out = drive(
+            plugin,
+            &request_line(
+                1,
+                METHOD_PROCESS_CONTENT,
+                serde_json::json!({ "path": 123 }),
+            ),
+        );
+        assert_eq!(out[0].error.clone().unwrap().code, -32602);
+    }
 }
