@@ -9,6 +9,10 @@ export type Query = { "type": "get_note",
 /**
  * Relative note path.
  */
+path: string, } | { "type": "render_note", 
+/**
+ * Relative note path.
+ */
 path: string, } | { "type": "search", 
 /**
  * Query string.

@@ -12,10 +12,11 @@ use crate::PinnedHash;
 use cairn_plugin_protocol::{
     write_message, CairnEvent, CairnEventKind, CommandDecl, DeleteNoteParams, Incoming,
     InitializeParams, InitializeResult, InvokeParams, ListNotesResult, Manifest, NoteSummaryDto,
-    ReadNoteParams, ReadNoteResult, Request, Response, RpcError, SearchHitDto, SearchParams,
-    SearchResultDto, WriteNoteParams, CALLBACK_DENIED, CALLBACK_FAILED, CAP_EVENTS, CAP_FS_READ,
-    CAP_FS_WRITE, CAP_NET, JSONRPC_VERSION, METHOD_CAIRN_EVENT, METHOD_DELETE_NOTE,
-    METHOD_INITIALIZE, METHOD_INVOKE, METHOD_LIST_NOTES, METHOD_READ_NOTE, METHOD_SEARCH,
+    ProcessContentParams, ProcessContentResult, ProcessorDecl, ReadNoteParams, ReadNoteResult,
+    Request, Response, RpcError, SearchHitDto, SearchParams, SearchResultDto, WriteNoteParams,
+    CALLBACK_DENIED, CALLBACK_FAILED, CAP_CONTENT_PROCESS, CAP_EVENTS, CAP_FS_READ, CAP_FS_WRITE,
+    CAP_NET, JSONRPC_VERSION, METHOD_CAIRN_EVENT, METHOD_DELETE_NOTE, METHOD_INITIALIZE,
+    METHOD_INVOKE, METHOD_LIST_NOTES, METHOD_PROCESS_CONTENT, METHOD_READ_NOTE, METHOD_SEARCH,
     METHOD_WRITE_NOTE,
 };
 use cairn_ports::{
@@ -65,6 +66,66 @@ fn required_cap(method: &str) -> Option<&'static str> {
         METHOD_SEARCH => Some(CAP_FS_READ),
         METHOD_LIST_NOTES => Some(CAP_FS_READ),
         _ => None,
+    }
+}
+
+/// Whether any of a plugin's processor declarations matches `path` by extension.
+/// An empty `extensions` list matches every note; a plugin with no declarations
+/// matches nothing.
+fn processor_matches(decls: &[ProcessorDecl], path: &str) -> bool {
+    decls.iter().any(|d| {
+        d.extensions.is_empty()
+            || d.extensions
+                .iter()
+                .any(|e| path.ends_with(&format!(".{e}")))
+    })
+}
+
+/// Fold `content` through processors invoked in `order` (a list of plugin ids,
+/// pre-sorted). Fail-soft: a processor that errors is logged and skipped, and the
+/// chain continues from the last good content.
+fn fold_content(
+    mut content: String,
+    order: &[String],
+    mut invoke: impl FnMut(&str, &str) -> Result<String, PortError>,
+) -> String {
+    for id in order {
+        match invoke(id, &content) {
+            Ok(next) => content = next,
+            Err(e) => {
+                tracing::warn!(plugin = %id, error = %e, "content processor failed; keeping prior content");
+            }
+        }
+    }
+    content
+}
+
+/// Wraps a callbacks handler for the duration of `content/process`: reads pass
+/// through; writes/deletes are refused so a render stays side-effect-free (and
+/// cannot loop back through the engine's event sink). Not a security boundary —
+/// a plugin can still write to disk directly; this only closes the host-callback
+/// path (see the design doc, D4).
+struct ReadOnlyCallbacks<'a>(&'a mut dyn PluginCallbacks);
+
+impl PluginCallbacks for ReadOnlyCallbacks<'_> {
+    fn read_note(&mut self, path: &str) -> Result<String, PortError> {
+        self.0.read_note(path)
+    }
+    fn search(&mut self, query: &str) -> Result<Vec<cairn_ports::SearchHit>, PortError> {
+        self.0.search(query)
+    }
+    fn list_notes(&mut self) -> Result<Vec<cairn_domain::Note>, PortError> {
+        self.0.list_notes()
+    }
+    fn write_note(&mut self, _path: &str, _contents: &str) -> Result<(), PortError> {
+        Err(PortError::Adapter(
+            "write not permitted during content processing".into(),
+        ))
+    }
+    fn delete_note(&mut self, _path: &str) -> Result<(), PortError> {
+        Err(PortError::Adapter(
+            "delete not permitted during content processing".into(),
+        ))
     }
 }
 
@@ -124,6 +185,8 @@ struct LoadedPlugin {
     next_id: u64,
     /// Capabilities the manifest declared; gates host-callbacks.
     capabilities: Vec<String>,
+    /// Content-processor declarations the plugin returned at `initialize`.
+    processors: Vec<ProcessorDecl>,
 }
 
 impl LoadedPlugin {
@@ -233,6 +296,24 @@ impl LoadedPlugin {
         let params = serde_json::to_value(event).map_err(adapt)?;
         self.call_with_callbacks(METHOD_CAIRN_EVENT, params, callbacks)?;
         Ok(())
+    }
+
+    /// Send one `content/process` request and return the transformed content,
+    /// servicing the plugin's (read-only) callbacks meanwhile.
+    fn process_one(
+        &mut self,
+        path: &str,
+        content: &str,
+        cb: &mut dyn PluginCallbacks,
+    ) -> Result<String, PortError> {
+        let params = serde_json::to_value(ProcessContentParams {
+            path: path.to_string(),
+            content: content.to_string(),
+        })
+        .map_err(adapt)?;
+        let result = self.call_with_callbacks(METHOD_PROCESS_CONTENT, params, cb)?;
+        let out: ProcessContentResult = serde_json::from_value(result).map_err(adapt)?;
+        Ok(out.content)
     }
 
     /// Build the response to one host-callback request, gating on capability.
@@ -609,6 +690,7 @@ impl ProcessPluginHost {
             },
             next_id: 0,
             capabilities: manifest.engine.capabilities.clone(),
+            processors: Vec::new(),
         };
         let init_params = serde_json::to_value(InitializeParams {
             host_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -624,6 +706,7 @@ impl ProcessPluginHost {
         plugin.info.name = init.name;
         plugin.info.version = init.version;
         plugin.info.contributions = init.contributions;
+        plugin.processors = init.processors;
         // Handshake done: revert to the caller's per-message timeout so steady-state
         // invokes/events fail fast on a hung plugin (e.g. the `hang` fixture).
         plugin.timeout = timeout;
@@ -689,13 +772,43 @@ impl PluginHost for ProcessPluginHost {
         }
         errors
     }
+
+    fn process_content(
+        &mut self,
+        path: &str,
+        content: &str,
+        callbacks: &mut dyn PluginCallbacks,
+    ) -> Result<String, PortError> {
+        // Candidate = declared the cap AND has a matcher hitting this path.
+        let mut order: Vec<String> = self
+            .loaded
+            .iter()
+            .filter(|p| {
+                p.capabilities.iter().any(|c| c == CAP_CONTENT_PROCESS)
+                    && processor_matches(&p.processors, path)
+            })
+            .map(|p| p.info.id.clone())
+            .collect();
+        order.sort(); // deterministic chain order by plugin id
+
+        let loaded = &mut self.loaded;
+        let out = fold_content(content.to_string(), &order, |id, c| {
+            let p = loaded
+                .iter_mut()
+                .find(|p| p.info.id == id)
+                .expect("id came from `order`, built from `loaded`");
+            let mut ro = ReadOnlyCallbacks(&mut *callbacks);
+            p.process_one(path, c, &mut ro)
+        });
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::sandbox::RefusingSandbox;
-    use cairn_ports::SandboxError;
+    use cairn_ports::{PluginCallbacks, SandboxError};
     use std::process::Command;
 
     /// Test double: spawns the command verbatim (no OS jail) so the spawn path
@@ -819,5 +932,72 @@ mod tests {
             SandboxCapabilities { net: false }
         );
         assert_eq!(super::sandbox_caps(&[]), SandboxCapabilities::default());
+    }
+
+    #[test]
+    fn processor_matches_by_extension() {
+        use cairn_plugin_protocol::ProcessorDecl;
+        let md = [ProcessorDecl {
+            extensions: vec!["md".into()],
+        }];
+        assert!(super::processor_matches(&md, "notes/a.md"));
+        assert!(!super::processor_matches(&md, "notes/a.txt"));
+
+        let all = [ProcessorDecl { extensions: vec![] }];
+        assert!(super::processor_matches(&all, "anything.canvas"));
+
+        let none: [ProcessorDecl; 0] = [];
+        assert!(!super::processor_matches(&none, "a.md")); // no decls => not a candidate
+    }
+
+    #[test]
+    fn fold_content_chains_in_order_and_is_fail_soft() {
+        // Two processors that append their id: proves order + "each sees prior output".
+        let order = vec!["a".to_string(), "b".to_string()];
+        let out = super::fold_content("raw".into(), &order, |id, c| Ok(format!("{c}{id}")));
+        assert_eq!(out, "rawab");
+
+        // A failing processor is skipped; the chain keeps the last-good content.
+        let out = super::fold_content("raw".into(), &order, |id, c| {
+            if id == "a" {
+                Err(PortError::Adapter("boom".into()))
+            } else {
+                Ok(format!("{c}{id}"))
+            }
+        });
+        assert_eq!(out, "rawb"); // "a" failed -> content stayed "raw" -> "b" appended
+    }
+
+    #[test]
+    fn read_only_callbacks_forward_reads_deny_writes() {
+        use super::ReadOnlyCallbacks;
+        // Minimal in-memory callbacks double.
+        struct Cb {
+            read_calls: u32,
+        }
+        impl cairn_ports::PluginCallbacks for Cb {
+            fn read_note(&mut self, _: &str) -> Result<String, PortError> {
+                self.read_calls += 1;
+                Ok("body".into())
+            }
+            fn write_note(&mut self, _: &str, _: &str) -> Result<(), PortError> {
+                Ok(())
+            }
+            fn search(&mut self, _: &str) -> Result<Vec<cairn_ports::SearchHit>, PortError> {
+                Ok(vec![])
+            }
+            fn list_notes(&mut self) -> Result<Vec<cairn_domain::Note>, PortError> {
+                Ok(vec![])
+            }
+            fn delete_note(&mut self, _: &str) -> Result<(), PortError> {
+                Ok(())
+            }
+        }
+        let mut inner = Cb { read_calls: 0 };
+        let mut ro = ReadOnlyCallbacks(&mut inner);
+        assert_eq!(ro.read_note("a.md").unwrap(), "body");
+        assert!(ro.write_note("a.md", "x").is_err());
+        assert!(ro.delete_note("a.md").is_err());
+        assert_eq!(inner.read_calls, 1);
     }
 }

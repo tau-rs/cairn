@@ -58,14 +58,16 @@ use std::io::{BufRead, Write};
 
 use cairn_plugin_protocol::{
     read_message, write_message, CommandDecl, DeleteNoteParams, InitializeResult, InvokeParams,
-    ListNotesResult, ReadNoteParams, ReadNoteResult, Request, Response, RpcError, SearchParams,
-    SearchResultDto, WriteNoteParams, JSONRPC_VERSION, METHOD_CAIRN_EVENT, METHOD_DELETE_NOTE,
-    METHOD_INITIALIZE, METHOD_INVOKE, METHOD_LIST_NOTES, METHOD_READ_NOTE, METHOD_SEARCH,
-    METHOD_WRITE_NOTE,
+    ListNotesResult, ProcessorDecl, ReadNoteParams, ReadNoteResult, Request, Response, RpcError,
+    SearchParams, SearchResultDto, WriteNoteParams, JSONRPC_VERSION, METHOD_CAIRN_EVENT,
+    METHOD_DELETE_NOTE, METHOD_INITIALIZE, METHOD_INVOKE, METHOD_LIST_NOTES,
+    METHOD_PROCESS_CONTENT, METHOD_READ_NOTE, METHOD_SEARCH, METHOD_WRITE_NOTE,
 };
 use serde_json::Value;
 
-pub use cairn_plugin_protocol::{CairnEvent, NoteSummaryDto, SearchHitDto};
+pub use cairn_plugin_protocol::{
+    CairnEvent, NoteSummaryDto, ProcessContentParams, ProcessContentResult, SearchHitDto,
+};
 
 /// An error from a command handler or a host-callback. Maps to a JSON-RPC error
 /// object on the wire.
@@ -218,6 +220,11 @@ type ErasedHandler = Box<dyn FnMut(Value, &mut Host<'_>) -> Result<Value, Plugin
 /// acked, not result-bearing).
 type ErasedEventHandler = Box<dyn FnMut(CairnEvent, &mut Host<'_>) -> Result<(), PluginError>>;
 
+/// The erased content-processor handler stored on the `Plugin`.
+type ErasedProcessorHandler = Box<
+    dyn FnMut(ProcessContentParams, &mut Host<'_>) -> Result<ProcessContentResult, PluginError>,
+>;
+
 /// A registered command: id, title, and a type-erased handler. The handler is
 /// higher-ranked over the `Host` borrow so one stored closure accepts a Host of
 /// any lifetime.
@@ -235,6 +242,8 @@ pub struct Plugin {
     commands: Vec<RegisteredCommand>,
     event_handler: Option<ErasedEventHandler>,
     contributions: Vec<cairn_plugin_protocol::PluginContribution>,
+    processor_handler: Option<ErasedProcessorHandler>,
+    processor_decls: Vec<ProcessorDecl>,
 }
 
 impl Plugin {
@@ -246,6 +255,8 @@ impl Plugin {
             commands: Vec::new(),
             event_handler: None,
             contributions: Vec::new(),
+            processor_handler: None,
+            processor_decls: Vec::new(),
         }
     }
 
@@ -256,6 +267,24 @@ impl Plugin {
         F: FnMut(CairnEvent, &mut Host<'_>) -> Result<(), PluginError> + 'static,
     {
         self.event_handler = Some(Box::new(handler));
+    }
+
+    /// Register the plugin's content processor. `extensions` are bare (no dot),
+    /// e.g. `["md"]`; an empty list matches all note types. The handler receives
+    /// the note path + current content and returns the transformed content, with
+    /// capability-gated (read-only) `Host` access. One processor per plugin;
+    /// calling this again replaces the previous one.
+    pub fn processor<I, S, F>(&mut self, extensions: I, handler: F)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+        F: FnMut(ProcessContentParams, &mut Host<'_>) -> Result<ProcessContentResult, PluginError>
+            + 'static,
+    {
+        self.processor_decls = vec![ProcessorDecl {
+            extensions: extensions.into_iter().map(Into::into).collect(),
+        }];
+        self.processor_handler = Some(Box::new(handler));
     }
 
     /// Register a typed command. `A` is deserialized from the invoke args; `O` is
@@ -338,6 +367,7 @@ impl Plugin {
                         })
                         .collect(),
                     contributions: self.contributions.clone(),
+                    processors: self.processor_decls.clone(),
                 };
                 resp.result = Some(serde_json::to_value(init).unwrap_or(Value::Null));
             }
@@ -401,6 +431,45 @@ impl Plugin {
                     });
                 }
             },
+            METHOD_PROCESS_CONTENT => {
+                match serde_json::from_value::<ProcessContentParams>(req.params.clone()) {
+                    Ok(params) => {
+                        if let Some(handler) = self.processor_handler.as_mut() {
+                            let mut host = Host {
+                                reader,
+                                stdout,
+                                next_cb_id,
+                            };
+                            match handler(params, &mut host) {
+                                Ok(out) => {
+                                    resp.result =
+                                        Some(serde_json::to_value(out).unwrap_or(Value::Null));
+                                }
+                                Err(e) => {
+                                    resp.error = Some(RpcError {
+                                        code: e.code,
+                                        message: e.message,
+                                    });
+                                }
+                            }
+                        } else {
+                            // No processor registered: return content unchanged.
+                            resp.result = Some(
+                                serde_json::to_value(ProcessContentResult {
+                                    content: params.content,
+                                })
+                                .unwrap_or(Value::Null),
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        resp.error = Some(RpcError {
+                            code: -32602,
+                            message: e.to_string(),
+                        });
+                    }
+                }
+            }
             other => {
                 resp.error = Some(RpcError {
                     code: -32601,
@@ -648,5 +717,76 @@ mod run_tests {
         );
         assert!(ran.load(Ordering::SeqCst), "handler should have run");
         assert_eq!(out[0].result.clone().unwrap(), serde_json::json!({}));
+    }
+
+    #[test]
+    fn processor_is_declared_at_initialize() {
+        use cairn_plugin_protocol::METHOD_INITIALIZE;
+        let mut plugin = Plugin::new("ex", "0.1.0");
+        plugin.processor(
+            ["md"],
+            |p: cairn_plugin_protocol::ProcessContentParams, _h| {
+                Ok(cairn_plugin_protocol::ProcessContentResult { content: p.content })
+            },
+        );
+        let out = drive(plugin, &request_line(1, METHOD_INITIALIZE, Value::Null));
+        let init: InitializeResult =
+            serde_json::from_value(out[0].result.clone().unwrap()).unwrap();
+        assert_eq!(init.processors.len(), 1);
+        assert_eq!(init.processors[0].extensions, vec!["md".to_string()]);
+    }
+
+    #[test]
+    fn content_process_invokes_handler() {
+        use cairn_plugin_protocol::{ProcessContentResult, METHOD_PROCESS_CONTENT};
+        let mut plugin = Plugin::new("ex", "0.1.0");
+        plugin.processor(
+            ["md"],
+            |p: cairn_plugin_protocol::ProcessContentParams, _h| {
+                Ok(ProcessContentResult {
+                    content: p.content.to_uppercase(),
+                })
+            },
+        );
+        let params = serde_json::json!({ "path": "a.md", "content": "hi" });
+        let out = drive(plugin, &request_line(1, METHOD_PROCESS_CONTENT, params));
+        let res: ProcessContentResult =
+            serde_json::from_value(out[0].result.clone().unwrap()).unwrap();
+        assert_eq!(res.content, "HI");
+    }
+
+    #[test]
+    fn content_process_without_handler_returns_content_unchanged() {
+        use cairn_plugin_protocol::{ProcessContentResult, METHOD_PROCESS_CONTENT};
+        // No processor registered: the arm returns the content unchanged (identity),
+        // mirroring the host's fail-soft expectation.
+        let plugin = Plugin::new("ex", "0.1.0");
+        let params = serde_json::json!({ "path": "a.md", "content": "hi" });
+        let out = drive(plugin, &request_line(1, METHOD_PROCESS_CONTENT, params));
+        let res: ProcessContentResult =
+            serde_json::from_value(out[0].result.clone().unwrap()).unwrap();
+        assert_eq!(res.content, "hi");
+    }
+
+    #[test]
+    fn content_process_bad_params_is_minus_32602() {
+        use cairn_plugin_protocol::METHOD_PROCESS_CONTENT;
+        let mut plugin = Plugin::new("ex", "0.1.0");
+        plugin.processor(
+            ["md"],
+            |p: cairn_plugin_protocol::ProcessContentParams, _h| {
+                Ok(cairn_plugin_protocol::ProcessContentResult { content: p.content })
+            },
+        );
+        // `path` wrong type + `content` missing => ProcessContentParams deserialize fails.
+        let out = drive(
+            plugin,
+            &request_line(
+                1,
+                METHOD_PROCESS_CONTENT,
+                serde_json::json!({ "path": 123 }),
+            ),
+        );
+        assert_eq!(out[0].error.clone().unwrap().code, -32602);
     }
 }

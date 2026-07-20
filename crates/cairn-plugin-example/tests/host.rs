@@ -598,6 +598,59 @@ fn example_declares_contributions_at_initialize() {
 }
 
 #[test]
+fn render_expands_include_when_cap_declared() {
+    let bin = env!("CARGO_BIN_EXE_cairn-plugin-example");
+    let tmp = tempfile::tempdir().unwrap();
+    let pdir = tmp.path().join(".cairn").join("plugins").join("example");
+    write_manifest(&pdir, bin, "\"content:process\",\"fs:read\"");
+
+    let mut host = load_example(tmp.path());
+    let mut cb = MapCallbacks(HashMap::from([
+        ("main.md".to_string(), "@include body.md".to_string()),
+        ("body.md".to_string(), "the body".to_string()),
+    ]));
+
+    let out = host
+        .process_content("main.md", "@include body.md", &mut cb)
+        .unwrap();
+    assert_eq!(out.trim(), "the body");
+}
+
+#[test]
+fn render_is_raw_when_cap_absent() {
+    let bin = env!("CARGO_BIN_EXE_cairn-plugin-example");
+    let tmp = tempfile::tempdir().unwrap();
+    let pdir = tmp.path().join(".cairn").join("plugins").join("example");
+    write_manifest(&pdir, bin, "\"fs:read\""); // no content:process
+
+    let mut host = load_example(tmp.path());
+    let mut cb = MapCallbacks(HashMap::new());
+
+    // Not a candidate (cap missing) => content unchanged.
+    let out = host
+        .process_content("main.md", "@include body.md", &mut cb)
+        .unwrap();
+    assert_eq!(out, "@include body.md");
+}
+
+#[test]
+fn render_is_fail_soft_on_missing_include_target() {
+    let bin = env!("CARGO_BIN_EXE_cairn-plugin-example");
+    let tmp = tempfile::tempdir().unwrap();
+    let pdir = tmp.path().join(".cairn").join("plugins").join("example");
+    write_manifest(&pdir, bin, "\"content:process\",\"fs:read\"");
+
+    let mut host = load_example(tmp.path());
+    let mut cb = MapCallbacks(HashMap::new()); // target absent => read_note errors
+
+    // Processor errors (missing target) => host keeps last-good (raw) content.
+    let out = host
+        .process_content("main.md", "@include gone.md", &mut cb)
+        .unwrap();
+    assert_eq!(out, "@include gone.md");
+}
+
+#[test]
 fn trusted_dir_with_mismatched_manifest_id_is_rejected() {
     let bin = env!("CARGO_BIN_EXE_cairn-plugin-example");
     let tmp = tempfile::tempdir().unwrap();

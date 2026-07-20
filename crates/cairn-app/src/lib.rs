@@ -1005,6 +1005,35 @@ impl Engine {
             Err(_) => tracing::error!(?event, "plugin host panicked handling event"),
         }
     }
+
+    /// Render a note: read its raw content, then transform it through the loaded
+    /// content processors (host -> plugin). Read-only — processors may make gated
+    /// read callbacks but cannot write, so this emits no events and is
+    /// side-effect-free. A panicking host is caught and surfaced as an error (as
+    /// in `invoke_plugin_command`), and the host is restored.
+    ///
+    /// # Errors
+    /// [`PortError`] if the note is missing, or [`PortError::Adapter`] if the host
+    /// panicked. Individual processor failures are logged and skipped by the host
+    /// (fail-soft), not surfaced here.
+    pub fn render_note(&mut self, path: &NotePath) -> Result<String, PortError> {
+        let raw = self.read_note(path)?; // raw read = the recursion floor
+        let mut host = std::mem::replace(&mut self.plugins, Box::new(NoopPluginHost));
+        // Writes are denied during processing, so this sink is never touched.
+        let mut discard: Vec<Event> = Vec::new();
+        // `AssertUnwindSafe` is sound: `self`/`discard` are only borrowed for the
+        // call, so `host` (owned here, not by the closure) is restored below on
+        // panic, same as `invoke_plugin_command`.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut cb = EngineCallbacks {
+                engine: self,
+                sink: &mut discard,
+            };
+            host.process_content(path.as_str(), &raw, &mut cb)
+        }));
+        self.plugins = host;
+        result.unwrap_or_else(|_| Err(PortError::Adapter("plugin host panicked".into())))
+    }
 }
 
 /// Bridges plugin host-callbacks to engine operations. Held only for the duration
@@ -2081,6 +2110,106 @@ mod tests {
 
         // The engine is still usable afterward — its state was not corrupted.
         assert_eq!(eng.read_note(&a).unwrap(), "hello body");
+    }
+
+    /// A stub host whose process_content uppercases and appends the result of a
+    /// read-only callback — proves render invokes processors and services reads.
+    struct UpcaseHost;
+    impl PluginHost for UpcaseHost {
+        fn plugins(&self) -> Vec<PluginInfo> {
+            Vec::new()
+        }
+        fn invoke(
+            &mut self,
+            _p: &str,
+            _c: &str,
+            _a: &serde_json::Value,
+            _cb: &mut dyn cairn_ports::PluginCallbacks,
+        ) -> Result<serde_json::Value, PortError> {
+            unreachable!()
+        }
+        fn process_content(
+            &mut self,
+            _path: &str,
+            content: &str,
+            _cb: &mut dyn cairn_ports::PluginCallbacks,
+        ) -> Result<String, PortError> {
+            Ok(content.to_uppercase())
+        }
+    }
+
+    #[test]
+    fn render_note_applies_processors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut events: Vec<Event> = Vec::new();
+        eng.write_note(&NotePath::new("a.md").unwrap(), "hello", &mut events)
+            .unwrap();
+        eng.set_plugin_host(Box::new(UpcaseHost));
+        let out = eng.render_note(&NotePath::new("a.md").unwrap()).unwrap();
+        assert_eq!(out, "HELLO");
+        // Raw read is unchanged (recursion floor / raw vs rendered).
+        assert_eq!(
+            eng.read_note(&NotePath::new("a.md").unwrap()).unwrap(),
+            "hello"
+        );
+    }
+
+    #[test]
+    fn render_note_is_identity_with_noop_host() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut events: Vec<Event> = Vec::new();
+        eng.write_note(&NotePath::new("a.md").unwrap(), "hello", &mut events)
+            .unwrap();
+        let out = eng.render_note(&NotePath::new("a.md").unwrap()).unwrap();
+        assert_eq!(out, "hello"); // default NoopPluginHost::process_content is identity
+    }
+
+    /// A host whose process_content panics — simulates a buggy or malicious
+    /// content processor.
+    struct PanickingProcessHost;
+    impl PluginHost for PanickingProcessHost {
+        fn plugins(&self) -> Vec<PluginInfo> {
+            Vec::new()
+        }
+        fn invoke(
+            &mut self,
+            _plugin: &str,
+            _command: &str,
+            _args: &serde_json::Value,
+            _callbacks: &mut dyn cairn_ports::PluginCallbacks,
+        ) -> Result<serde_json::Value, PortError> {
+            unreachable!()
+        }
+        fn process_content(
+            &mut self,
+            _path: &str,
+            _content: &str,
+            _cb: &mut dyn cairn_ports::PluginCallbacks,
+        ) -> Result<String, PortError> {
+            panic!("plugin host panicked mid-process_content");
+        }
+    }
+
+    #[test]
+    fn render_note_panic_is_caught_and_engine_survives() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut events = Vec::new();
+        let a = NotePath::new("a.md").unwrap();
+        eng.write_note(&a, "hello body", &mut events).unwrap();
+
+        eng.set_plugin_host(Box::new(PanickingProcessHost));
+        // The panic must surface as an error, not unwind through the caller (which,
+        // in the daemon, holds the engine mutex — an unwind would poison it).
+        let res = eng.render_note(&a);
+        assert!(matches!(res, Err(PortError::Adapter(_))));
+
+        // The engine is still usable afterward — its state was not corrupted.
+        assert_eq!(eng.read_note(&a).unwrap(), "hello body");
+        eng.set_plugin_host(Box::new(NoopPluginHost));
+        assert_eq!(eng.render_note(&a).unwrap(), "hello body");
     }
 
     use std::sync::atomic::{AtomicUsize as Au, Ordering as Ord2};

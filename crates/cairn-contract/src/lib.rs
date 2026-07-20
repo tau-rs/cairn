@@ -64,6 +64,11 @@ pub enum Query {
         /// Relative note path.
         path: String,
     },
+    /// Read a note's contents with content processors applied (render path).
+    RenderNote {
+        /// Relative note path.
+        path: String,
+    },
     /// Search note content.
     Search {
         /// Query string.

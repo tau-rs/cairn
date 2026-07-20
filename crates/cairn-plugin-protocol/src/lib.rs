@@ -23,6 +23,9 @@ pub const METHOD_LIST_NOTES: &str = "host/listNotes";
 pub const METHOD_DELETE_NOTE: &str = "host/deleteNote";
 /// Host -> plugin: a cairn change event. Delivered to plugins declaring `events`.
 pub const METHOD_CAIRN_EVENT: &str = "cairn/event";
+/// Host -> plugin: transform a note's content on the read/render path.
+/// Delivered only to plugins declaring `content:process`.
+pub const METHOD_PROCESS_CONTENT: &str = "content/process";
 
 /// Capability: read the cairn (read/search/list note content + metadata).
 pub const CAP_FS_READ: &str = "fs:read";
@@ -35,6 +38,10 @@ pub const CAP_EVENTS: &str = "events";
 /// is consumed by the OS sandbox to open the network in the jail — it gates no
 /// host-callback method (see `cairn-infra` `sandbox.rs`).
 pub const CAP_NET: &str = "net";
+/// Capability: register a content processor (host->plugin `content/process`).
+/// Like `events`, this gates whether the host *invokes* the plugin, not a
+/// plugin->host callback. Declared in the manifest for auditability.
+pub const CAP_CONTENT_PROCESS: &str = "content:process";
 
 /// JSON-RPC error code: the host refused a callback (capability not declared, or
 /// unknown host method).
@@ -85,6 +92,8 @@ pub struct InitializeResult {
     pub commands: Vec<CommandDecl>,
     #[serde(default)]
     pub contributions: Vec<PluginContribution>,
+    #[serde(default)]
+    pub processors: Vec<ProcessorDecl>,
 }
 
 /// A command the plugin declares it can handle.
@@ -208,6 +217,28 @@ pub enum CairnEventKind {
 pub struct CairnEvent {
     pub kind: CairnEventKind,
     pub path: String,
+}
+
+/// Params of the `content/process` request (host -> plugin).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessContentParams {
+    pub path: String,
+    pub content: String,
+}
+
+/// Result of `content/process`: the transformed content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessContentResult {
+    pub content: String,
+}
+
+/// One content-processor declaration a plugin returns at `initialize`. A note is
+/// routed to the processor when its path matches any listed extension; an empty
+/// list matches all note types.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessorDecl {
+    #[serde(default)]
+    pub extensions: Vec<String>,
 }
 
 /// Params of the `host/search` callback.
@@ -353,6 +384,7 @@ mod tests {
                 title: "Echo".into(),
             }],
             contributions: vec![],
+            processors: vec![],
         };
         let mut buf = Vec::new();
         write_message(&mut buf, &init).unwrap();
@@ -489,5 +521,46 @@ mod tests {
             path: "b.md".into(),
         };
         assert_eq!(serde_json::to_value(&del).unwrap()["kind"], "noteDeleted");
+    }
+
+    #[test]
+    fn content_process_constants_and_dtos() {
+        assert_eq!(METHOD_PROCESS_CONTENT, "content/process");
+        assert_eq!(CAP_CONTENT_PROCESS, "content:process");
+
+        let p = ProcessContentParams {
+            path: "a.md".into(),
+            content: "hi".into(),
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(
+            serde_json::from_value::<ProcessContentParams>(v).unwrap(),
+            p
+        );
+
+        let r = ProcessContentResult {
+            content: "HI".into(),
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(
+            serde_json::from_value::<ProcessContentResult>(v).unwrap(),
+            r
+        );
+
+        let d = ProcessorDecl {
+            extensions: vec!["md".into()],
+        };
+        let v = serde_json::to_value(&d).unwrap();
+        assert_eq!(serde_json::from_value::<ProcessorDecl>(v).unwrap(), d);
+    }
+
+    #[test]
+    fn initialize_result_processors_default_when_absent() {
+        // An initialize reply from a plugin built before `processors` existed must
+        // still decode (field defaults to empty).
+        let json = r#"{"name":"x","version":"0","commands":[]}"#;
+        let init: InitializeResult = serde_json::from_str(json).unwrap();
+        assert!(init.processors.is_empty());
+        assert!(init.contributions.is_empty());
     }
 }
