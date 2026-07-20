@@ -49,9 +49,13 @@ fn lock(collab: &Collab) -> std::sync::MutexGuard<'_, HashMap<NotePath, Session>
 
 /// Drive one upgraded `/collab` socket. `seed` reads a note's current markdown
 /// to seed a fresh session (empty string when the note does not exist yet).
+///
+/// Assumes ONE replica id per connection: `my_replica` and the disconnect
+/// cleanup below are connection-global, so multiplexing distinct replica ids
+/// over a single socket is out of scope for PR-1 (to be enforced in PR-2).
 pub async fn run_collab<S>(socket: WebSocket, collab: Collab, seed: S)
 where
-    S: Fn(&NotePath) -> String + Send + 'static,
+    S: Fn(&NotePath) -> String + Clone + Send + 'static,
 {
     let (mut sink, mut stream) = socket.split();
     let (out_tx, mut out_rx) = mpsc::channel::<CollabServerMsg>(64);
@@ -94,13 +98,22 @@ where
                     continue;
                 };
                 my_replica = Some(replica);
+                // Seed a fresh session's replica OFF the executor and OUTSIDE the
+                // collab lock, so a large note's read cannot stall other notes'
+                // relay traffic. Discarded if another Join created the session
+                // first.
+                let seed_fn = seed.clone();
+                let seed_path = path.clone();
+                let seeded = tokio::task::spawn_blocking(move || seed_fn(&seed_path))
+                    .await
+                    .unwrap_or_default();
                 // Get-or-create the session; take a snapshot + a subscription.
                 let joined = {
                     let mut reg = lock(&collab);
                     let sess = reg.entry(path.clone()).or_insert_with(|| {
                         let (tx, _rx) = broadcast::channel(256);
                         Session {
-                            doc: BlockDoc::from_markdown(DAEMON_REPLICA, &seed(&path)),
+                            doc: BlockDoc::from_markdown(DAEMON_REPLICA, &seeded),
                             peers: tx,
                             participants: HashSet::new(),
                         }
@@ -146,7 +159,13 @@ where
                                     break;
                                 }
                             }
-                            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                                // A lagged collab subscriber has permanently missed
+                                // state-critical ops; its replica diverges until it
+                                // re-Joins (reconnect-resync is PR-2).
+                                tracing::warn!(skipped, "collab: subscriber lagged, dropped ops");
+                                continue;
+                            }
                             Err(broadcast::error::RecvError::Closed) => break,
                         }
                     }

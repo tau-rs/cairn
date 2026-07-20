@@ -564,4 +564,39 @@ mod tests {
         }
         assert_eq!(a.materialize(), b.materialize());
     }
+
+    #[test]
+    fn state_as_ops_preserves_ids_so_concurrent_edits_converge() {
+        // A seeds a block; B catches up via the snapshot op-set (adopting A's IDs).
+        let mut a = BlockDoc::from_markdown(1, "shared block\n");
+        let mut b = BlockDoc::from_markdown(2, "");
+        for op in a.state_as_ops() {
+            b.merge(op);
+        }
+        let id = a.block_ids_in_order()[0];
+        assert_eq!(b.block_ids_in_order(), vec![id]); // shared identity
+
+        // Both edit the SAME block concurrently; exchange the resulting ops.
+        let a_ops = a.apply_local(Edit::UpdateText {
+            id,
+            text: "from A".into(),
+            author: Author::Human,
+        });
+        let b_ops = b.apply_local(Edit::UpdateText {
+            id,
+            text: "from B".into(),
+            author: Author::Human,
+        });
+        for op in &b_ops {
+            a.merge(op.clone());
+        }
+        for op in &a_ops {
+            b.merge(op.clone());
+        }
+
+        // Because the ID was shared, the concurrent edits collide on ONE block and
+        // converge to a single deterministic winner — not two forked blocks.
+        assert_eq!(a.materialize(), b.materialize());
+        assert_eq!(a.block_ids_in_order().len(), 1);
+    }
 }

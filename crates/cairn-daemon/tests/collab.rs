@@ -228,6 +228,17 @@ async fn late_joiner_is_caught_up_by_snapshot() {
         d2.merge(block_op_from_wire(op));
     }
     assert!(d2.materialize().contains("seeded"));
+    // The joiner adopts the sender's live BlockId (shared identity over the
+    // wire), not a fresh one — the whole point of state-as-ops catch-up.
+    let ids = d2.block_ids_in_order();
+    assert_eq!(ids.len(), 1);
+    assert_eq!(
+        ids[0],
+        BlockId {
+            replica: 1,
+            counter: 0
+        }
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
