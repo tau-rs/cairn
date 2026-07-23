@@ -7,6 +7,7 @@ pub mod localfs;
 pub mod notify_watcher;
 mod plugin_hash;
 mod plugin_host;
+pub mod plugin_install;
 pub mod sandbox;
 pub mod seams;
 mod semantic;
