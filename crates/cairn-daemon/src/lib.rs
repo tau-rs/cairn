@@ -12,6 +12,8 @@ pub use auth::generate_token_file;
 
 mod mcp;
 
+pub mod collab;
+
 use std::sync::{Arc, Mutex};
 
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
@@ -58,6 +60,9 @@ pub struct AppState {
     /// `false` (read-only), mirroring the plugin trust default-deny posture; the
     /// binary opts in via `--mcp-write` ([`AppState::with_mcp_write`]).
     mcp_write: bool,
+    /// Live CRDT collaboration sessions, one per open note. Independent of the
+    /// engine mutex so a relay fault cannot stall `/command`.
+    collab: collab::Collab,
 }
 
 /// An `EventSink` that republishes engine events as wire events.
@@ -121,6 +126,7 @@ impl AppState {
             token: None,
             runtime: Arc::new(cairn_infra::NullRuntime),
             mcp_write: false,
+            collab: collab::registry(),
         }
     }
 
@@ -531,6 +537,26 @@ async fn events_handler(
     ws.on_upgrade(move |socket| forward_events(socket, rx))
 }
 
+async fn collab_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    // Same Origin gate as `/events` (browsers skip CORS on WS upgrades). The
+    // token is enforced by the `mcp_require_token` route layer.
+    if !ws_origin_allowed(&state.allowed_origins, headers.get(header::ORIGIN)) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let collab = state.collab.clone();
+    let seed_state = state.clone();
+    ws.on_upgrade(move |socket| {
+        collab::run_collab(socket, collab, move |path| {
+            // Seed from the note's current content; empty if it does not exist.
+            seed_state.engine().read_note(path).unwrap_or_default()
+        })
+    })
+}
+
 /// What the WS forward loop should do with a single broadcast `recv` outcome.
 enum WsForward {
     /// Send this serialized event to the client.
@@ -649,10 +675,23 @@ pub fn build_router(state: AppState) -> Router {
             state.clone(),
             auth::mcp_require_token,
         ));
+    // `/collab` is note-multiplexed and Origin-gated like `/events`, but also
+    // needs the `?token=` handshake (browser WS clients cannot set headers), so
+    // it reuses `mcp_require_token` rather than `/events`'s open group.
+    let collab = Router::new()
+        .route("/collab", get(collab_handler))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::mcp_require_token,
+        ));
     let open = Router::new()
         .route("/events", get(events_handler))
         .route("/health", get(health_handler));
-    protected.merge(mcp).merge(open).with_state(state)
+    protected
+        .merge(mcp)
+        .merge(collab)
+        .merge(open)
+        .with_state(state)
 }
 
 #[cfg(test)]

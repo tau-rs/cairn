@@ -582,6 +582,136 @@ fn map_widget(w: cairn_plugin_protocol::PluginWidget) -> cairn_contract::PluginW
     }
 }
 
+/// Map a domain `BlockId` to its wire mirror.
+fn block_id_to_wire(id: cairn_domain::BlockId) -> cairn_contract::WireBlockId {
+    cairn_contract::WireBlockId {
+        replica: id.replica,
+        counter: id.counter,
+    }
+}
+fn block_id_from_wire(id: cairn_contract::WireBlockId) -> cairn_domain::BlockId {
+    cairn_domain::BlockId {
+        replica: id.replica,
+        counter: id.counter,
+    }
+}
+
+fn author_to_wire(a: cairn_domain::Author) -> cairn_contract::WireAuthor {
+    match a {
+        cairn_domain::Author::Human => cairn_contract::WireAuthor::Human,
+        cairn_domain::Author::Agent => cairn_contract::WireAuthor::Agent,
+    }
+}
+fn author_from_wire(a: cairn_contract::WireAuthor) -> cairn_domain::Author {
+    match a {
+        cairn_contract::WireAuthor::Human => cairn_domain::Author::Human,
+        cairn_contract::WireAuthor::Agent => cairn_domain::Author::Agent,
+    }
+}
+
+fn block_kind_to_wire(k: cairn_domain::block::BlockKind) -> cairn_contract::WireBlockKind {
+    use cairn_contract::WireBlockKind as W;
+    use cairn_domain::block::BlockKind as K;
+    match k {
+        K::Frontmatter => W::Frontmatter,
+        K::Heading => W::Heading,
+        K::Paragraph => W::Paragraph,
+        K::ListItem => W::ListItem,
+        K::CodeFence => W::CodeFence,
+        K::BlockQuote => W::BlockQuote,
+        K::Table => W::Table,
+        K::ThematicBreak => W::ThematicBreak,
+    }
+}
+fn block_kind_from_wire(k: cairn_contract::WireBlockKind) -> cairn_domain::block::BlockKind {
+    use cairn_contract::WireBlockKind as W;
+    use cairn_domain::block::BlockKind as K;
+    match k {
+        W::Frontmatter => K::Frontmatter,
+        W::Heading => K::Heading,
+        W::Paragraph => K::Paragraph,
+        W::ListItem => K::ListItem,
+        W::CodeFence => K::CodeFence,
+        W::BlockQuote => K::BlockQuote,
+        W::Table => K::Table,
+        W::ThematicBreak => K::ThematicBreak,
+    }
+}
+
+/// Map a domain `BlockOp` to its wire mirror (the only CRDT type on the wire).
+#[must_use]
+pub fn block_op_to_wire(op: cairn_domain::BlockOp) -> cairn_contract::WireBlockOp {
+    use cairn_contract::WireBlockOp as W;
+    use cairn_domain::BlockOp as B;
+    match op {
+        B::Insert {
+            id,
+            after,
+            lamport,
+            kind,
+            text,
+        } => W::Insert {
+            id: block_id_to_wire(id),
+            after: after.map(block_id_to_wire),
+            lamport,
+            kind: block_kind_to_wire(kind),
+            text,
+        },
+        B::Delete { id, lamport } => W::Delete {
+            id: block_id_to_wire(id),
+            lamport,
+        },
+        B::SetContent {
+            id,
+            text,
+            lamport,
+            author,
+        } => W::SetContent {
+            id: block_id_to_wire(id),
+            text,
+            lamport,
+            author: author_to_wire(author),
+        },
+    }
+}
+
+/// Map a wire `WireBlockOp` back to the domain `BlockOp`.
+#[must_use]
+pub fn block_op_from_wire(op: cairn_contract::WireBlockOp) -> cairn_domain::BlockOp {
+    use cairn_contract::WireBlockOp as W;
+    use cairn_domain::BlockOp as B;
+    match op {
+        W::Insert {
+            id,
+            after,
+            lamport,
+            kind,
+            text,
+        } => B::Insert {
+            id: block_id_from_wire(id),
+            after: after.map(block_id_from_wire),
+            lamport,
+            kind: block_kind_from_wire(kind),
+            text,
+        },
+        W::Delete { id, lamport } => B::Delete {
+            id: block_id_from_wire(id),
+            lamport,
+        },
+        W::SetContent {
+            id,
+            text,
+            lamport,
+            author,
+        } => B::SetContent {
+            id: block_id_from_wire(id),
+            text,
+            lamport,
+            author: author_from_wire(author),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1646,5 +1776,46 @@ mod augmented_answer_tests {
                 message: "x".into()
             })
         );
+    }
+
+    #[test]
+    fn block_op_round_trips_through_the_wire() {
+        use cairn_domain::{block::BlockKind, Author, BlockId, BlockOp};
+
+        let cases = vec![
+            BlockOp::Insert {
+                id: BlockId {
+                    replica: 3,
+                    counter: 9,
+                },
+                after: Some(BlockId {
+                    replica: 1,
+                    counter: 0,
+                }),
+                lamport: 5,
+                kind: BlockKind::ListItem,
+                text: "- a".into(),
+            },
+            BlockOp::Delete {
+                id: BlockId {
+                    replica: 2,
+                    counter: 4,
+                },
+                lamport: 8,
+            },
+            BlockOp::SetContent {
+                id: BlockId {
+                    replica: 7,
+                    counter: 1,
+                },
+                text: "hello".into(),
+                lamport: 12,
+                author: Author::Agent,
+            },
+        ];
+        for op in cases {
+            let round = block_op_from_wire(block_op_to_wire(op.clone()));
+            assert_eq!(op, round);
+        }
     }
 }
