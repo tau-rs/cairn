@@ -23,5 +23,8 @@ tags: Array<string>,
 /**
  * Last-modified, Unix seconds. HEAD: filesystem mtime. Historical: newest
  * commit ≤ the revision that touched the note.
+ *
+ * Emitted to TS as `number`: Unix seconds fit safely under 2^53, and a
+ * `bigint` binding would force awkward coercion in the graph-viz UI.
  */
-mtime_secs: bigint, };
+mtime_secs: number, };
