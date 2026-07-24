@@ -341,13 +341,17 @@ pub trait CollabSession {
     fn is_active(&self) -> bool;
 
     /// Open (or replace) the live document for `path`, seeded from `markdown`.
-    fn open(&mut self, path: &NotePath, markdown: &str);
+    ///
+    /// Takes `&self`: adapters may be cheap cloneable handles over a
+    /// single-owner task (decision ③), so mutation lives behind the handle,
+    /// not in the caller's binding.
+    fn open(&self, path: &NotePath, markdown: &str);
 
     /// Apply a local edit to the open document, returning ops to broadcast.
-    fn edit(&mut self, path: &NotePath, edit: Edit) -> Vec<BlockOp>;
+    fn edit(&self, path: &NotePath, edit: Edit) -> Vec<BlockOp>;
 
     /// Merge a remote op into the open document for `path`.
-    fn merge_remote(&mut self, path: &NotePath, op: BlockOp);
+    fn merge_remote(&self, path: &NotePath, op: BlockOp);
 
     /// Materialize the open document for `path` to canonical markdown, or
     /// `None` if no document is open.
