@@ -33,15 +33,15 @@ impl CollabSession for NoCollab {
     fn is_active(&self) -> bool {
         false
     }
-    fn open(&mut self, _path: &cairn_domain::NotePath, _markdown: &str) {}
+    fn open(&self, _path: &cairn_domain::NotePath, _markdown: &str) {}
     fn edit(
-        &mut self,
+        &self,
         _path: &cairn_domain::NotePath,
         _edit: cairn_domain::Edit,
     ) -> Vec<cairn_domain::BlockOp> {
         Vec::new()
     }
-    fn merge_remote(&mut self, _path: &cairn_domain::NotePath, _op: cairn_domain::BlockOp) {}
+    fn merge_remote(&self, _path: &cairn_domain::NotePath, _op: cairn_domain::BlockOp) {}
     fn materialize(&self, _path: &cairn_domain::NotePath) -> Option<String> {
         None
     }
@@ -67,7 +67,7 @@ mod tests {
     fn seams_have_expected_neutral_behavior() {
         assert!(!NoCollab.is_active());
         // Expanded CollabSession: NoCollab is inert — no docs, no ops.
-        let mut nc = NoCollab;
+        let nc = NoCollab;
         let path = cairn_domain::NotePath::new("a.md").unwrap();
         nc.open(&path, "hello\n");
         assert!(nc.materialize(&path).is_none());
