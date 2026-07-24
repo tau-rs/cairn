@@ -12,9 +12,11 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+cairn-app = { path = "../cairn-app" }
 cairn-domain = { path = "../cairn-domain" }
 cairn-infra = { path = "../cairn-infra" }
 cairn-ports = { path = "../cairn-ports" }
+cairn-startup = { path = "../cairn-startup" }
 git2 = { workspace = true }
 tempfile = { workspace = true }
 

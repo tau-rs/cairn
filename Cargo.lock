@@ -421,11 +421,13 @@ dependencies = [
 name = "cairn-plugin-example"
 version = "0.0.0"
 dependencies = [
+ "cairn-app",
  "cairn-domain",
  "cairn-infra",
  "cairn-plugin-protocol",
  "cairn-plugin-sdk",
  "cairn-ports",
+ "cairn-startup",
  "git2",
  "serde",
  "serde_json",
