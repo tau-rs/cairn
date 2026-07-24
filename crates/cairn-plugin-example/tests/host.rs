@@ -180,12 +180,12 @@ fn note_len_reads_via_callback() {
     let tmp = tempfile::tempdir().unwrap();
     let pdir = tmp.path().join(".cairn").join("plugins").join("example");
     std::fs::create_dir_all(&pdir).unwrap();
-    // Literal (single-quote) TOML string for the path; declare fs:read.
+    // Literal (single-quote) TOML string for the path; declare vault:read.
     std::fs::write(
         pdir.join("manifest.toml"),
         format!(
             "id=\"example\"\nname=\"Example\"\nversion=\"0.1.0\"\n\
-             [engine]\ncommand='{bin}'\ncapabilities=[\"fs:read\"]\n"
+             [engine]\ncommand='{bin}'\ncapabilities=[\"vault:read\"]\n"
         ),
     )
     .unwrap();
@@ -248,7 +248,7 @@ fn write_note_via_callback() {
     let bin = env!("CARGO_BIN_EXE_cairn-plugin-example");
     let tmp = tempfile::tempdir().unwrap();
     let pdir = tmp.path().join(".cairn").join("plugins").join("example");
-    write_manifest(&pdir, bin, "\"fs:write\"");
+    write_manifest(&pdir, bin, "\"vault:write\"");
     let mut host = load_example(tmp.path());
     let mut cb = MapCallbacks(HashMap::new());
     let out = host
@@ -268,7 +268,7 @@ fn write_denied_without_fs_write() {
     let bin = env!("CARGO_BIN_EXE_cairn-plugin-example");
     let tmp = tempfile::tempdir().unwrap();
     let pdir = tmp.path().join(".cairn").join("plugins").join("example");
-    write_manifest(&pdir, bin, "\"fs:read\""); // read but NOT write
+    write_manifest(&pdir, bin, "\"vault:read\""); // read but NOT write
     let mut host = load_example(tmp.path());
     let mut cb = MapCallbacks(HashMap::new());
     let err = host
@@ -291,7 +291,7 @@ fn note_count_via_callback() {
     let bin = env!("CARGO_BIN_EXE_cairn-plugin-example");
     let tmp = tempfile::tempdir().unwrap();
     let pdir = tmp.path().join(".cairn").join("plugins").join("example");
-    write_manifest(&pdir, bin, "\"fs:read\"");
+    write_manifest(&pdir, bin, "\"vault:read\"");
     let mut host = load_example(tmp.path());
     let mut cb = MapCallbacks(HashMap::from([
         ("a.md".to_string(), "alpha".to_string()),
@@ -308,7 +308,7 @@ fn find_via_callback() {
     let bin = env!("CARGO_BIN_EXE_cairn-plugin-example");
     let tmp = tempfile::tempdir().unwrap();
     let pdir = tmp.path().join(".cairn").join("plugins").join("example");
-    write_manifest(&pdir, bin, "\"fs:read\"");
+    write_manifest(&pdir, bin, "\"vault:read\"");
     let mut host = load_example(tmp.path());
     let mut cb = MapCallbacks(HashMap::from([
         ("a.md".to_string(), "the quick fox".to_string()),
@@ -330,7 +330,7 @@ fn delete_note_via_callback() {
     let bin = env!("CARGO_BIN_EXE_cairn-plugin-example");
     let tmp = tempfile::tempdir().unwrap();
     let pdir = tmp.path().join(".cairn").join("plugins").join("example");
-    write_manifest(&pdir, bin, "\"fs:write\"");
+    write_manifest(&pdir, bin, "\"vault:write\"");
     let mut host = load_example(tmp.path());
     let mut cb = MapCallbacks(HashMap::from([("n.md".to_string(), "body".to_string())]));
     let out = host
@@ -350,7 +350,7 @@ fn delete_denied_without_fs_write() {
     let bin = env!("CARGO_BIN_EXE_cairn-plugin-example");
     let tmp = tempfile::tempdir().unwrap();
     let pdir = tmp.path().join(".cairn").join("plugins").join("example");
-    write_manifest(&pdir, bin, "\"fs:read\""); // read but NOT write
+    write_manifest(&pdir, bin, "\"vault:read\""); // read but NOT write
     let mut host = load_example(tmp.path());
     let mut cb = MapCallbacks(HashMap::from([("n.md".to_string(), "body".to_string())]));
     let err = host
@@ -395,7 +395,7 @@ fn event_delivered_and_handler_writes() {
     let bin = env!("CARGO_BIN_EXE_cairn-plugin-example");
     let tmp = tempfile::tempdir().unwrap();
     let pdir = tmp.path().join(".cairn").join("plugins").join("example");
-    write_manifest(&pdir, bin, "\"events\", \"fs:write\"");
+    write_manifest(&pdir, bin, "\"vault:events\", \"vault:write\"");
     let mut host = load_example(tmp.path());
     let mut cb = MapCallbacks(HashMap::new());
     host.dispatch_event(
@@ -411,7 +411,7 @@ fn event_skipped_without_events_cap() {
     let bin = env!("CARGO_BIN_EXE_cairn-plugin-example");
     let tmp = tempfile::tempdir().unwrap();
     let pdir = tmp.path().join(".cairn").join("plugins").join("example");
-    write_manifest(&pdir, bin, "\"fs:write\""); // fs:write but NOT events
+    write_manifest(&pdir, bin, "\"vault:write\""); // vault:write but NOT vault:events
     let mut host = load_example(tmp.path());
     let mut cb = MapCallbacks(HashMap::new());
     host.dispatch_event(
@@ -602,7 +602,9 @@ fn render_expands_include_when_cap_declared() {
     let bin = env!("CARGO_BIN_EXE_cairn-plugin-example");
     let tmp = tempfile::tempdir().unwrap();
     let pdir = tmp.path().join(".cairn").join("plugins").join("example");
-    write_manifest(&pdir, bin, "\"content:process\",\"fs:read\"");
+    // The @include processor reads notes through the host callback, which the
+    // vault:read capability gates (fs:read is raw-filesystem, a different cap).
+    write_manifest(&pdir, bin, "\"content:process\",\"vault:read\"");
 
     let mut host = load_example(tmp.path());
     let mut cb = MapCallbacks(HashMap::from([
@@ -638,7 +640,9 @@ fn render_is_fail_soft_on_missing_include_target() {
     let bin = env!("CARGO_BIN_EXE_cairn-plugin-example");
     let tmp = tempfile::tempdir().unwrap();
     let pdir = tmp.path().join(".cairn").join("plugins").join("example");
-    write_manifest(&pdir, bin, "\"content:process\",\"fs:read\"");
+    // The @include processor reads notes through the host callback, which the
+    // vault:read capability gates (fs:read is raw-filesystem, a different cap).
+    write_manifest(&pdir, bin, "\"content:process\",\"vault:read\"");
 
     let mut host = load_example(tmp.path());
     let mut cb = MapCallbacks(HashMap::new()); // target absent => read_note errors

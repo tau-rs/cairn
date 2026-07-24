@@ -2,6 +2,37 @@ use assert_cmd::Command;
 use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 
+/// Create `<dir>/.cairn/plugins/<name>/manifest.toml` with the given body.
+fn write_plugin_manifest(dir: &std::path::Path, name: &str, body: &str) {
+    let pdir = dir.join(".cairn").join("plugins").join(name);
+    std::fs::create_dir_all(&pdir).unwrap();
+    std::fs::write(pdir.join("manifest.toml"), body).unwrap();
+}
+
+#[test]
+fn plugin_list_shows_status_and_capabilities() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    cairn(dir).arg("init").assert().success();
+    write_plugin_manifest(
+        dir,
+        "fetch-bot",
+        "id=\"fetch-bot\"\nname=\"Fetch Bot\"\nversion=\"1.0.0\"\n\
+         [engine]\ncommand=\"./fetch-bot\"\ncapabilities=[\"vault:read\",\"net\"]\n",
+    );
+    cairn(dir)
+        .args(["plugin", "list"])
+        .assert()
+        .success()
+        .stdout(
+            contains("fetch-bot")
+                .and(contains("untrusted"))
+                .and(contains("Fetch Bot"))
+                .and(contains("vault:read"))
+                .and(contains("net")),
+        );
+}
+
 /// A `cairn` invocation pre-pointed at `dir` via `--cairn`.
 fn cairn(dir: &std::path::Path) -> Command {
     let mut cmd = Command::cargo_bin("cairn").unwrap();
@@ -295,6 +326,65 @@ fn history_show_restore_subcommands() {
         .assert()
         .success()
         .stdout("v1");
+}
+
+#[test]
+fn plugin_trust_yes_prints_snippet() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    cairn(dir).arg("init").assert().success();
+    write_plugin_manifest(
+        dir,
+        "fetch-bot",
+        "id=\"fetch-bot\"\nname=\"Fetch Bot\"\nversion=\"1.0.0\"\n\
+         [engine]\ncommand=\"./fetch-bot\"\ncapabilities=[\"vault:read\",\"fs:read\"]\n",
+    );
+    cairn(dir)
+        .args(["plugin", "trust", "fetch-bot"])
+        .write_stdin("y\n")
+        .assert()
+        .success()
+        .stdout(
+            contains("vault:read")
+                // fs:read is declared but not yet enforced, so it carries the label
+                .and(contains("enforced in a future release"))
+                .and(contains("[[plugins.trusted]]"))
+                .and(contains("dir = \"fetch-bot\""))
+                .and(contains("hash = \"sha256:")),
+        );
+}
+
+#[test]
+fn plugin_trust_declined_prints_no_snippet() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    cairn(dir).arg("init").assert().success();
+    write_plugin_manifest(
+        dir,
+        "fetch-bot",
+        "id=\"fetch-bot\"\nname=\"Fetch Bot\"\nversion=\"1.0.0\"\n\
+         [engine]\ncommand=\"./fetch-bot\"\ncapabilities=[]\n",
+    );
+    // Empty stdin == EOF == non-interactive == refuse.
+    cairn(dir)
+        .args(["plugin", "trust", "fetch-bot"])
+        .write_stdin("")
+        .assert()
+        .success()
+        .stdout(contains("Not trusted").and(contains("[[plugins.trusted]]").not()));
+}
+
+#[test]
+fn plugin_trust_unknown_dir_errors() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    cairn(dir).arg("init").assert().success();
+    cairn(dir)
+        .args(["plugin", "trust", "ghost"])
+        .write_stdin("y\n")
+        .assert()
+        .failure()
+        .stderr(contains("ghost"));
 }
 
 #[test]
