@@ -106,7 +106,7 @@ jobs:
           # key. Read-only cache use.
           save-if: "false"
 
-      - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b  # nextest
+      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf  # nextest
         if: steps.precheck.outputs.skip != 'true'
 
       - name: Install cargo-mutants
