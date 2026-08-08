@@ -293,12 +293,17 @@ impl AppState {
             let mut guard = self.engine();
             let disk = guard.read_note(&item.path).unwrap_or_default();
             if disk != item.baseline {
+                // Release the engine lock before taking the collab lock, then fold
+                // the foreign on-disk edit into the live replica and fan it out
+                // (collab lock only). No write this pass — the fold leaves the
+                // session dirty, so the NEXT pass re-materializes the merged result
+                // and writes it via the normal disk==baseline path (spec §13.1).
                 drop(guard);
-                tracing::warn!(
+                tracing::info!(
                     note = %item.path.as_str(),
-                    "collab flush: foreign on-disk edit; skipping write (fold-back is A2)"
+                    "collab flush: foreign on-disk edit; folding back"
                 );
-                collab::settle_flush(&self.collab, &item.path, collab::FlushOutcome::Conflict);
+                collab::fold_foreign(&self.collab, &item.path, &disk);
                 continue;
             }
             let mut tap = EventTap {
@@ -925,5 +930,49 @@ mod collab_flush_tests {
             at_head.contains("second"),
             "second edit committed via re-flush (baseline advanced, no false conflict)"
         );
+    }
+
+    #[test]
+    fn flush_folds_foreign_disk_edit_into_replica_and_fans_out() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(engine_over(tmp.path()));
+        let path = NotePath::new("n.md").unwrap();
+
+        // Open session (insert_dirty_session already sets dirty=true); baseline == "seed\n".
+        collab::insert_dirty_session(&state.collab, &path, "seed\n", vec![]);
+        collab::add_participant(&state.collab, &path, 1);
+        // Subscribe a peer BEFORE the fold to observe fan-out.
+        let mut rx = collab::test_subscribe(&state.collab, &path);
+
+        // A foreign editor rewrites the file, adding a line.
+        std::fs::write(tmp.path().join("n.md"), "seed\n\nforeign line\n").unwrap();
+
+        // Flush pass 1: disk != baseline ⇒ fold (no write this pass).
+        state.run_collab_flush_pass(std::time::Duration::ZERO);
+
+        // Folded into the daemon replica; baseline advanced to the consumed bytes.
+        let (markdown, baseline) =
+            collab::test_session_markdown_and_baseline(&state.collab, &path).unwrap();
+        assert!(markdown.contains("foreign line"));
+        assert_eq!(baseline, "seed\n\nforeign line\n");
+        // Fanned out to the peer.
+        let mut saw_insert = false;
+        while let Ok(f) = rx.try_recv() {
+            if matches!(
+                collab::fanout_op(&f),
+                Some(cairn_domain::BlockOp::Insert { .. })
+            ) {
+                saw_insert = true;
+            }
+        }
+        assert!(saw_insert, "foreign block fanned out as an Insert");
+
+        // Flush pass 2: now disk == baseline ⇒ the merged result is written+committed.
+        state.run_collab_flush_pass(std::time::Duration::ZERO);
+        let guard = state.engine();
+        assert!(guard
+            .note_at(&path, "HEAD")
+            .unwrap()
+            .contains("foreign line"));
     }
 }

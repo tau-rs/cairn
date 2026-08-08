@@ -259,9 +259,6 @@ pub(crate) enum FlushOutcome {
     /// `write_note` landed these bytes on disk (commit may have failed — the
     /// bytes are still the on-disk truth, so they become the new baseline).
     Committed(String),
-    /// A foreign on-disk edit diverged from the baseline; the write was skipped
-    /// (fold-back is A2).
-    Conflict,
     /// `write_note` itself failed; nothing landed.
     WriteError,
 }
@@ -302,7 +299,9 @@ pub(crate) fn drain_due(collab: &Collab, debounce: Duration) -> Vec<FlushItem> {
 
 /// Settle one flushed session after its phase-2 write, under the collab lock.
 /// A no-op if the session was reaped meanwhile. Reaps an abandoned session only
-/// once its edits are safely on disk (or unrecoverable in A1), never before.
+/// once its edits are safely on disk, never before. Foreign edits are folded
+/// back before the write (see `fold_foreign`), so a settled outcome is only
+/// Committed or WriteError.
 pub(crate) fn settle_flush(collab: &Collab, path: &NotePath, outcome: FlushOutcome) {
     let mut reg = lock(collab);
     let Some(sess) = reg.get_mut(path) else {
@@ -315,18 +314,6 @@ pub(crate) fn settle_flush(collab: &Collab, path: &NotePath, outcome: FlushOutco
         FlushOutcome::Committed(written) => {
             sess.last_written = written;
             sess.participants.is_empty() && !sess.dirty
-        }
-        // Foreign edit on disk. An active session keeps its edits for retry /
-        // A2 fold-back; an abandoned one is reaped rather than re-warning every
-        // tick forever (the foreign on-disk edit is preserved either way — A1's
-        // "never lose foreign work" floor).
-        FlushOutcome::Conflict => {
-            if sess.participants.is_empty() {
-                true
-            } else {
-                sess.dirty = true;
-                false
-            }
         }
         // Transient write failure: keep the edits and retry next pass.
         FlushOutcome::WriteError => {
@@ -344,10 +331,8 @@ pub(crate) fn settle_flush(collab: &Collab, path: &NotePath, outcome: FlushOutco
 /// into `doc`, fans the produced ops out to peers, advances `last_written` to the
 /// consumed `foreign` bytes, and leaves the session dirty so the next flush pass
 /// writes the merged result. A no-op if the session was reaped meanwhile. This is
-/// the fold-back critical section that replaces A1's conflict-skip (spec §13.1/§13.2).
-// Not yet wired into the flush pass — that lands when settle_flush's
-// `FlushOutcome::Conflict` arm switches onto this (Task 4).
-#[allow(dead_code)]
+/// the fold-back critical section that replaces A1's conflict-skip (spec §13.1/§13.2),
+/// called from `run_collab_flush_pass` when the on-disk bytes diverge from baseline.
 pub(crate) fn fold_foreign(collab: &Collab, path: &NotePath, foreign: &str) {
     let mut reg = lock(collab);
     let Some(sess) = reg.get_mut(path) else {
@@ -432,6 +417,17 @@ pub(crate) fn fanout_op(f: &Fanout) -> Option<cairn_domain::BlockOp> {
         CollabServerMsg::Op { op, .. } => Some(block_op_from_wire(op.clone())),
         _ => None,
     }
+}
+
+/// Current materialized replica text + baseline for a session. Test-only.
+#[cfg(test)]
+pub(crate) fn test_session_markdown_and_baseline(
+    collab: &Collab,
+    path: &NotePath,
+) -> Option<(String, String)> {
+    let reg = lock(collab);
+    reg.get(path)
+        .map(|s| (s.doc.materialize(), s.last_written.clone()))
 }
 
 #[cfg(test)]
@@ -522,24 +518,6 @@ mod flush_tests {
         settle_flush(&reg, &p, FlushOutcome::WriteError);
         assert!(lock(&reg).contains_key(&p));
         assert!(lock(&reg).get(&p).unwrap().dirty);
-    }
-
-    #[test]
-    fn settle_conflict_reaps_abandoned_but_keeps_active() {
-        let reg = registry();
-        let active = NotePath::new("active.md").unwrap();
-        let gone = NotePath::new("gone.md").unwrap();
-        insert_dirty_session(&reg, &active, "", vec![ins("a")]);
-        insert_dirty_session(&reg, &gone, "", vec![ins("g")]);
-        lock(&reg).get_mut(&active).unwrap().participants.insert(1);
-        let _ = drain_due(&reg, Duration::ZERO);
-        // Active session with a foreign conflict: kept + re-armed for A2 fold-back.
-        settle_flush(&reg, &active, FlushOutcome::Conflict);
-        assert!(lock(&reg).get(&active).unwrap().dirty);
-        // Abandoned session with a foreign conflict: reaped (no warn-loop; the
-        // on-disk foreign edit is preserved).
-        settle_flush(&reg, &gone, FlushOutcome::Conflict);
-        assert!(!lock(&reg).contains_key(&gone));
     }
 
     #[test]
