@@ -48,4 +48,13 @@ describe("App", () => {
     fireEvent.mouseUp(toSlider);
     await waitFor(() => expect(client.graphDiff).toHaveBeenCalledWith("oldest", "newest"));
   });
+
+  it("switching back to Live re-fetches getGraph", async () => {
+    render(<App />);
+    await waitFor(() => expect(client.getGraph).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: /diff/i }));
+    fireEvent.click(screen.getByRole("button", { name: /live/i }));
+    // Live re-fetches the HEAD graph (and clears any diff overlay).
+    await waitFor(() => expect(client.getGraph).toHaveBeenCalledTimes(2));
+  });
 });

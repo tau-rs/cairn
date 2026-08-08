@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Revision } from "./contract/Revision";
+import type { GraphNode } from "./contract/GraphNode";
+import type { GraphEdge } from "./contract/GraphEdge";
 import { getGraph, graphAt, graphDiff, vaultHistory, DaemonError } from "./client/daemonClient";
 import { buildGraphData, type RFGraph, type RFNode } from "./graph/graphData";
 import { buildDiffGraph, type DiffClass } from "./graph/diffStyle";
@@ -15,35 +17,44 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const indexRef = useRef<Map<string, RFNode>>(new Map());
+  const genRef = useRef(0); // request generation — guards against stale async overwrites
 
   const [scrubIdx, setScrubIdx] = useState(0);
   const [fromIdx, setFromIdx] = useState(0);
   const [toIdx, setToIdx] = useState(0);
 
-  const apply = useCallback((nodes: any[], edges: any[]) => {
+  const apply = useCallback((nodes: GraphNode[], edges: GraphEdge[]) => {
     const { graph: g, index } = buildGraphData(nodes, edges, indexRef.current);
     indexRef.current = index;
     setGraph(g);
   }, []);
 
-  const run = useCallback(async (fn: () => Promise<void>) => {
+  // Wraps an async op with the loading/error lifecycle and a staleness guard:
+  // each run bumps a generation counter; only the most recently started run may
+  // mutate graph/error/loading state, so a slow response can't clobber a newer one.
+  const run = useCallback(async (fn: (isStale: () => boolean) => Promise<void>) => {
+    const myGen = ++genRef.current;
+    const isStale = () => genRef.current !== myGen;
     setLoading(true);
     setError(null);
     try {
-      await fn();
+      await fn(isStale);
     } catch (e) {
+      if (isStale()) return;
       setError(e instanceof DaemonError ? e.message : "Can't reach daemon — is cairn-daemon running and CAIRN_VAULT set?");
     } finally {
-      setLoading(false);
+      if (!isStale()) setLoading(false);
     }
   }, []);
 
   // Initial: live graph + timeline.
   useEffect(() => {
-    void run(async () => {
+    void run(async (isStale) => {
       const g = await getGraph();
+      if (isStale()) return;
       apply(g.nodes, g.edges);
       const revs = await vaultHistory();
+      if (isStale()) return;
       const tl = [...revs].reverse(); // oldest → newest
       setTimeline(tl);
       const last = Math.max(0, tl.length - 1);
@@ -54,20 +65,26 @@ export default function App() {
   }, [run, apply]);
 
   const onScrubRelease = () =>
-    run(async () => {
+    run(async (isStale) => {
       const rev = timeline[scrubIdx];
       if (!rev) return;
       const g = await graphAt(rev.id);
+      if (isStale()) return;
       setDiffByPath(undefined);
       apply(g.nodes, g.edges);
     });
 
   const onDiffRelease = () =>
-    run(async () => {
-      const from = timeline[fromIdx];
-      const to = timeline[toIdx];
+    run(async (isStale) => {
+      // Order the handles so `from` is always older than `to` (oldest → newest),
+      // even if the user dragged `from` past `to`.
+      const lo = Math.min(fromIdx, toIdx);
+      const hi = Math.max(fromIdx, toIdx);
+      const from = timeline[lo];
+      const to = timeline[hi];
       if (!from || !to) return;
       const [base, diff] = await Promise.all([graphAt(to.id), graphDiff(from.id, to.id)]);
+      if (isStale()) return;
       const dg = buildDiffGraph(base, diff);
       setDiffByPath(new Map(dg.nodes.map((n) => [n.path, n.diff])));
       apply(dg.nodes, dg.edges);
@@ -77,8 +94,9 @@ export default function App() {
     setMode(m);
     if (m === "live") {
       setDiffByPath(undefined);
-      void run(async () => {
+      void run(async (isStale) => {
         const g = await getGraph();
+        if (isStale()) return;
         apply(g.nodes, g.edges);
       });
     }
