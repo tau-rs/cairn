@@ -59,15 +59,24 @@ fn lock(collab: &Collab) -> std::sync::MutexGuard<'_, HashMap<NotePath, Session>
     collab.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Drive one upgraded `/collab` socket. `seed` reads a note's current markdown
-/// to seed a fresh session (empty string when the note does not exist yet).
+/// What the `/collab` seed closure returns: the HEAD markdown to seed the replica
+/// (and initialize `last_written`), plus whether the working tree already diverges
+/// from HEAD so the first flush folds that pre-existing edit (spec §13.4).
+pub struct Seed {
+    pub markdown: String,
+    pub dirty: bool,
+}
+
+/// Drive one upgraded `/collab` socket. `seed` reads a note's HEAD markdown to
+/// seed a fresh session (empty when the note does not exist yet at HEAD), plus
+/// whether the working tree already diverges from that HEAD snapshot.
 ///
 /// Assumes ONE replica id per connection: `my_replica` and the disconnect
 /// cleanup below are connection-global, so multiplexing distinct replica ids
 /// over a single socket is out of scope for PR-1 (to be enforced in PR-2).
 pub async fn run_collab<S>(socket: WebSocket, collab: Collab, seed: S)
 where
-    S: Fn(&NotePath) -> String + Clone + Send + 'static,
+    S: Fn(&NotePath) -> Seed + Clone + Send + 'static,
 {
     let (mut sink, mut stream) = socket.split();
     let (out_tx, mut out_rx) = mpsc::channel::<CollabServerMsg>(64);
@@ -116,21 +125,25 @@ where
                 // first.
                 let seed_fn = seed.clone();
                 let seed_path = path.clone();
-                let seeded = tokio::task::spawn_blocking(move || seed_fn(&seed_path))
+                let seeded: Seed = tokio::task::spawn_blocking(move || seed_fn(&seed_path))
                     .await
-                    .unwrap_or_default();
+                    .unwrap_or(Seed {
+                        markdown: String::new(),
+                        dirty: false,
+                    });
                 // Get-or-create the session; take a snapshot + a subscription.
                 let joined = {
                     let mut reg = lock(&collab);
                     let sess = reg.entry(path.clone()).or_insert_with(|| {
                         let (tx, _rx) = broadcast::channel(256);
                         Session {
-                            doc: BlockDoc::from_markdown(DAEMON_REPLICA, &seeded),
+                            doc: BlockDoc::from_markdown(DAEMON_REPLICA, &seeded.markdown),
                             peers: tx,
                             participants: HashSet::new(),
-                            dirty: false,
+                            // Diverged worktree ⇒ dirty so the first flush folds it.
+                            dirty: seeded.dirty,
                             last_op: Instant::now(),
-                            last_written: seeded.clone(),
+                            last_written: seeded.markdown.clone(),
                         }
                     });
                     if sess.participants.insert(replica) {
@@ -398,6 +411,24 @@ pub(crate) fn insert_dirty_session(
             dirty: true,
             last_op: Instant::now(),
             last_written: seed.to_string(),
+        },
+    );
+}
+
+/// Insert a session seeded from `head`, dirty iff the worktree diverged. Test-only.
+#[cfg(test)]
+pub(crate) fn insert_seeded_session(collab: &Collab, path: &NotePath, head: &str, dirty: bool) {
+    let (tx, _rx) = broadcast::channel(256);
+    let mut reg = lock(collab);
+    reg.insert(
+        path.clone(),
+        Session {
+            doc: BlockDoc::from_markdown(DAEMON_REPLICA, head),
+            peers: tx,
+            participants: HashSet::new(),
+            dirty,
+            last_op: Instant::now(),
+            last_written: head.to_string(),
         },
     );
 }

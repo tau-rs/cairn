@@ -629,8 +629,16 @@ async fn collab_handler(
     let seed_state = state.clone();
     ws.on_upgrade(move |socket| {
         collab::run_collab(socket, collab, move |path| {
-            // Seed from the note's current content; empty if it does not exist.
-            seed_state.engine().read_note(path).unwrap_or_default()
+            // Seed from git HEAD (the snapshot boundary); mark dirty if the working
+            // tree already diverges so the first flush folds the uncommitted edit
+            // (spec §13.4). Empty when the note is not yet in HEAD.
+            let guard = seed_state.engine();
+            let head = guard.note_at(path, "HEAD").unwrap_or_default();
+            let worktree = guard.read_note(path).unwrap_or_default();
+            collab::Seed {
+                dirty: worktree != head,
+                markdown: head,
+            }
         })
     })
 }
@@ -1022,5 +1030,39 @@ mod collab_flush_tests {
         state.run_collab_flush_pass(std::time::Duration::ZERO); // write merged
         let guard = state.engine();
         assert!(guard.note_at(&path, "HEAD").unwrap().contains("foreign"));
+    }
+
+    #[test]
+    fn opening_a_session_reconciles_a_pre_existing_uncommitted_worktree_edit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(engine_over(tmp.path()));
+        let path = NotePath::new("n.md").unwrap();
+
+        // Commit a base version to HEAD, then leave an uncommitted worktree edit.
+        {
+            let mut guard = state.engine();
+            let mut tap = EventTap {
+                tx: state.events.clone(),
+                collected: Vec::new(),
+            };
+            guard.write_note(&path, "base\n", &mut tap).unwrap();
+            guard.commit("seed", &mut tap).unwrap();
+        }
+        std::fs::write(tmp.path().join("n.md"), "base\n\nuncommitted\n").unwrap();
+
+        // Seed a session the way the /collab handler will (HEAD + dirty-if-diverged).
+        let head = state.engine().note_at(&path, "HEAD").unwrap_or_default();
+        let worktree = state.engine().read_note(&path).unwrap_or_default();
+        collab::insert_seeded_session(&state.collab, &path, &head, worktree != head);
+        collab::add_participant(&state.collab, &path, 1);
+
+        // First flush folds the uncommitted edit; second writes the merged result.
+        state.run_collab_flush_pass(std::time::Duration::ZERO);
+        state.run_collab_flush_pass(std::time::Duration::ZERO);
+        assert!(state
+            .engine()
+            .note_at(&path, "HEAD")
+            .unwrap()
+            .contains("uncommitted"));
     }
 }
