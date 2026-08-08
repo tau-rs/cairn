@@ -15,6 +15,7 @@ mod mcp;
 pub mod collab;
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::{
@@ -275,6 +276,53 @@ impl AppState {
         };
         if let Err(e) = guard.commit(message, &mut tap) {
             tracing::warn!("watch: auto-commit failed: {e}");
+        }
+    }
+
+    /// One collab commit-agent pass: materialize + git-commit every session that
+    /// is dirty and quiescent (or abandoned). Phase 1 (`drain_due`) works under
+    /// the collab lock only; phase 2 takes the engine lock per note. The write
+    /// goes through `write_note` so the file-watcher self-suppresses the echo,
+    /// and a disk-vs-baseline check skips (never clobbers) a foreign edit — A2
+    /// folds those back instead. Best-effort: every failure logs and continues.
+    /// Run from a blocking context (`spawn_blocking`), like the watch loop.
+    /// See the design spec §12.
+    pub fn run_collab_flush_pass(&self, debounce: Duration) {
+        let items = collab::drain_due(&self.collab, debounce);
+        for item in items {
+            let mut guard = self.engine();
+            let disk = guard.read_note(&item.path).unwrap_or_default();
+            if disk != item.baseline {
+                drop(guard);
+                tracing::warn!(
+                    note = %item.path.as_str(),
+                    "collab flush: foreign on-disk edit; skipping write (fold-back is A2)"
+                );
+                collab::remark_dirty(&self.collab, &item.path);
+                continue;
+            }
+            let mut tap = EventTap {
+                tx: self.events.clone(),
+                collected: Vec::new(),
+            };
+            if let Err(e) = guard.write_note(&item.path, &item.markdown, &mut tap) {
+                drop(guard);
+                tracing::warn!(note = %item.path.as_str(), error = %e, "collab flush: write failed");
+                collab::remark_dirty(&self.collab, &item.path);
+                continue;
+            }
+            match guard.has_uncommitted_changes() {
+                Ok(true) => {
+                    let msg = format!("cairn: collab sync {}", item.path.as_str());
+                    if let Err(e) = guard.commit(&msg, &mut tap) {
+                        tracing::warn!(error = %e, "collab flush: commit failed");
+                    }
+                }
+                Ok(false) => {} // materialize matched disk; nothing to commit
+                Err(e) => tracing::warn!(error = %e, "collab flush: dirty-check failed"),
+            }
+            drop(guard);
+            collab::record_flush(&self.collab, &item.path, item.markdown);
         }
     }
 }
@@ -757,5 +805,74 @@ mod tests {
         // The client gets a generic 500; panic text never reaches the response body.
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert!(logs_contain("request worker panicked"));
+    }
+}
+
+#[cfg(test)]
+mod collab_flush_tests {
+    use super::*;
+    use cairn_app::Engine;
+    use cairn_domain::{block::BlockKind, BlockId, BlockOp, NotePath};
+    use cairn_infra::{GitVcs, LocalFsStore, TantivyIndex};
+    use cairn_ports::FsChange;
+
+    fn ins(text: &str) -> BlockOp {
+        BlockOp::Insert {
+            id: BlockId {
+                replica: 1,
+                counter: 0,
+            },
+            after: None,
+            lamport: 1,
+            kind: BlockKind::Paragraph,
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn flush_materializes_commits_and_watcher_ignores_self_write() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(
+            LocalFsStore::open(tmp.path()).unwrap(),
+            TantivyIndex::in_memory().unwrap(),
+            GitVcs::open_or_init(tmp.path()).unwrap(),
+        );
+        let state = AppState::new(engine);
+        let path = NotePath::new("n.md").unwrap();
+
+        // A live edit sitting in the daemon's replica, as the WS `Op` arm leaves it.
+        collab::insert_dirty_session(&state.collab, &path, "", vec![ins("live edit")]);
+
+        // One flush pass; debounce 0 ⇒ flush immediately (deterministic, no sleeps).
+        state.run_collab_flush_pass(std::time::Duration::ZERO);
+
+        // (1) Materialized to disk.
+        let on_disk = std::fs::read_to_string(tmp.path().join("n.md")).unwrap();
+        assert!(
+            on_disk.contains("live edit"),
+            "materialized markdown on disk"
+        );
+
+        // (2) Committed: the note is readable at git HEAD.
+        {
+            let guard = state.engine();
+            let at_head = guard
+                .note_at(&path, "HEAD")
+                .expect("note committed at HEAD");
+            assert!(at_head.contains("live edit"), "flush created a commit");
+        }
+
+        // (3) The watcher does NOT re-ingest the self-write: apply_change on the
+        // just-written file emits nothing (engine stat-guard), exactly as the
+        // real watcher path would see it.
+        let mut guard = state.engine();
+        let mut tap = EventTap {
+            tx: state.events.clone(),
+            collected: Vec::new(),
+        };
+        guard
+            .apply_change(&FsChange::Changed(path.clone()), &mut tap)
+            .unwrap();
+        assert!(tap.collected.is_empty(), "self-write must not re-ingest");
     }
 }
