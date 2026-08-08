@@ -9,7 +9,7 @@ export interface GraphViewProps {
   diffByPath?: Map<string, DiffClass>;
 }
 
-const DEFAULT_COLOR = "#cdd0e0";
+const DEFAULT_COLOR = DIFF_COLORS.unchanged;
 
 export default function GraphView({ graph, diffByPath }: GraphViewProps) {
   const nodeColor = useMemo(

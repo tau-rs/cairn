@@ -23,10 +23,11 @@ const graph: RFGraph = {
 };
 
 describe("GraphView", () => {
-  it("forwards graphData to the force graph", () => {
+  it("forwards graphData to the force graph and defaults node color when no diffByPath", () => {
     render(<GraphView graph={graph} />);
     expect(captured.props.graphData.nodes).toHaveLength(2);
     expect(captured.props.graphData.links).toHaveLength(1);
+    expect(captured.props.nodeColor(graph.nodes[0])).toBe(DIFF_COLORS.unchanged);
   });
 
   it("colors nodes by diff class when provided", () => {
