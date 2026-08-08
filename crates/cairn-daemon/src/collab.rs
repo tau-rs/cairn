@@ -22,7 +22,7 @@ pub const DAEMON_REPLICA: u64 = u64::MAX;
 /// A fan-out envelope carrying the originating replica so a peer skips its own
 /// echo (merge is idempotent, but skipping avoids redundant traffic).
 #[derive(Clone)]
-struct Fanout {
+pub(crate) struct Fanout {
     origin: u64,
     msg: CollabServerMsg,
 }
@@ -339,6 +339,38 @@ pub(crate) fn settle_flush(collab: &Collab, path: &NotePath, outcome: FlushOutco
     }
 }
 
+/// Fold a foreign on-disk edit into a session's live replica, under the collab
+/// lock only. Merges the block-diff of `foreign` against the session's baseline
+/// into `doc`, fans the produced ops out to peers, advances `last_written` to the
+/// consumed `foreign` bytes, and leaves the session dirty so the next flush pass
+/// writes the merged result. A no-op if the session was reaped meanwhile. This is
+/// the fold-back critical section that replaces A1's conflict-skip (spec §13.1/§13.2).
+// Not yet wired into the flush pass — that lands when settle_flush's
+// `FlushOutcome::Conflict` arm switches onto this (Task 4).
+#[allow(dead_code)]
+pub(crate) fn fold_foreign(collab: &Collab, path: &NotePath, foreign: &str) {
+    let mut reg = lock(collab);
+    let Some(sess) = reg.get_mut(path) else {
+        return;
+    };
+    let base = sess.last_written.clone();
+    let ops = sess.doc.fold_foreign(&base, foreign);
+    for op in ops {
+        let _ = sess.peers.send(Fanout {
+            origin: DAEMON_REPLICA,
+            msg: CollabServerMsg::Op {
+                note: path.as_str().to_string(),
+                op: block_op_to_wire(op),
+            },
+        });
+    }
+    // The consumed disk bytes are the new baseline: a re-fold on the next pass
+    // diffs foreign→newer-foreign, never re-minting these Insert IDs (spec §13.1).
+    sess.last_written = foreign.to_string();
+    sess.dirty = true;
+    sess.last_op = Instant::now();
+}
+
 #[cfg(test)]
 pub(crate) fn insert_dirty_session(
     collab: &Collab,
@@ -383,6 +415,22 @@ pub(crate) fn add_participant(collab: &Collab, path: &NotePath, replica: u64) {
     let mut reg = lock(collab);
     if let Some(sess) = reg.get_mut(path) {
         sess.participants.insert(replica);
+    }
+}
+
+/// Subscribe to a session's fan-out channel to observe folded/relayed ops. Test-only.
+#[cfg(test)]
+pub(crate) fn test_subscribe(collab: &Collab, path: &NotePath) -> broadcast::Receiver<Fanout> {
+    let reg = lock(collab);
+    reg.get(path).expect("session exists").peers.subscribe()
+}
+
+/// Extract the domain op from a fan-out envelope. Test-only.
+#[cfg(test)]
+pub(crate) fn fanout_op(f: &Fanout) -> Option<cairn_domain::BlockOp> {
+    match &f.msg {
+        CollabServerMsg::Op { op, .. } => Some(block_op_from_wire(op.clone())),
+        _ => None,
     }
 }
 
@@ -492,6 +540,40 @@ mod flush_tests {
         // on-disk foreign edit is preserved).
         settle_flush(&reg, &gone, FlushOutcome::Conflict);
         assert!(!lock(&reg).contains_key(&gone));
+    }
+
+    #[test]
+    fn fold_foreign_merges_disk_edit_fans_out_and_advances_baseline() {
+        let reg = registry();
+        let p = NotePath::new("n.md").unwrap();
+        // Session seeded + last_written == "a\n" (one block "a").
+        insert_dirty_session(&reg, &p, "a\n", vec![]);
+        add_participant(&reg, &p, 7);
+        // A peer is subscribed to the fan-out channel.
+        let mut rx = test_subscribe(&reg, &p);
+
+        // Foreign on-disk edit: appended a block "b".
+        fold_foreign(&reg, &p, "a\n\nb\n");
+
+        // (1) Merged into the daemon replica.
+        {
+            let reg = lock(&reg);
+            let sess = reg.get(&p).unwrap();
+            assert!(
+                sess.doc.materialize().contains("b"),
+                "foreign edit in replica"
+            );
+            // (2) Baseline advanced to the consumed disk bytes.
+            assert_eq!(sess.last_written, "a\n\nb\n");
+            // (3) Session stays dirty so the next pass writes the merged result.
+            assert!(sess.dirty);
+        }
+        // (4) Fanned out to peers: at least one Insert op arrived.
+        let f = rx.try_recv().expect("a folded op was fanned out");
+        assert!(matches!(
+            fanout_op(&f),
+            Some(cairn_domain::BlockOp::Insert { .. })
+        ));
     }
 
     #[test]
