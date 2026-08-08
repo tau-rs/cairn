@@ -204,6 +204,28 @@ async fn run() -> Result<(), String> {
         }
     }
 
+    // Collab commit-agent: debounce-materialize + commit sessioned notes. Runs
+    // independently of the file watcher — the daemon is the sole disk writer for
+    // a live session (design spec §12). Ticks every 250ms; a session commits
+    // after `quiet_period_ms` of no ops (or immediately once abandoned).
+    {
+        let flush_state = state.clone();
+        let quiet = Duration::from_millis(config.sync.quiet_period_ms);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_millis(250));
+            loop {
+                tick.tick().await;
+                let s = flush_state.clone();
+                if tokio::task::spawn_blocking(move || s.run_collab_flush_pass(quiet))
+                    .await
+                    .is_err()
+                {
+                    break; // runtime shutting down
+                }
+            }
+        });
+    }
+
     let addr = format!("127.0.0.1:{}", cli.port);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
