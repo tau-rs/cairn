@@ -16,9 +16,9 @@ use cairn_plugin_protocol::{
     InitializeParams, InitializeResult, InvokeParams, ListNotesResult, Manifest, NoteSummaryDto,
     ProcessContentParams, ProcessContentResult, ProcessorDecl, ReadNoteParams, ReadNoteResult,
     Request, Response, RpcError, SearchHitDto, SearchParams, SearchResultDto, WriteNoteParams,
-    CALLBACK_DENIED, CALLBACK_FAILED, JSONRPC_VERSION, METHOD_CAIRN_EVENT, METHOD_DELETE_NOTE,
-    METHOD_INITIALIZE, METHOD_INVOKE, METHOD_LIST_NOTES, METHOD_PROCESS_CONTENT, METHOD_READ_NOTE,
-    METHOD_SEARCH, METHOD_WRITE_NOTE,
+    CALLBACK_DENIED, CALLBACK_FAILED, JSONRPC_VERSION, METHOD_AGENT, METHOD_CAIRN_EVENT,
+    METHOD_DELETE_NOTE, METHOD_INITIALIZE, METHOD_INVOKE, METHOD_LIST_NOTES,
+    METHOD_PROCESS_CONTENT, METHOD_READ_NOTE, METHOD_SEARCH, METHOD_WRITE_NOTE,
 };
 use cairn_ports::{
     AdapterError, EventDispatchError, PluginCallbacks, PluginCommand, PluginEvent, PluginHost,
@@ -66,6 +66,7 @@ fn required_cap(method: &str) -> Option<Capability> {
         METHOD_DELETE_NOTE => Some(Capability::VaultWrite),
         METHOD_SEARCH => Some(Capability::VaultRead),
         METHOD_LIST_NOTES => Some(Capability::VaultRead),
+        METHOD_AGENT => Some(Capability::Agent),
         _ => None,
     }
 }
@@ -630,6 +631,17 @@ impl LoadedPlugin {
                         });
                     }
                 },
+                METHOD_AGENT => {
+                    // The `agent` capability gate above has passed. The runtime
+                    // bridge (host -> AgentRuntime) is a tracked follow-up, so
+                    // report a typed "not yet available" rather than falling
+                    // through to the "unknown host method" arm — the method is
+                    // known and permitted, just not yet serviceable.
+                    resp.error = Some(RpcError {
+                        code: CALLBACK_FAILED,
+                        message: "host agent bridge not yet available".to_string(),
+                    });
+                }
                 _ => {
                     resp.error = Some(RpcError {
                         code: CALLBACK_DENIED,
@@ -1240,6 +1252,19 @@ mod tests {
         )
         .unwrap();
         assert!(TrustedPlugins::from_cairn_toml(tmp.path()).is_err());
+    }
+
+    #[test]
+    fn required_cap_gates_host_methods() {
+        use cairn_plugin_protocol::{METHOD_AGENT, METHOD_READ_NOTE};
+        // host/agent is host-mediated (Domain 1): it maps to the `agent` cap, so
+        // a plugin that has not declared it is refused at the gate.
+        assert_eq!(super::required_cap(METHOD_AGENT), Some(Capability::Agent));
+        assert_eq!(
+            super::required_cap(METHOD_READ_NOTE),
+            Some(Capability::VaultRead)
+        );
+        assert_eq!(super::required_cap("host/unknown"), None);
     }
 
     #[test]

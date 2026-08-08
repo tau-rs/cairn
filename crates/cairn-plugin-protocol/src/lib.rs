@@ -26,12 +26,20 @@ pub const METHOD_CAIRN_EVENT: &str = "cairn/event";
 /// Host -> plugin: transform a note's content on the read/render path.
 /// Delivered only to plugins declaring `content:process`.
 pub const METHOD_PROCESS_CONTENT: &str = "content/process";
+/// Plugin -> host: run an AI agent query over the vault on the plugin's behalf.
+/// Requires the `agent` capability. Host-mediated (Domain 1): the host gates the
+/// call on the declared capability. The runtime bridge is not yet wired, so a
+/// gated call currently fails with a typed "not yet available" error.
+pub const METHOD_AGENT: &str = "host/agent";
 
 /// A capability a plugin declares in its manifest's `[engine].capabilities`.
 ///
 /// Two enforcement domains:
-/// - `vault:*` gate the **host-callback RPC** surface (`host/readNote`, …) and
-///   are enforced by the host (`cairn-infra` `service_callback`).
+/// - `vault:*` and `agent` gate the **host-callback RPC** surface
+///   (`host/readNote`, `host/agent`, …) and are enforced by the host
+///   (`cairn-infra` `service_callback`). `agent`'s runtime bridge is not yet
+///   wired, but the capability gate itself is live (a gated call is refused
+///   before it reaches any handler).
 /// - `content:process` gates whether the host **invokes** the plugin on the
 ///   read/render path (`content/process`), the same shape as `vault:events`.
 /// - `net` / `exec` / `fs:read` gate the **OS sandbox** around the spawned
@@ -62,6 +70,11 @@ pub enum Capability {
     /// whether the host *invokes* the plugin, not a plugin->host callback.
     #[serde(rename = "content:process")]
     ContentProcess,
+    /// Run an AI agent query over the vault via the host channel (`host/agent`).
+    /// Host-mediated (Domain 1): the gate is live; the runtime bridge is a
+    /// follow-up, so a gated call currently fails with a typed error.
+    #[serde(rename = "agent")]
+    Agent,
     /// Make outbound network connections (sandbox; enforced by #63).
     #[serde(rename = "net")]
     Net,
@@ -84,6 +97,7 @@ impl Capability {
             Capability::VaultWrite => "vault:write",
             Capability::VaultEvents => "vault:events",
             Capability::ContentProcess => "content:process",
+            Capability::Agent => "agent",
             Capability::Net => "net",
             Capability::Exec => "exec",
             Capability::FsRead => "fs:read",
@@ -97,6 +111,7 @@ impl Capability {
             Capability::VaultWrite => "create, overwrite, and delete your notes",
             Capability::VaultEvents => "be notified when your notes change",
             Capability::ContentProcess => "transform your note content when it is shown or saved",
+            Capability::Agent => "run an AI agent over your notes on its behalf",
             Capability::Net => "make outbound network connections",
             Capability::Exec => "run other programs",
             Capability::FsRead => "read files on your computer outside your notes",
@@ -105,10 +120,12 @@ impl Capability {
 
     /// Whether this capability is actually enforced by the current build. The
     /// `vault:*` caps gate the live host-RPC channel, `content:process` gates a
-    /// live host->plugin invocation, and `net` is enforced by the
-    /// capability-derived sandbox profile (#63) — all `true`. `exec` / `fs:read`
-    /// are declared but not yet enforced (`false`), which drives the "enforced
-    /// in a future release" label on the approval screen.
+    /// live host->plugin invocation, `agent` gates the live `host/agent` callback
+    /// (the gate is enforced even though its runtime bridge is a follow-up), and
+    /// `net` is enforced by the capability-derived sandbox profile (#63) — all
+    /// `true`. `exec` / `fs:read` are declared but not yet enforced (`false`),
+    /// which drives the "enforced in a future release" label on the approval
+    /// screen.
     pub fn enforced_today(&self) -> bool {
         matches!(
             self,
@@ -116,6 +133,7 @@ impl Capability {
                 | Capability::VaultWrite
                 | Capability::VaultEvents
                 | Capability::ContentProcess
+                | Capability::Agent
                 | Capability::Net
         )
     }
@@ -652,6 +670,7 @@ mod tests {
             Capability::VaultWrite,
             Capability::VaultEvents,
             Capability::ContentProcess,
+            Capability::Agent,
             Capability::Net,
             Capability::Exec,
             Capability::FsRead,
@@ -674,12 +693,14 @@ mod tests {
     #[test]
     fn enforced_today_for_vault_and_net_caps() {
         // vault:* gate the live host-RPC channel; content:process gates a live
-        // host->plugin invocation; net is enforced by the capability-derived
-        // sandbox profile (#63). exec/fs:read are declared but not yet enforced.
+        // host->plugin invocation; agent gates the live host/agent callback;
+        // net is enforced by the capability-derived sandbox profile (#63).
+        // exec/fs:read are declared but not yet enforced.
         assert!(Capability::VaultRead.enforced_today());
         assert!(Capability::VaultWrite.enforced_today());
         assert!(Capability::VaultEvents.enforced_today());
         assert!(Capability::ContentProcess.enforced_today());
+        assert!(Capability::Agent.enforced_today());
         assert!(Capability::Net.enforced_today());
         assert!(!Capability::Exec.enforced_today());
         assert!(!Capability::FsRead.enforced_today());
