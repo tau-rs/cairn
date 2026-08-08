@@ -356,6 +356,26 @@ pub(crate) fn fold_foreign(collab: &Collab, path: &NotePath, foreign: &str) {
     sess.last_op = Instant::now();
 }
 
+/// Whether a live session is open on this note (the daemon owns `N.md`).
+#[must_use]
+pub fn is_sessioned(collab: &Collab, path: &NotePath) -> bool {
+    lock(collab).contains_key(path)
+}
+
+/// Record a foreign on-disk edit detected by the watcher: if `disk` diverges from
+/// the session's baseline, mark it dirty so the flush pass folds it (spec §13.5).
+/// A no-op when there is no session or when `disk` equals the last self-write
+/// (echo suppression — the daemon's own materialize writes must not re-arm it).
+pub fn note_foreign_edit(collab: &Collab, path: &NotePath, disk: &str) {
+    let mut reg = lock(collab);
+    if let Some(sess) = reg.get_mut(path) {
+        if sess.last_written != disk {
+            sess.dirty = true;
+            sess.last_op = Instant::now();
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn insert_dirty_session(
     collab: &Collab,
@@ -552,6 +572,28 @@ mod flush_tests {
             fanout_op(&f),
             Some(cairn_domain::BlockOp::Insert { .. })
         ));
+    }
+
+    #[test]
+    fn note_foreign_edit_marks_dirty_only_on_real_divergence() {
+        let reg = registry();
+        let p = NotePath::new("n.md").unwrap();
+        insert_dirty_session(&reg, &p, "base\n", vec![]);
+        // Clear dirty to model a settled session.
+        lock(&reg).get_mut(&p).unwrap().dirty = false;
+
+        // A self-write echo (disk == last_written) must NOT re-arm the session.
+        note_foreign_edit(&reg, &p, "base\n");
+        assert!(!lock(&reg).get(&p).unwrap().dirty, "self-echo ignored");
+
+        // A real foreign edit (disk != last_written) re-arms it for the flush fold.
+        note_foreign_edit(&reg, &p, "base\n\nforeign\n");
+        assert!(
+            lock(&reg).get(&p).unwrap().dirty,
+            "foreign edit marks dirty"
+        );
+        assert!(is_sessioned(&reg, &p));
+        assert!(!is_sessioned(&reg, &NotePath::new("other.md").unwrap()));
     }
 
     #[test]

@@ -218,6 +218,22 @@ impl AppState {
     /// events to subscribers. Best-effort: a transient failure is logged, not
     /// propagated, so the watch loop keeps running.
     pub fn apply_change_blocking(&self, change: &cairn_ports::FsChange) {
+        // A sessioned note is owned by the daemon: defer a foreign `Changed` to
+        // the collab flush (which folds it) instead of the generic re-index /
+        // auto-commit. Whole-file `Removed` is not intercepted — content-edit
+        // fold-back only (spec §13.5); a spurious delete self-heals on re-flush.
+        if let cairn_ports::FsChange::Changed(path) = change {
+            if collab::is_sessioned(&self.collab, path) {
+                // Read disk OUTSIDE the collab lock (engine lock), then mark.
+                // The engine guard is a temporary here — it drops at the end of
+                // this statement, so the collab lock in `note_foreign_edit`
+                // below is never taken while the engine lock is held (lock
+                // order: collab → engine → collab, sequential, never nested).
+                let disk = self.engine().read_note(path).unwrap_or_default();
+                collab::note_foreign_edit(&self.collab, path, &disk);
+                return;
+            }
+        }
         let mut guard = self.engine();
         let mut tap = EventTap {
             tx: self.events.clone(),
@@ -974,5 +990,37 @@ mod collab_flush_tests {
             .note_at(&path, "HEAD")
             .unwrap()
             .contains("foreign line"));
+    }
+
+    #[test]
+    fn watcher_defers_sessioned_note_to_the_flush_not_generic_ingest() {
+        // A Changed(N) for a note with an open session must NOT auto-commit via
+        // the generic path; it marks the session dirty so the collab flush folds
+        // it. This is the same in-crate mod as the other collab-flush tests
+        // (kept out of tests/watch.rs so it can reach `collab::insert_dirty_session`
+        // / `collab::add_participant` without a new public test-only API surface).
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(engine_over(tmp.path()));
+        let path = NotePath::new("n.md").unwrap();
+
+        // Open a session; baseline == on-disk == "base\n".
+        std::fs::write(tmp.path().join("n.md"), "base\n").unwrap();
+        collab::insert_dirty_session(&state.collab, &path, "base\n", vec![]);
+        collab::add_participant(&state.collab, &path, 1); // keep it open, not reaped
+                                                          // Settle it (writes/commits "base\n", matching disk) so it sits
+                                                          // dirty=false, exactly like an already-flushed open session. Debounce
+                                                          // ZERO so it's due regardless of quiescence (it has a participant, so
+                                                          // "empty" alone would not make it due).
+        state.run_collab_flush_pass(std::time::Duration::ZERO);
+
+        // Foreign edit on disk, then the watcher fires.
+        std::fs::write(tmp.path().join("n.md"), "base\n\nforeign\n").unwrap();
+        state.apply_change_blocking(&FsChange::Changed(path.clone()));
+
+        // The flush now folds it (disk != baseline), then writes+commits on pass 2.
+        state.run_collab_flush_pass(std::time::Duration::ZERO); // fold
+        state.run_collab_flush_pass(std::time::Duration::ZERO); // write merged
+        let guard = state.engine();
+        assert!(guard.note_at(&path, "HEAD").unwrap().contains("foreign"));
     }
 }
