@@ -298,7 +298,7 @@ impl AppState {
                     note = %item.path.as_str(),
                     "collab flush: foreign on-disk edit; skipping write (fold-back is A2)"
                 );
-                collab::remark_dirty(&self.collab, &item.path);
+                collab::settle_flush(&self.collab, &item.path, collab::FlushOutcome::Conflict);
                 continue;
             }
             let mut tap = EventTap {
@@ -308,9 +308,12 @@ impl AppState {
             if let Err(e) = guard.write_note(&item.path, &item.markdown, &mut tap) {
                 drop(guard);
                 tracing::warn!(note = %item.path.as_str(), error = %e, "collab flush: write failed");
-                collab::remark_dirty(&self.collab, &item.path);
+                collab::settle_flush(&self.collab, &item.path, collab::FlushOutcome::WriteError);
                 continue;
             }
+            // The bytes are on disk now; commit is best-effort. On commit failure
+            // the note stays dirty-on-disk and re-commits on the next op (the
+            // baseline still advances, so the retry is not a false conflict).
             match guard.has_uncommitted_changes() {
                 Ok(true) => {
                     let msg = format!("cairn: collab sync {}", item.path.as_str());
@@ -322,7 +325,13 @@ impl AppState {
                 Err(e) => tracing::warn!(error = %e, "collab flush: dirty-check failed"),
             }
             drop(guard);
-            collab::record_flush(&self.collab, &item.path, item.markdown);
+            // Write landed ⇒ baseline advances (even if the commit failed) and an
+            // abandoned, settled session is reaped — only now, post-write.
+            collab::settle_flush(
+                &self.collab,
+                &item.path,
+                collab::FlushOutcome::Committed(item.markdown),
+            );
         }
     }
 }
@@ -817,27 +826,34 @@ mod collab_flush_tests {
     use cairn_ports::FsChange;
 
     fn ins(text: &str) -> BlockOp {
+        ins_at(0, text)
+    }
+
+    fn ins_at(counter: u64, text: &str) -> BlockOp {
         BlockOp::Insert {
             id: BlockId {
                 replica: 1,
-                counter: 0,
+                counter,
             },
             after: None,
-            lamport: 1,
+            lamport: counter + 1,
             kind: BlockKind::Paragraph,
             text: text.into(),
         }
     }
 
+    fn engine_over(tmp: &std::path::Path) -> Engine {
+        Engine::new(
+            LocalFsStore::open(tmp).unwrap(),
+            TantivyIndex::in_memory().unwrap(),
+            GitVcs::open_or_init(tmp).unwrap(),
+        )
+    }
+
     #[test]
     fn flush_materializes_commits_and_watcher_ignores_self_write() {
         let tmp = tempfile::tempdir().unwrap();
-        let engine = Engine::new(
-            LocalFsStore::open(tmp.path()).unwrap(),
-            TantivyIndex::in_memory().unwrap(),
-            GitVcs::open_or_init(tmp.path()).unwrap(),
-        );
-        let state = AppState::new(engine);
+        let state = AppState::new(engine_over(tmp.path()));
         let path = NotePath::new("n.md").unwrap();
 
         // A live edit sitting in the daemon's replica, as the WS `Op` arm leaves it.
@@ -874,5 +890,40 @@ mod collab_flush_tests {
             .apply_change(&FsChange::Changed(path.clone()), &mut tap)
             .unwrap();
         assert!(tap.collected.is_empty(), "self-write must not re-ingest");
+    }
+
+    #[test]
+    fn active_session_reflushes_second_edit_through_the_real_write_path() {
+        // Two sequential flushes on a session that stays open (has a
+        // participant): the second edit must commit too, proving the baseline
+        // handoff (`last_written`) advances through `write_note` and doesn't
+        // false-trigger the non-clobber guard on the second pass.
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(engine_over(tmp.path()));
+        let path = NotePath::new("n.md").unwrap();
+
+        collab::insert_dirty_session(&state.collab, &path, "", vec![ins_at(0, "first")]);
+        collab::add_participant(&state.collab, &path, 1); // keep it open across flushes
+
+        state.run_collab_flush_pass(std::time::Duration::ZERO);
+        // Session survived the first flush (active, not abandoned).
+        {
+            let guard = state.engine();
+            assert!(guard.note_at(&path, "HEAD").unwrap().contains("first"));
+        }
+
+        // A second live edit into the same open session, then flush again.
+        collab::merge_op(&state.collab, &path, ins_at(1, "second"));
+        state.run_collab_flush_pass(std::time::Duration::ZERO);
+
+        let at_head = {
+            let guard = state.engine();
+            guard.note_at(&path, "HEAD").unwrap()
+        };
+        assert!(at_head.contains("first"), "first edit still present");
+        assert!(
+            at_head.contains("second"),
+            "second edit committed via re-flush (baseline advanced, no false conflict)"
+        );
     }
 }

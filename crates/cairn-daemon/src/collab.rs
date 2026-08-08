@@ -34,8 +34,8 @@ pub struct Session {
     peers: broadcast::Sender<Fanout>,
     participants: HashSet<u64>,
     /// Set when an op has merged since the last successful flush. Cleared
-    /// optimistically when a flush captures the session; re-set by
-    /// `remark_dirty` if that flush is skipped (foreign-edit conflict) or fails.
+    /// optimistically when a flush captures the session; re-set by `settle_flush`
+    /// if that flush is skipped (foreign-edit conflict) or fails.
     dirty: bool,
     /// Monotonic time of the last merged op; the debounce measures quiescence
     /// against it.
@@ -253,11 +253,25 @@ pub(crate) struct FlushItem {
     pub baseline: String,
 }
 
+/// The result of the engine-side (phase 2) write for one `FlushItem`, fed back
+/// to `settle_flush` so it can update the baseline and decide reaping.
+pub(crate) enum FlushOutcome {
+    /// `write_note` landed these bytes on disk (commit may have failed — the
+    /// bytes are still the on-disk truth, so they become the new baseline).
+    Committed(String),
+    /// A foreign on-disk edit diverged from the baseline; the write was skipped
+    /// (fold-back is A2).
+    Conflict,
+    /// `write_note` itself failed; nothing landed.
+    WriteError,
+}
+
 /// Flush pass, phase 1: under the collab lock only, materialize every dirty
 /// session that is quiescent (no op for `debounce`) or abandoned (no
-/// participants), returning the write set. `dirty` is cleared optimistically
-/// (re-armed by `remark_dirty` on a skipped/failed write). Empty sessions are
-/// finalized here and reaped. No engine call happens under the lock.
+/// participants), returning the write set. `dirty` is cleared optimistically —
+/// a session captured here is **kept** (not reaped) so `settle_flush` can reap
+/// it only after the write is confirmed; an idle empty+clean session is reaped
+/// here since it has nothing to persist. No engine call happens under the lock.
 pub(crate) fn drain_due(collab: &Collab, debounce: Duration) -> Vec<FlushItem> {
     let now = Instant::now();
     let mut items = Vec::new();
@@ -272,30 +286,56 @@ pub(crate) fn drain_due(collab: &Collab, debounce: Duration) -> Vec<FlushItem> {
                 baseline: sess.last_written.clone(),
             });
             sess.dirty = false;
+            // Keep it alive through phase 2; settle_flush reaps after a
+            // confirmed write so a failed write can still re-arm (Finding A) and
+            // a concurrent Join reuses this session rather than reseeding a
+            // stale duplicate from pre-write disk (Finding B).
+            true
+        } else {
+            // Not flushing: reap an idle abandoned (empty+clean) session; keep
+            // active or dirty ones.
+            !empty
         }
-        // Keep active sessions; drop empty ones (already finalized above).
-        !empty
     });
     items
 }
 
-/// Record a successful flush: the bytes now on disk become the new baseline.
-/// Does not touch `dirty`, so ops that merged mid-flush keep it set and the next
-/// pass re-flushes them. A no-op if the session was already reaped.
-pub(crate) fn record_flush(collab: &Collab, path: &NotePath, written: String) {
+/// Settle one flushed session after its phase-2 write, under the collab lock.
+/// A no-op if the session was reaped meanwhile. Reaps an abandoned session only
+/// once its edits are safely on disk (or unrecoverable in A1), never before.
+pub(crate) fn settle_flush(collab: &Collab, path: &NotePath, outcome: FlushOutcome) {
     let mut reg = lock(collab);
-    if let Some(sess) = reg.get_mut(path) {
-        sess.last_written = written;
-    }
-}
-
-/// Re-arm a session after a skipped or failed flush (foreign-edit conflict or a
-/// write error) so its pending edits are retried rather than lost. A no-op if
-/// the session was already reaped.
-pub(crate) fn remark_dirty(collab: &Collab, path: &NotePath) {
-    let mut reg = lock(collab);
-    if let Some(sess) = reg.get_mut(path) {
-        sess.dirty = true;
+    let Some(sess) = reg.get_mut(path) else {
+        return;
+    };
+    let reap = match outcome {
+        // The write landed: these bytes are the new on-disk baseline (even if the
+        // commit failed — the next op re-flushes and re-commits without a false
+        // foreign-edit conflict). Reap only a still-abandoned, settled session.
+        FlushOutcome::Committed(written) => {
+            sess.last_written = written;
+            sess.participants.is_empty() && !sess.dirty
+        }
+        // Foreign edit on disk. An active session keeps its edits for retry /
+        // A2 fold-back; an abandoned one is reaped rather than re-warning every
+        // tick forever (the foreign on-disk edit is preserved either way — A1's
+        // "never lose foreign work" floor).
+        FlushOutcome::Conflict => {
+            if sess.participants.is_empty() {
+                true
+            } else {
+                sess.dirty = true;
+                false
+            }
+        }
+        // Transient write failure: keep the edits and retry next pass.
+        FlushOutcome::WriteError => {
+            sess.dirty = true;
+            false
+        }
+    };
+    if reap {
+        reg.remove(path);
     }
 }
 
@@ -325,6 +365,27 @@ pub(crate) fn insert_dirty_session(
     );
 }
 
+/// Merge an op into an existing session and mark it dirty, exactly as the WS
+/// `Op` arm does. Test-only.
+#[cfg(test)]
+pub(crate) fn merge_op(collab: &Collab, path: &NotePath, op: cairn_domain::BlockOp) {
+    let mut reg = lock(collab);
+    if let Some(sess) = reg.get_mut(path) {
+        sess.doc.merge(op);
+        sess.dirty = true;
+        sess.last_op = Instant::now();
+    }
+}
+
+/// Join a replica to a session so it is not treated as abandoned. Test-only.
+#[cfg(test)]
+pub(crate) fn add_participant(collab: &Collab, path: &NotePath, replica: u64) {
+    let mut reg = lock(collab);
+    if let Some(sess) = reg.get_mut(path) {
+        sess.participants.insert(replica);
+    }
+}
+
 #[cfg(test)]
 mod flush_tests {
     use super::*;
@@ -344,7 +405,7 @@ mod flush_tests {
     }
 
     #[test]
-    fn drain_due_flushes_dirty_abandoned_session_and_reaps_it() {
+    fn drain_due_captures_abandoned_session_but_keeps_it_until_settled() {
         let reg = registry();
         let p = NotePath::new("n.md").unwrap();
         insert_dirty_session(&reg, &p, "", vec![ins("hello")]);
@@ -353,8 +414,25 @@ mod flush_tests {
         assert_eq!(items.len(), 1);
         assert!(items[0].markdown.contains("hello"));
         assert_eq!(items[0].baseline, "");
-        // Empty session finalized ⇒ reaped.
+        // Kept alive (dirty cleared) until settle_flush confirms the write —
+        // NOT reaped in drain (Finding A: a failed write must be re-armable).
+        assert!(lock(&reg).contains_key(&p));
+        assert!(!lock(&reg).get(&p).unwrap().dirty);
+        // A confirmed write reaps the now-settled abandoned session.
+        settle_flush(&reg, &p, FlushOutcome::Committed("hello\n".into()));
         assert!(lock(&reg).is_empty());
+    }
+
+    #[test]
+    fn drain_due_reaps_idle_empty_clean_session() {
+        let reg = registry();
+        let p = NotePath::new("n.md").unwrap();
+        insert_dirty_session(&reg, &p, "", vec![ins("z")]);
+        // Clear dirty (as a prior successful flush would) ⇒ idle empty+clean.
+        lock(&reg).get_mut(&p).unwrap().dirty = false;
+        let items = drain_due(&reg, Duration::ZERO);
+        assert!(items.is_empty());
+        assert!(lock(&reg).is_empty(), "idle empty+clean session reaped");
     }
 
     #[test]
@@ -371,7 +449,7 @@ mod flush_tests {
     }
 
     #[test]
-    fn record_flush_and_remark_dirty_settle_a_session() {
+    fn settle_committed_updates_baseline_and_keeps_active_session() {
         let reg = registry();
         let p = NotePath::new("n.md").unwrap();
         insert_dirty_session(&reg, &p, "", vec![ins("x")]);
@@ -379,10 +457,41 @@ mod flush_tests {
         // debounce 0 ⇒ due ⇒ drain clears dirty (session kept, has a participant).
         let _ = drain_due(&reg, Duration::ZERO);
         assert!(!lock(&reg).get(&p).unwrap().dirty);
-        remark_dirty(&reg, &p);
-        assert!(lock(&reg).get(&p).unwrap().dirty);
-        record_flush(&reg, &p, "written".into());
+        settle_flush(&reg, &p, FlushOutcome::Committed("written".into()));
+        // Active session: baseline updated, NOT reaped.
+        assert!(lock(&reg).contains_key(&p));
         assert_eq!(lock(&reg).get(&p).unwrap().last_written, "written");
+    }
+
+    #[test]
+    fn settle_write_error_rearms_abandoned_session_no_loss() {
+        let reg = registry();
+        let p = NotePath::new("n.md").unwrap();
+        insert_dirty_session(&reg, &p, "", vec![ins("keep me")]);
+        let _ = drain_due(&reg, Duration::ZERO); // captured, dirty cleared, kept
+                                                 // A failed write must re-arm (dirty) and keep the session — the edits
+                                                 // live nowhere else (Finding A).
+        settle_flush(&reg, &p, FlushOutcome::WriteError);
+        assert!(lock(&reg).contains_key(&p));
+        assert!(lock(&reg).get(&p).unwrap().dirty);
+    }
+
+    #[test]
+    fn settle_conflict_reaps_abandoned_but_keeps_active() {
+        let reg = registry();
+        let active = NotePath::new("active.md").unwrap();
+        let gone = NotePath::new("gone.md").unwrap();
+        insert_dirty_session(&reg, &active, "", vec![ins("a")]);
+        insert_dirty_session(&reg, &gone, "", vec![ins("g")]);
+        lock(&reg).get_mut(&active).unwrap().participants.insert(1);
+        let _ = drain_due(&reg, Duration::ZERO);
+        // Active session with a foreign conflict: kept + re-armed for A2 fold-back.
+        settle_flush(&reg, &active, FlushOutcome::Conflict);
+        assert!(lock(&reg).get(&active).unwrap().dirty);
+        // Abandoned session with a foreign conflict: reaped (no warn-loop; the
+        // on-disk foreign edit is preserved).
+        settle_flush(&reg, &gone, FlushOutcome::Conflict);
+        assert!(!lock(&reg).contains_key(&gone));
     }
 
     #[test]
