@@ -3,9 +3,9 @@
 
 use cairn_domain::{rewrite_link_target, Graph, GraphScope, Note, NotePath};
 use cairn_ports::{
-    AdapterError, EventDispatchError, FileStamp, FsChange, InertSemanticIndex, NoopPluginHost,
-    PluginCallbacks, PluginEvent, PluginHost, PluginInfo, PortError, Revision, SearchHit,
-    SearchIndex, SemanticIndex, VaultStore, Vcs,
+    AdapterError, AgentEvent, AgentRuntime, AgentSink, EventDispatchError, FileStamp, FsChange,
+    InertSemanticIndex, NoopPluginHost, PluginCallbacks, PluginEvent, PluginHost, PluginInfo,
+    PortError, Revision, SearchHit, SearchIndex, SemanticIndex, VaultStore, Vcs,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -224,6 +224,7 @@ pub struct Engine {
     notes_cache: RefCell<Option<HashMap<NotePath, Note>>>,
     graph_at_cache: RefCell<LruCache<String, Arc<BuiltGraph>>>,
     plugins: Box<dyn PluginHost>,
+    runtime: Option<Arc<dyn AgentRuntime + Send + Sync>>,
     semantic: RefCell<Box<dyn SemanticIndex + Send>>,
     semantic_built: Cell<bool>,
 }
@@ -245,6 +246,7 @@ impl Engine {
             notes_cache: RefCell::new(None),
             graph_at_cache: RefCell::new(LruCache::new(16)),
             plugins: Box::new(NoopPluginHost),
+            runtime: None,
             semantic: RefCell::new(Box::new(InertSemanticIndex)),
             semantic_built: Cell::new(false),
         }
@@ -933,6 +935,12 @@ impl Engine {
         self.plugins = host;
     }
 
+    /// Inject the agent runtime backing the plugin `host/agent` callback.
+    /// Absent by default; a plugin `agent` call then fails as "no runtime".
+    pub fn set_runtime(&mut self, runtime: Arc<dyn AgentRuntime + Send + Sync>) {
+        self.runtime = Some(runtime);
+    }
+
     /// Replace the semantic index (the composition root injects the real one).
     /// Resets the lazy-build flag so the next `suggestions` call rebuilds it.
     pub fn set_semantic_index(&mut self, index: Box<dyn SemanticIndex + Send>) {
@@ -1073,6 +1081,41 @@ impl PluginCallbacks for EngineCallbacks<'_> {
 
     fn list_notes(&mut self) -> Result<Vec<Note>, PortError> {
         self.engine.list_notes()
+    }
+
+    fn run_agent(&mut self, prompt: &str) -> Result<String, PortError> {
+        let rt = self
+            .engine
+            .runtime
+            .clone()
+            .ok_or_else(|| PortError::Adapter("no agent runtime configured".into()))?;
+
+        // Buffer the streamed run into one string; `host/agent` is request/
+        // response, not streaming. A `Failed` event becomes an error; other
+        // event kinds are ignored (AgentEvent is #[non_exhaustive]).
+        struct Buf {
+            text: String,
+            failed: Option<String>,
+        }
+        impl AgentSink for Buf {
+            fn emit(&mut self, event: AgentEvent) {
+                match event {
+                    AgentEvent::TextDelta(s) => self.text.push_str(&s),
+                    AgentEvent::Failed { message } => self.failed = Some(message),
+                    _ => {}
+                }
+            }
+        }
+
+        let mut buf = Buf {
+            text: String::new(),
+            failed: None,
+        };
+        rt.answer(prompt, &mut buf)?;
+        if let Some(message) = buf.failed {
+            return Err(PortError::Adapter(message.into()));
+        }
+        Ok(buf.text)
     }
 }
 
@@ -1715,6 +1758,65 @@ mod tests {
             )
             .unwrap();
         assert_eq!(out["contents"], "hello body");
+    }
+
+    #[test]
+    fn plugin_agent_callback_runs_engine_runtime() {
+        use cairn_ports::{AgentEvent, AgentRuntime, AgentSink};
+
+        // A host that, on invoke, asks the engine to run the agent and echoes it.
+        struct AgentHost;
+        impl PluginHost for AgentHost {
+            fn plugins(&self) -> Vec<PluginInfo> {
+                vec![PluginInfo {
+                    id: "p".into(),
+                    name: "P".into(),
+                    version: "0".into(),
+                    commands: Vec::new(),
+                    contributions: vec![],
+                }]
+            }
+            fn invoke(
+                &mut self,
+                _plugin: &str,
+                _command: &str,
+                _args: &serde_json::Value,
+                callbacks: &mut dyn cairn_ports::PluginCallbacks,
+            ) -> Result<serde_json::Value, PortError> {
+                let answer = callbacks.run_agent("hello")?;
+                Ok(serde_json::json!({ "answer": answer }))
+            }
+        }
+
+        // Streams "Hel" + "lo" then completes; the host buffers it into "Hello".
+        struct TwoChunk;
+        impl AgentRuntime for TwoChunk {
+            fn answer(&self, _prompt: &str, sink: &mut dyn AgentSink) -> Result<(), PortError> {
+                sink.emit(AgentEvent::TextDelta("Hel".into()));
+                sink.emit(AgentEvent::TextDelta("lo".into()));
+                sink.emit(AgentEvent::Completed);
+                Ok(())
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        eng.set_plugin_host(Box::new(AgentHost));
+        let mut sink: Vec<Event> = Vec::new();
+
+        // No runtime configured -> Adapter error.
+        let denied = eng.invoke_plugin_command("p", "ask", &serde_json::Value::Null, &mut sink);
+        assert!(
+            matches!(denied, Err(PortError::Adapter(_))),
+            "no runtime => Adapter, got {denied:?}"
+        );
+
+        // Runtime configured -> buffered answer.
+        eng.set_runtime(Arc::new(TwoChunk));
+        let out = eng
+            .invoke_plugin_command("p", "ask", &serde_json::Value::Null, &mut sink)
+            .unwrap();
+        assert_eq!(out, serde_json::json!({ "answer": "Hello" }));
     }
 
     #[test]
