@@ -479,3 +479,215 @@ re-ingest, so the worst case is one idempotent extra commit. Full arbitration
 | d | Seed source | Working tree (`read_note`); HEAD-seed deferred to A2 |
 | e | Teardown | Empty+clean → drop; empty+dirty → ticker finalizes then reaps |
 | f | Watcher/session | No conflict when `auto_commit=false`; idempotent-safe otherwise; arbitration = A2 |
+
+---
+
+## 13. Foreign-edit fold-back — A2 (external editor as a filesystem peer)
+
+**Date:** 2026-08-08. **Status:** Approved (design). This section resolves the
+§11 open question "block-diff alignment algorithm and its documented edge cases"
+and pins the A2 slice. It replaces A1's non-clobber *skip* (§12.3) with a
+*fold-back*: a foreign on-disk edit to a sessioned `N.md` is re-parsed,
+block-diffed, translated into `BlockOp`s, merged into the live replica, fanned
+out to peers, and re-materialized. Roadmap: Epic A. Builds directly on A1
+(#144, #145).
+
+**Scope of A2:**
+1. Replace skip-with-fold-back at the single A1 hook point
+   (`run_collab_flush_pass`, the `disk != baseline` branch).
+2. Author the block-diff (none exists in the repo today).
+3. Switch seeding to **git HEAD** with reconciliation of pre-existing
+   uncommitted working-tree changes (§13.4).
+4. Watcher/session commit **arbitration** under `auto_commit = true` (§13.5).
+5. Fix the abandoned-session reap corner A1 flagged (empty + dirty + concurrent
+   foreign edit): fold before reaping instead of dropping.
+
+**Non-goals:** minimal op-sets, move-preserving 3-way merge, character-level
+merge. The correctness floor is **"no silent loss,"** not "minimal op-set."
+
+### 13.1 Two-cycle fold — single-lock steps, no nesting
+
+Fold-back must mutate `Session.doc` (collab lock) but disk I/O needs the engine
+lock, and the single global lock order (§12.1) forbids nesting. A2 therefore
+*decouples* folding from writing across debounce cycles; each is one single-lock
+step, and no lock is ever held while acquiring another (sequential
+acquire/release/acquire is allowed and used).
+
+```
+run_collab_flush_pass, per due FlushItem { path, markdown, baseline }:
+  engine lock:  disk = read_note(path); drop
+  ├─ disk == baseline → normal A1 flush (write markdown, commit, settle Committed)
+  └─ disk != baseline → FOLD-BACK:
+       collab lock: fold(sess, base = baseline, foreign = disk)
+                    · Edits applied to sess.doc via apply_local / merge
+                    · folded BlockOps fanned out to peers immediately (§3.2)
+                    · sess.last_written = disk;  sess.dirty = true;  last_op = now
+                    drop
+       (NO write this pass — the session is now dirty, so the NEXT drain
+        re-materializes the merged result and writes it via the normal
+        disk == baseline path)
+```
+
+The crux rule is **`last_written = disk` at fold time.** It advances the diff
+base to the *consumed* foreign bytes, so a re-fold on the next cycle diffs
+`foreign → newer-foreign` and never re-mints (duplicates) the `Insert` IDs a
+`base → newer-foreign` diff would. The next-cycle write still re-reads disk and
+guards `disk == baseline`, so a second concurrent foreign edit is folded, never
+clobbered. Fan-out to peers is immediate (at fold); the disk write lags by one
+debounce.
+
+**Author on every folded op = `Human`** (an external editor is a human surface,
+§11). The CRDT's `author_rank` (Human > Agent) and loser-stashing then guarantee
+no concurrent agent/peer text is silently dropped.
+
+### 13.2 The fold critical section (replaces the `Conflict` settlement)
+
+A1's phase 2 is: per item, do engine-lock work, then call
+`settle_flush(outcome)` under the collab lock to advance the baseline / reap.
+A2 keeps `Committed` and `WriteError` untouched and removes `Conflict` (its only
+trigger — a diverged disk — now folds). The fold **is its own single collab-lock
+critical section** (a `collab::fold_foreign(&collab, path, foreign) -> ()`),
+performed *instead of* `settle_flush` for a diverged item. Under that one lock it
+atomically:
+
+- applies `sess.doc.fold_foreign(base = sess.last_written, foreign)` → merges the
+  Edits into the replica and returns the produced `BlockOp`s,
+- fans those ops out to peers (`sess.peers`),
+- sets `sess.last_written = foreign`, `sess.dirty = true`, `sess.last_op = now`,
+- **never reaps** — even if `participants.is_empty()`, the merged result still
+  has to be written by a later pass.
+
+Doing the merge and the baseline advance in one critical section (the flush pass
+is single-threaded — one ticker) keeps them atomic without a second lock
+acquisition. An empty+dirty session that just folded is finalized-then-reaped by
+the ticker on the *following* pass, which now takes the normal write path
+(`disk == baseline` holds again). This closes the A1 abandoned-session reap
+corner. The precise function boundary (a dedicated `fold_foreign` vs. a
+`FlushOutcome::Folded { consumed }` arm on `settle_flush`) is pinned in the plan;
+the state transition above is the contract either way.
+
+### 13.3 Block-diff — Option A: index-align + LCS, content-match fallback
+
+`fold` turns `parse_blocks(base)` → `parse_blocks(foreign)` into `BlockOp`s
+targeting the correct live `BlockId`s in `sess.doc`. New domain capability
+(serde-free, in `cairn-domain`):
+
+```rust
+// cairn-domain — pure, no I/O. Diffs foreign markdown against the doc and
+// returns the ops that fold it in (author = Human on every produced op).
+impl BlockDoc {
+    pub fn fold_foreign(&mut self, base: &str, foreign: &str) -> Vec<BlockOp>;
+}
+```
+
+**Primary alignment (index).** When `self.materialize() == base` (no peer typed
+since the last write — the dominant single-writer-in-vim case), `parse_blocks(base)`
+aligns 1:1 by position with `self.block_ids_in_order()`. Run an LCS/Myers diff of
+the block *texts*, `base` vs `foreign`:
+
+| Diff op | Emitted `BlockOp` |
+|---|---|
+| equal run | none |
+| `base`-only block at index `i` (deletion) | `Delete(id[i], lamport)` |
+| `foreign`-only block (insertion) | `Insert { fresh id, after: last-aligned live id (or None), lamport, kind, text }` |
+| substitution `base[i] → foreign[j]` | `SetContent { id[i], text: foreign[j], lamport, author: Human }` |
+
+**Fallback (diverged base).** When `self.materialize() != base` (a peer's ops
+advanced the doc concurrently), the positional map is unsafe. Fall back to
+**greedy content-match**: for each changed/added `foreign` block, find a live doc
+block whose current text equals the corresponding `base` block's text
+(first-unconsumed, in order) and `SetContent` it; any `foreign` block that
+matches nothing is **`Insert`ed, never dropped** (the "no silent loss" floor);
+`base` blocks with no `foreign` counterpart are `Delete`d only when a unique
+content match exists, else left alone (deletion is not applied on ambiguity —
+losing a delete is safe, losing content is not).
+
+**Documented ambiguous cases (not solved this slice, floor-guaranteed):**
+- A *moved* block reads as delete+insert: its text survives (re-inserted) but it
+  gets a fresh `BlockId` and loses its stash. Acceptable — no content lost.
+- Duplicate-identical blocks under the fallback path may match the "wrong"
+  instance; positional (primary) path handles them correctly, so this only bites
+  when a peer *also* raced. Content is preserved either way.
+- A block a peer retyped between write and fold won't content-match under the
+  fallback; the foreign version is then `Insert`ed rather than merged as
+  `SetContent`, yielding a duplicate paragraph (both texts preserved) rather than
+  a silent overwrite.
+
+These are surfaced via `tracing::warn!` when the fallback path is taken, so
+divergence is observable in the daemon log.
+
+### 13.4 Seed from git HEAD + reconcile uncommitted work
+
+A2 seeds `Session.doc` from **git HEAD** (`Engine::note_at(path, "HEAD")`,
+`BlockDoc::from_markdown`) rather than the working tree (§12.4 reverses).
+`last_written` is initialized to the **HEAD** bytes. Reconciliation of a
+pre-existing uncommitted worktree edit reuses the *ordinary* fold-back path — no
+separate code: at open, if the working tree differs from HEAD, the seed marks the
+session `dirty` (and stamps `last_op`). The first flush then observes
+`disk (worktree) != baseline (HEAD)` and folds the pre-existing edit into the
+replica via §13.1 exactly as it would a mid-session foreign write; the merged
+result is written and committed on the following cycle. When the working tree
+equals HEAD at open the session is seeded clean (`dirty = false`) and no fold
+runs. Marking dirty at seed is the only extra step — it guarantees the first
+flush actually runs (a fresh session with no peer op would otherwise stay
+`dirty = false` and never reconcile).
+
+### 13.5 Watcher / session commit arbitration
+
+The watcher's `Changed(N)` handler gains a session check that runs **before** any
+engine-lock work (collab lock first, released, then engine lock only in the
+non-sessioned branch — no nesting):
+
+```
+Changed(N):
+  collab lock: session for N exists?
+    · run the engine stat/memo self-echo guard first (drop daemon's own
+      materialize write — reuse the A1 mechanism, §12.2), then:
+    · real foreign edit → mark session dirty, last_op = now; return (defer to flush)
+    · self-echo         → return (ignore)
+  no session → engine lock: generic apply_change (unchanged)
+```
+
+Marking the session dirty makes the debounced flush pick it up, observe
+`disk != baseline`, and fold (§13.1) — so a foreign edit fans to peers within one
+debounce even with no peer typing. Under `auto_commit = true` the generic
+per-tree auto-commit no longer touches a sessioned note (its commits come solely
+from the session flush), removing the double-commit A1 left open (§12.6).
+
+### 13.6 Testing (part of done)
+
+1. **Fold-back headline (spec §8.2):** two in-process peers on `N.md`; a foreign
+   write to `N.md` mid-session appears in the daemon replica **and** fans to the
+   other peer; no lost work; the merged result is committed on the next flush.
+2. **Diverged-base fallback:** a peer op and a foreign edit race (doc advanced
+   since last write); both survive (foreign folded, peer content stashed/kept);
+   fallback `warn` observed.
+3. **Re-fold no-duplication:** two successive foreign edits across cycles produce
+   no duplicated `Insert`ed blocks (the `last_written = disk` rule).
+4. **HEAD-seed + reconcile:** opening a session on a note with a pre-existing
+   uncommitted worktree edit folds that edit in (nothing clobbered on first
+   flush).
+5. **Watcher arbitration:** under `auto_commit = true`, a sessioned note is
+   committed once (by the session flush), not twice.
+6. **`fold_foreign` unit/property tests** (`cairn-domain`, pure): insert-only,
+   delete-only, substitution, mixed, empty↔nonempty, and the round-trip
+   invariant that after `fold_foreign(base, foreign)` +
+   `materialize()`, every `foreign` block's text is present.
+7. Existing A1 tests (self-write suppression, baseline handoff) and all `BlockDoc`
+   convergence property tests remain green, unchanged.
+
+Ambiguous reorder-vs-replace cases are asserted by construction to preserve text
+(floor), not to produce a minimal or move-preserving op-set (§13.3).
+
+### 13.7 A2 locked decisions
+
+| # | Decision | Choice |
+|---|---|---|
+| g | Fold vs skip | Replace A1 skip with fold-back at the one hook point (`disk != baseline`) |
+| h | Lock structure | Two-cycle: fold under collab lock (cycle 1), write next cycle; no nesting |
+| i | Diff-base advance | `last_written = disk` at fold time — prevents `Insert`-ID re-duplication |
+| j | Block-diff | Option A: index-align + LCS; greedy content-match fallback when base diverged; Insert-never-drop floor |
+| k | Author | `Human` on every folded op (LWW + stash → no concurrent loss) |
+| l | Outcome | Fold is its own collab-lock critical section (merge+fanout+baseline atomically); `Conflict` removed; never reap a just-folded session |
+| m | Seed | git HEAD (`note_at(_, "HEAD")`) + immediate reconcile-fold of pre-existing worktree edits |
+| n | Arbitration | Watcher defers sessioned `Changed(N)` to the flush; sole committer under `auto_commit=true` |
