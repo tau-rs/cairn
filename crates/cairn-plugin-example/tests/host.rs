@@ -129,6 +129,10 @@ impl PluginCallbacks for MapCallbacks {
         notes.sort_by(|a, b| a.path.as_str().cmp(b.path.as_str()));
         Ok(notes)
     }
+
+    fn run_agent(&mut self, prompt: &str) -> Result<String, PortError> {
+        Ok(format!("answer: {prompt}"))
+    }
 }
 
 #[test]

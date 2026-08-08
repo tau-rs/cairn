@@ -460,6 +460,13 @@ pub trait PluginCallbacks {
     /// [`PortError::NotFound`] if the path is invalid or the note does not exist;
     /// [`PortError::Adapter`] on a storage failure.
     fn delete_note(&mut self, path: &str) -> Result<(), PortError>;
+
+    /// Run an AI agent query via the host and return the completed answer.
+    /// Gated on the `agent` capability.
+    ///
+    /// # Errors
+    /// [`PortError::Adapter`] if no agent runtime is configured or the run fails.
+    fn run_agent(&mut self, prompt: &str) -> Result<String, PortError>;
 }
 
 /// A cairn change the host may push to subscribed plugins.
@@ -684,6 +691,9 @@ mod tests {
             }
             fn delete_note(&mut self, _: &str) -> Result<(), PortError> {
                 unreachable!()
+            }
+            fn run_agent(&mut self, _prompt: &str) -> Result<String, PortError> {
+                Ok(String::new())
             }
         }
         let mut host = NoopPluginHost;

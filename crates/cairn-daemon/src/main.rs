@@ -152,6 +152,7 @@ async fn run() -> Result<(), String> {
                 Arc::new(cairn_infra::NullRuntime)
             }
         };
+    engine.set_runtime(runtime.clone());
 
     // The same allowlist gates the /events WS upgrade (browsers bypass CORS on
     // WebSocket handshakes; see events_handler).
