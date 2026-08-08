@@ -26,6 +26,8 @@ pub const METHOD_CAIRN_EVENT: &str = "cairn/event";
 /// Host -> plugin: transform a note's content on the read/render path.
 /// Delivered only to plugins declaring `content:process`.
 pub const METHOD_PROCESS_CONTENT: &str = "content/process";
+/// Plugin -> host: run an AI agent query. Requires the `agent` capability.
+pub const METHOD_AGENT: &str = "host/agent";
 
 /// A capability a plugin declares in its manifest's `[engine].capabilities`.
 ///
@@ -72,6 +74,11 @@ pub enum Capability {
     /// yet enforced).
     #[serde(rename = "fs:read")]
     FsRead,
+    /// Run an AI agent query via the host-mediated `host/agent` callback
+    /// (Domain 1): the host makes the model call, so the plugin needs no direct
+    /// network. Enforced today by the host-callback capability gate.
+    #[serde(rename = "agent")]
+    Agent,
 }
 
 impl Capability {
@@ -87,6 +94,7 @@ impl Capability {
             Capability::Net => "net",
             Capability::Exec => "exec",
             Capability::FsRead => "fs:read",
+            Capability::Agent => "agent",
         }
     }
 
@@ -100,6 +108,7 @@ impl Capability {
             Capability::Net => "make outbound network connections",
             Capability::Exec => "run other programs",
             Capability::FsRead => "read files on your computer outside your notes",
+            Capability::Agent => "run AI agent queries on your behalf",
         }
     }
 
@@ -117,6 +126,7 @@ impl Capability {
                 | Capability::VaultEvents
                 | Capability::ContentProcess
                 | Capability::Net
+                | Capability::Agent
         )
     }
 }
@@ -314,6 +324,18 @@ pub struct ProcessContentParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessContentResult {
     pub content: String,
+}
+
+/// Params of the `host/agent` callback.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentParams {
+    pub prompt: String,
+}
+
+/// Result of the `host/agent` callback: the completed agent answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentResult {
+    pub answer: String,
 }
 
 /// One content-processor declaration a plugin returns at `initialize`. A note is
@@ -655,6 +677,7 @@ mod tests {
             Capability::Net,
             Capability::Exec,
             Capability::FsRead,
+            Capability::Agent,
         ] {
             let v = serde_json::to_value(cap).unwrap();
             assert_eq!(v, serde_json::Value::String(cap.wire().to_string()));
@@ -681,6 +704,7 @@ mod tests {
         assert!(Capability::VaultEvents.enforced_today());
         assert!(Capability::ContentProcess.enforced_today());
         assert!(Capability::Net.enforced_today());
+        assert!(Capability::Agent.enforced_today());
         assert!(!Capability::Exec.enforced_today());
         assert!(!Capability::FsRead.enforced_today());
     }
@@ -689,6 +713,26 @@ mod tests {
     fn capability_displays_as_wire_string() {
         assert_eq!(Capability::VaultRead.to_string(), "vault:read");
         assert_eq!(Capability::FsRead.to_string(), "fs:read");
+    }
+
+    #[test]
+    fn agent_capability_method_and_dtos() {
+        assert_eq!(Capability::Agent.wire(), "agent");
+        assert_eq!(Capability::Agent.to_string(), "agent");
+        assert!(Capability::Agent.enforced_today());
+        assert_eq!(METHOD_AGENT, "host/agent");
+
+        let p = AgentParams {
+            prompt: "summarize my notes".into(),
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(serde_json::from_value::<AgentParams>(v).unwrap(), p);
+
+        let r = AgentResult {
+            answer: "done".into(),
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(serde_json::from_value::<AgentResult>(v).unwrap(), r);
     }
 
     #[test]
