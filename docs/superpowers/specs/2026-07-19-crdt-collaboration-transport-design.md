@@ -376,10 +376,12 @@ green per PR.
 
 ## 11. Open questions deferred to the plan
 
-- Exact self-write tagging mechanism (content-hash vs echo-suppression window)
-  and the debounce interval / commit-message format for the session flush.
+- ~~Exact self-write tagging mechanism (content-hash vs echo-suppression window)
+  and the debounce interval / commit-message format for the session flush.~~
+  **Resolved in §12 (PR-2 / A1).**
 - Block-diff alignment algorithm for foreign-edit fold-back, and its documented
-  edge cases (reorder vs delete+insert).
+  edge cases (reorder vs delete+insert). **(A2 — the non-clobber guard in §12
+  defers to this; A1 skips-and-warns rather than folding back.)**
 - Whether `Author` on a folded-back external edit is `Human` (an external editor
   is a human surface) — presumed yes.
 - Precise `state_as_ops` minimality (winning content only, or include stashed
@@ -387,3 +389,93 @@ green per PR.
 - Replica-id assignment/registration and collision policy specifics.
 - Reconnection/resume semantics after a dropped WS (re-`Join` → fresh
   `Snapshot`; any client-side op buffering during disconnect).
+
+---
+
+## 12. Commit boundary — PR-2 / A1 (the daemon commit-agent)
+
+**Date:** 2026-07-24. **Status:** Approved. This section resolves the §11
+commit-boundary open questions and pins the A1 slice (A2 = foreign-edit
+fold-back is a follow-up). Roadmap: Epic A.
+
+**Scope of A1:** the daemon becomes the sole disk writer for a sessioned note —
+it materializes its `BlockDoc` replica to `N.md` and git-commits it. A2
+(foreign-edit fold-back, spec §3.2) is explicitly *not* here; A1's floor is
+"never silently clobber foreign work."
+
+### 12.1 Flush trigger — centralized debounced ticker
+
+The daemon commits **debounced-on-quiescence**, not per-op (per-op = commit
+storm). A single `AppState::run_collab_flush_pass(&self, debounce)` performs one
+pass; `main.rs` spawns a ticker (`loop { sleep(250ms); run_collab_flush_pass(quiet) }`)
+on a blocking thread, symmetric with the existing watcher auto-commit loop.
+Exposing the pass as one callable unit makes it deterministically testable (tests
+call it with `debounce = 0`, no sleeps).
+
+- **Debounce interval:** reuse `config.sync.quiet_period_ms` (default 2000ms) —
+  one coalescing knob shared with the watcher; 250ms tick granularity.
+- **Commit message:** `format!("cairn: collab sync {note}")`.
+- **Lock order (single global order, no nesting):** phase 1 materializes the due
+  sessions *under the collab lock only* (no engine call); the lock is released;
+  phase 2 takes the *engine lock* per note to write+commit. The collab lock is
+  never held across an engine call, and the engine lock is never held while
+  acquiring the collab lock — preserving the engine-then-collab discipline the
+  seed path already follows (§6, `run_collab` seeds off the executor outside the
+  collab lock).
+
+### 12.2 Self-write suppression — reuse the engine stat-guard
+
+The materialize write is routed through **`Engine::write_note`**, which records
+the file's `(mtime, len)` stamp (and content-hash memo) *as it writes*. When the
+file-watcher subsequently fires `Changed(N)`, `Engine::apply_change`'s existing
+stat-guard / hash-dedup drops the echo — no re-index, no re-emit, no
+feedback-loop commit. **No new suppression API is introduced**; this is exactly
+the mechanism command-writes already use (`apply_write` vs `apply_change`). The
+daemon must never write `N.md` via `std::fs`/the store directly, or the
+fingerprint is not pre-seeded and the watcher treats it as a foreign edit.
+
+### 12.3 Non-clobber guard (A1 floor; A2 replaces with fold-back)
+
+Each `Session` records `last_written: String` (initialized to the seed). Before
+phase-2 writing, the flush reads the current on-disk `N.md`; if it differs from
+`last_written`, a **foreign edit** intervened → the flush **warns and skips the
+write** (never overwrites), leaving the session dirty so nothing in-memory is
+lost. A2 turns this skip into a block-diff fold-back (§3.2). This guarantees the
+spec's "never lose work" floor without implementing the alignment algorithm yet.
+
+### 12.4 Seed source — working tree (A1)
+
+A1 keeps seeding from the working tree (`Engine::read_note`), not git HEAD, so
+`last_written == on-disk` at open and the first flush cannot false-positive the
+§12.3 guard. HEAD-seed plus reconciliation of pre-existing uncommitted changes is
+an A2 concern (the `Engine::note_at(path, "HEAD")` capability already exists).
+
+### 12.5 Session teardown (resolves the ticker's close-flush gap)
+
+`Leave`/disconnect removes the participant. If the session is then empty **and
+clean**, it is dropped immediately (PR-1 behavior). If empty **and dirty**, it is
+kept so the ticker can finalize it: an empty session is flushed ignoring the
+debounce, then reaped. The last edit before everyone leaves therefore still
+persists (best-effort — a mid-flush process exit may lose it, as with the
+watcher).
+
+### 12.6 Watcher vs session commit
+
+Under `auto_commit = false` (the default) the watcher never commits, so there is
+no conflict. Under `auto_commit = true` both the watcher quiet-loop and the
+collab ticker may commit the whole working tree; both guard on
+`has_uncommitted_changes()` and the collab write is stat-suppressed against
+re-ingest, so the worst case is one idempotent extra commit. Full arbitration
+(watcher defers per-note to the session flush, spec §3.1) is A2.
+
+### 12.7 A1 locked decisions
+
+| # | Decision | Choice |
+|---|---|---|
+| a | Flush trigger | Centralized debounced ticker; one testable `run_collab_flush_pass` |
+| a | Debounce / msg | Reuse `quiet_period_ms` (2000ms), 250ms tick; `cairn: collab sync {note}` |
+| b | Self-write suppression | Route through `Engine::write_note`; reuse the stat-guard (no new API) |
+| c | Non-clobber | Compare disk vs `last_written`; diverged → warn + skip (A2 → fold-back) |
+| d | Seed source | Working tree (`read_note`); HEAD-seed deferred to A2 |
+| e | Teardown | Empty+clean → drop; empty+dirty → ticker finalizes then reaps |
+| f | Watcher/session | No conflict when `auto_commit=false`; idempotent-safe otherwise; arbitration = A2 |
