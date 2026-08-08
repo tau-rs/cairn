@@ -213,14 +213,19 @@ async fn run() -> Result<(), String> {
         let quiet = Duration::from_millis(config.sync.quiet_period_ms);
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_millis(250));
+            // A slow pass (many notes / slow git) must not fire back-to-back
+            // ticks with no idle; delay the schedule instead of bursting.
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tick.tick().await;
                 let s = flush_state.clone();
-                if tokio::task::spawn_blocking(move || s.run_collab_flush_pass(quiet))
-                    .await
-                    .is_err()
-                {
-                    break; // runtime shutting down
+                match tokio::task::spawn_blocking(move || s.run_collab_flush_pass(quiet)).await {
+                    Ok(()) => {}
+                    // A panic in one pass must not kill the commit-agent for the
+                    // daemon's lifetime; log and keep ticking. Only a cancelled
+                    // join (runtime shutting down) ends the loop.
+                    Err(e) if e.is_cancelled() => break,
+                    Err(e) => tracing::error!(error = %e, "collab flush pass panicked; continuing"),
                 }
             }
         });
