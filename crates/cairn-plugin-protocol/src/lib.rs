@@ -26,6 +26,8 @@ pub const METHOD_CAIRN_EVENT: &str = "cairn/event";
 /// Host -> plugin: transform a note's content on the read/render path.
 /// Delivered only to plugins declaring `content:process`.
 pub const METHOD_PROCESS_CONTENT: &str = "content/process";
+/// Plugin -> host: run an AI agent query. Requires the `agent` capability.
+pub const METHOD_AGENT: &str = "host/agent";
 
 /// A capability a plugin declares in its manifest's `[engine].capabilities`.
 ///
@@ -72,6 +74,9 @@ pub enum Capability {
     /// yet enforced).
     #[serde(rename = "fs:read")]
     FsRead,
+    /// Run an AI agent query via the host (Domain 1 — host-mediated).
+    #[serde(rename = "agent")]
+    Agent,
 }
 
 impl Capability {
@@ -87,6 +92,7 @@ impl Capability {
             Capability::Net => "net",
             Capability::Exec => "exec",
             Capability::FsRead => "fs:read",
+            Capability::Agent => "agent",
         }
     }
 
@@ -100,6 +106,7 @@ impl Capability {
             Capability::Net => "make outbound network connections",
             Capability::Exec => "run other programs",
             Capability::FsRead => "read files on your computer outside your notes",
+            Capability::Agent => "run an AI agent query on your behalf",
         }
     }
 
@@ -117,6 +124,7 @@ impl Capability {
                 | Capability::VaultEvents
                 | Capability::ContentProcess
                 | Capability::Net
+                | Capability::Agent
         )
     }
 }
@@ -323,6 +331,18 @@ pub struct ProcessContentResult {
 pub struct ProcessorDecl {
     #[serde(default)]
     pub extensions: Vec<String>,
+}
+
+/// Params of the `host/agent` callback.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentParams {
+    pub prompt: String,
+}
+
+/// Result of the `host/agent` callback: the completed agent answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentResult {
+    pub answer: String,
 }
 
 /// Params of the `host/search` callback.
@@ -714,5 +734,35 @@ mod tests {
             r.is_err(),
             "unknown capability must fail the manifest parse"
         );
+    }
+
+    #[test]
+    fn agent_capability_and_dtos_roundtrip() {
+        // Wire string + metadata.
+        assert_eq!(Capability::Agent.wire(), "agent");
+        assert!(
+            Capability::Agent.enforced_today(),
+            "agent gates the live host-RPC channel"
+        );
+        assert_eq!(
+            serde_json::from_str::<Capability>("\"agent\"").unwrap(),
+            Capability::Agent
+        );
+
+        // Method const.
+        assert_eq!(METHOD_AGENT, "host/agent");
+
+        // DTOs.
+        let p = AgentParams {
+            prompt: "summarize my notes".into(),
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(serde_json::from_value::<AgentParams>(v).unwrap(), p);
+
+        let r = AgentResult {
+            answer: "done".into(),
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(serde_json::from_value::<AgentResult>(v).unwrap(), r);
     }
 }
