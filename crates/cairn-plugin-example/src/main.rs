@@ -1,7 +1,7 @@
 //! Example cairn plugin built on `cairn-plugin-sdk`: declares commands + typed
 //! handlers; the SDK owns the JSON-RPC/NDJSON loop and the host-callbacks.
-//! `echo` returns its args; `noteLen`/`writeNote`/`noteCount`/`find`/`deleteNote`
-//! call back to the host.
+//! `echo` returns its args; `noteLen`/`writeNote`/`noteCount`/`find`/`deleteNote`/
+//! `ask` call back to the host.
 
 use cairn_plugin_protocol::{PluginContribution, PluginListItem, PluginSlot, PluginWidget};
 use cairn_plugin_sdk::{CairnEvent, Host, Plugin};
@@ -22,6 +22,11 @@ struct WriteArgs {
 #[derive(Deserialize)]
 struct QueryArgs {
     query: String,
+}
+
+#[derive(Deserialize)]
+struct AskArgs {
+    prompt: String,
 }
 
 fn main() {
@@ -62,6 +67,11 @@ fn main() {
     plugin.command("find", "Find", |a: QueryArgs, host: &mut Host| {
         let hits = host.search(&a.query)?;
         Ok(json!({ "hits": hits.len() }))
+    });
+
+    plugin.command("ask", "Ask agent", |a: AskArgs, host: &mut Host| {
+        let answer = host.agent(&a.prompt)?;
+        Ok(json!({ "answer": answer }))
     });
 
     plugin.command(

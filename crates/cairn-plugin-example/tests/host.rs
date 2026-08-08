@@ -248,6 +248,48 @@ fn note_len_denied_without_capability() {
 }
 
 #[test]
+fn ask_via_agent_callback_when_cap_declared() {
+    let bin = env!("CARGO_BIN_EXE_cairn-plugin-example");
+    let tmp = tempfile::tempdir().unwrap();
+    let pdir = tmp.path().join(".cairn").join("plugins").join("example");
+    write_manifest(&pdir, bin, "\"agent\"");
+    let mut host = load_example(tmp.path());
+    let mut cb = MapCallbacks(HashMap::new());
+    let out = host
+        .invoke(
+            "example",
+            "ask",
+            &serde_json::json!({"prompt": "hi"}),
+            &mut cb,
+        )
+        .unwrap();
+    // MapCallbacks::run_agent returns "answer: {prompt}".
+    assert_eq!(out, serde_json::json!({ "answer": "answer: hi" }));
+}
+
+#[test]
+fn ask_denied_without_agent_cap() {
+    let bin = env!("CARGO_BIN_EXE_cairn-plugin-example");
+    let tmp = tempfile::tempdir().unwrap();
+    let pdir = tmp.path().join(".cairn").join("plugins").join("example");
+    write_manifest(&pdir, bin, ""); // no capabilities
+    let mut host = load_example(tmp.path());
+    let mut cb = MapCallbacks(HashMap::new());
+    let err = host
+        .invoke(
+            "example",
+            "ask",
+            &serde_json::json!({"prompt": "hi"}),
+            &mut cb,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, PortError::Adapter(_)),
+        "expected Adapter, got {err:?}"
+    );
+}
+
+#[test]
 fn write_note_via_callback() {
     let bin = env!("CARGO_BIN_EXE_cairn-plugin-example");
     let tmp = tempfile::tempdir().unwrap();
