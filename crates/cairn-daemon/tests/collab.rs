@@ -39,6 +39,32 @@ async fn serve() -> std::net::SocketAddr {
     addr
 }
 
+/// Like `serve()`, but also hands back the `AppState` and the backing
+/// `TempDir` so a test can drive the watcher/flush machinery directly (e.g.
+/// simulate a foreign on-disk edit) while real WS clients are connected.
+async fn serve_with_state() -> (
+    std::net::SocketAddr,
+    cairn_daemon::AppState,
+    tempfile::TempDir,
+) {
+    let tmp = tempfile::tempdir().unwrap();
+    let engine = Engine::new(
+        LocalFsStore::open(tmp.path()).unwrap(),
+        TantivyIndex::in_memory().unwrap(),
+        GitVcs::open_or_init(tmp.path()).unwrap(),
+    );
+    let state = AppState::new(engine)
+        .with_allowed_origins(vec![ORIGIN.to_string()])
+        .with_token(TOKEN);
+    let app = build_router(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (addr, state, tmp)
+}
+
 fn req(
     addr: std::net::SocketAddr,
     origin: Option<&str>,
@@ -264,4 +290,61 @@ async fn collab_rejects_bad_token_and_origin() {
         }
         other => panic!("expected 403, got {other:?}"),
     }
+}
+
+/// The DoD's headline proof (spec §8.2 / §13): a foreign editor writes the
+/// note directly on disk while two peers hold a live `/collab` session on
+/// it. The watcher defers the sessioned `Changed` to arbitration (marks the
+/// session dirty instead of auto-committing), the next flush pass folds the
+/// foreign bytes into the shared replica, and both peers see the resulting
+/// `Op` over the wire — no lost work, both replicas converge.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn foreign_disk_edit_mid_session_reaches_both_peers() {
+    use cairn_ports::FsChange;
+    let (addr, state, tmp) = serve_with_state().await;
+    let note = "n.md";
+    let path = cairn_domain::NotePath::new(note).unwrap();
+
+    // Two peers join; each gets Joined + (empty) Snapshot. The note has never
+    // been committed, so the session seeds empty (Seed { markdown: "", dirty:
+    // false }); the fold against base="" inserts the foreign block.
+    let mut c1 = connect(addr).await;
+    let mut c2 = connect(addr).await;
+    for (c, r) in [(&mut c1, 1u64), (&mut c2, 2u64)] {
+        send(
+            c,
+            &CollabClientMsg::Join {
+                note: note.into(),
+                replica: r,
+            },
+        )
+        .await;
+        assert!(matches!(recv(c).await, CollabServerMsg::Joined { .. }));
+        assert!(matches!(recv(c).await, CollabServerMsg::Snapshot { .. }));
+    }
+
+    // A foreign editor writes n.md directly, then the watcher fires.
+    std::fs::write(tmp.path().join(note), "foreign para\n").unwrap();
+    let s = state.clone();
+    let p = path.clone();
+    tokio::task::spawn_blocking(move || {
+        s.apply_change_blocking(&FsChange::Changed(p.clone())); // arbitration -> dirty
+        s.run_collab_flush_pass(std::time::Duration::ZERO); // fold + fan out
+    })
+    .await
+    .unwrap();
+
+    // Both peers receive the folded Insert over the wire. A single-block
+    // foreign edit produces exactly one Op fanned to each peer, so one recv
+    // per peer suffices (the 5s recv timeout is the only synchronization).
+    let mut d1 = BlockDoc::from_markdown(1, "");
+    let mut d2 = BlockDoc::from_markdown(2, "");
+    for (c, d) in [(&mut c1, &mut d1), (&mut c2, &mut d2)] {
+        match recv(c).await {
+            CollabServerMsg::Op { op, .. } => d.merge(block_op_from_wire(op)),
+            other => panic!("expected folded Op, got {other:?}"),
+        }
+    }
+    assert_eq!(d1.materialize(), d2.materialize());
+    assert!(d1.materialize().contains("foreign para"), "no lost work");
 }
