@@ -57,11 +57,11 @@
 use std::io::{BufRead, Write};
 
 use cairn_plugin_protocol::{
-    read_message, write_message, CommandDecl, DeleteNoteParams, InitializeResult, InvokeParams,
-    ListNotesResult, ProcessorDecl, ReadNoteParams, ReadNoteResult, Request, Response, RpcError,
-    SearchParams, SearchResultDto, WriteNoteParams, JSONRPC_VERSION, METHOD_CAIRN_EVENT,
-    METHOD_DELETE_NOTE, METHOD_INITIALIZE, METHOD_INVOKE, METHOD_LIST_NOTES,
-    METHOD_PROCESS_CONTENT, METHOD_READ_NOTE, METHOD_SEARCH, METHOD_WRITE_NOTE,
+    read_message, write_message, AgentParams, AgentResult, CommandDecl, DeleteNoteParams,
+    InitializeResult, InvokeParams, ListNotesResult, ProcessorDecl, ReadNoteParams, ReadNoteResult,
+    Request, Response, RpcError, SearchParams, SearchResultDto, WriteNoteParams, JSONRPC_VERSION,
+    METHOD_AGENT, METHOD_CAIRN_EVENT, METHOD_DELETE_NOTE, METHOD_INITIALIZE, METHOD_INVOKE,
+    METHOD_LIST_NOTES, METHOD_PROCESS_CONTENT, METHOD_READ_NOTE, METHOD_SEARCH, METHOD_WRITE_NOTE,
 };
 use serde_json::Value;
 
@@ -210,6 +210,19 @@ impl Host<'_> {
         let result = self.call(METHOD_LIST_NOTES, Value::Null)?;
         let ln: ListNotesResult = serde_json::from_value(result)?;
         Ok(ln.notes)
+    }
+
+    /// Run an AI agent query via the host (`host/agent`, requires `agent`).
+    ///
+    /// # Errors
+    /// [`PluginError`] if the host denies/fails the callback.
+    pub fn agent(&mut self, prompt: &str) -> Result<String, PluginError> {
+        let params = serde_json::to_value(AgentParams {
+            prompt: prompt.to_string(),
+        })?;
+        let result = self.call(METHOD_AGENT, params)?;
+        let out: AgentResult = serde_json::from_value(result)?;
+        Ok(out.answer)
     }
 }
 
@@ -550,6 +563,43 @@ mod host_tests {
         let written: Request = serde_json::from_slice(first_line).unwrap();
         assert_eq!(written.method, METHOD_DELETE_NOTE);
         assert_eq!(written.params["path"], "gone.md");
+    }
+
+    #[test]
+    fn host_agent_sends_request_and_parses_answer() {
+        // Canned host response to our host/agent callback.
+        let mut response_bytes = Vec::new();
+        let resp = Response {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id: 1001,
+            result: Some(
+                serde_json::to_value(AgentResult {
+                    answer: "hi".to_string(),
+                })
+                .unwrap(),
+            ),
+            error: None,
+        };
+        write_message(&mut response_bytes, &resp).unwrap();
+
+        let mut reader = Cursor::new(response_bytes);
+        let mut out: Vec<u8> = Vec::new();
+        let mut cb_id = 1000u64;
+        let answer = {
+            let mut host = Host {
+                reader: &mut reader,
+                stdout: &mut out,
+                next_cb_id: &mut cb_id,
+            };
+            host.agent("summarize").unwrap()
+        };
+        assert_eq!(answer, "hi");
+        assert_eq!(cb_id, 1001);
+        // The SDK wrote a host/agent request with the right params.
+        let first_line = out.split(|&b| b == b'\n').next().unwrap();
+        let written: Request = serde_json::from_slice(first_line).unwrap();
+        assert_eq!(written.method, METHOD_AGENT);
+        assert_eq!(written.params["prompt"], "summarize");
     }
 
     #[test]
