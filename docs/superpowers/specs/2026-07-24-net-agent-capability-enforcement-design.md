@@ -80,26 +80,29 @@ fn run_agent(&mut self, prompt: &str) -> Result<String, PortError>;
 
 `Engine` does **not** hold an `AgentRuntime` today — it lives on the daemon's
 `AppState.runtime` and is passed *into* `augmented_answer` as a parameter, and
-`EngineCallbacks` holds only `engine + sink`. So C2 threads a runtime through the
-invoke path:
+`EngineCallbacks` holds only `engine + sink`. Rather than thread a `runtime`
+parameter through `invoke_plugin_command` and its ~35 `dispatch_command` call
+sites, **the `Engine` owns the runtime** (no signature changes on that chain):
 
-- `Engine::invoke_plugin_command` gains a `runtime: &dyn AgentRuntime`
-  parameter; `EngineCallbacks` gains a `runtime` field.
-- `EngineCallbacks::run_agent(prompt)` **buffers** the run: it calls
-  `runtime.answer(prompt, &mut sink)` with an internal sink that concatenates
-  `AgentEvent::TextDelta`s until `Completed`, then returns the buffer. An
-  `AgentEvent::Failed` (or an `Err` before streaming) becomes `PortError`.
-- Callers thread the runtime:
-  - `cairn-service` invoke handler (currently `engine.invoke_plugin_command(
-    plugin, command, args, sink)` at `crates/cairn-service/src/lib.rs:205`)
-    passes the runtime it is given.
-  - `cairn-daemon` already holds `state.runtime`; it flows to the service
-    invoke handler (same `Arc<dyn AgentRuntime>` used by `/ask`).
-  - CLI + `cairn-app` unit tests pass `NullRuntime` or a stub.
+- `Engine` gains `runtime: Option<Arc<dyn AgentRuntime + Send + Sync>>`
+  (default `None`) plus a `set_runtime` setter, mirroring `set_plugin_host`.
+  `EngineCallbacks` already borrows `engine`, so `run_agent` reaches the runtime
+  via `self.engine.runtime` — no new field.
+- `EngineCallbacks::run_agent(prompt)` **buffers** the run: it clones the `Arc`
+  and calls `runtime.answer(prompt, &mut sink)` with an internal sink that
+  concatenates `AgentEvent::TextDelta`s; on the run's completion (`answer`
+  returns `Ok`) it returns the buffer. An `AgentEvent::Failed` (or an `Err`, or
+  no runtime configured) becomes `PortError::Adapter`.
+- Wiring: `cairn-daemon/src/main.rs` calls `engine.set_runtime(runtime.clone())`
+  after the runtime is constructed and before the engine is moved into
+  `AppState` (both hold the same `Arc`, so `/ask` is unaffected). `cairn-service`
+  and the CLI need **no** change; `cairn-app` unit tests inject a stub via
+  `set_runtime`.
 
-Only `invoke_plugin_command` is threaded in this increment. `dispatch_plugin_event`
-and `render_note` (content processing) keep `NullRuntime` — agent calls from an
-event handler or a content processor are out of scope here.
+Only the invoke path reads the runtime in this increment. `dispatch_plugin_event`
+and `render_note` (content processing) do not: `ReadOnlyCallbacks::run_agent`
+denies during content processing — agent calls from an event handler or a
+content processor are out of scope here.
 
 ### 3. Gate (`cairn-infra::plugin_host`)
 
@@ -164,8 +167,9 @@ addressed here.
 ## Files touched
 
 `cairn-plugin-protocol`, `cairn-ports`, `cairn-infra/src/plugin_host.rs`,
-`cairn-app/src/lib.rs`, `cairn-service/src/lib.rs`, `cairn-daemon/src/lib.rs`,
-`cairn-plugin-sdk`, `cairn-plugin-example`.
+`cairn-app/src/lib.rs`, `cairn-daemon/src/main.rs`, `cairn-plugin-sdk`,
+`cairn-plugin-example`. (`cairn-service` and the CLI are **not** touched — the
+engine-owned-runtime design avoids threading through `dispatch_command`.)
 
 ## Definition of done
 
