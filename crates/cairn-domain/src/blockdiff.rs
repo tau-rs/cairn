@@ -3,9 +3,6 @@
 
 /// One step aligning a `base` block sequence to a `foreign` one. Indices are
 /// into the respective `parse_blocks` outputs.
-// TODO(A2 Task 2): consumed by `BlockDoc::fold_foreign`, not yet implemented —
-// hence `allow(dead_code)` until that task lands.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DiffStep {
     /// `base[bi]` and `foreign[fi]` are byte-identical — keep the block.
@@ -20,7 +17,6 @@ pub(crate) enum DiffStep {
 /// Deletes/Inserts are emitted in source order; a substitution surfaces as a
 /// `Delete` immediately followed by an `Insert` (the caller pairs them into a
 /// content update). O(n·m) time/space — block counts per note are small.
-#[allow(dead_code)]
 pub(crate) fn lcs_edit_script(base: &[String], foreign: &[String]) -> Vec<DiffStep> {
     let (n, m) = (base.len(), foreign.len());
     // dp[i][j] = LCS length of base[i..] and foreign[j..].

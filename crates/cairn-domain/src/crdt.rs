@@ -3,6 +3,7 @@
 //! disk. See docs/decisions/0011-crdt-collaboration-model.md.
 
 use crate::block::{join_blocks, BlockKind};
+use crate::blockdiff::DiffStep;
 use std::collections::HashMap;
 
 /// Lamport timestamp.
@@ -342,6 +343,110 @@ impl BlockDoc {
         vec![op]
     }
 
+    /// Fold a foreign on-disk revision of this note back into the live document:
+    /// diff `foreign` against `base` (the markdown the daemon last wrote) and
+    /// apply the delta as ops so no foreign work is lost. Every produced op is
+    /// authored `Human` (an external editor is a human surface). Returns the ops
+    /// to fan out to peers. See design spec §13.3.
+    pub fn fold_foreign(&mut self, base: &str, foreign: &str) -> Vec<BlockOp> {
+        let base_texts: Vec<String> = crate::block::parse_blocks(base)
+            .into_iter()
+            .map(|b| b.text)
+            .collect();
+        let foreign_blocks = crate::block::parse_blocks(foreign);
+        let foreign_texts: Vec<String> = foreign_blocks.iter().map(|b| b.text.clone()).collect();
+        let live = self.block_ids_in_order();
+
+        // Positional alignment is exact only when the live doc is byte-identical
+        // to `base`: then base_texts[i] corresponds to live[i]. Otherwise a peer
+        // advanced the doc concurrently — fall back to content matching so no
+        // foreign block is lost (spec §13.3).
+        let index_aligned = self.materialize() == base && base_texts.len() == live.len();
+
+        // PASS 1 (no mutation): resolve the edit script into concrete actions,
+        // pairing each gap's deletes/inserts into content substitutions. Base IDs
+        // are resolved against the pre-mutation doc so a SetContent cannot perturb
+        // a later block's content-match. The `FoldPlan` helper owns the pass-1
+        // state so `resolve_base`/`flush_gap` can share `consumed` without the
+        // nested-closure borrow tangle.
+        let steps = crate::blockdiff::lcs_edit_script(&base_texts, &foreign_texts);
+        let mut plan = FoldPlan {
+            foreign_texts: &foreign_texts,
+            foreign_blocks: &foreign_blocks,
+            index_aligned,
+            live: &live,
+            base_texts: &base_texts,
+            consumed: vec![false; live.len()],
+            actions: Vec::new(),
+            anchor: None,
+            gap_del: Vec::new(),
+            gap_ins: Vec::new(),
+        };
+
+        for step in &steps {
+            match *step {
+                DiffStep::Keep { bi, .. } => {
+                    plan.flush_gap(self);
+                    // Advance the anchor to this kept block's live id.
+                    plan.anchor = plan.resolve_base(bi, self);
+                }
+                DiffStep::Delete { bi } => plan.gap_del.push(bi),
+                DiffStep::Insert { fi } => plan.gap_ins.push(fi),
+            }
+        }
+        plan.flush_gap(self);
+        let actions = plan.actions;
+
+        // PASS 2 (mutation): apply the actions, chaining consecutive inserts that
+        // share a gap anchor so multi-block insertions land in order.
+        let mut produced: Vec<BlockOp> = Vec::new();
+        let mut prev_anchor: Option<BlockId> = None;
+        let mut prev_insert_id: Option<BlockId> = None;
+        for action in actions {
+            match action {
+                FoldAction::Delete(id) => {
+                    prev_insert_id = None;
+                    produced.extend(self.apply_local(Edit::Remove { id }));
+                }
+                FoldAction::SetContent(id, text) => {
+                    prev_insert_id = None;
+                    produced.extend(self.apply_local(Edit::UpdateText {
+                        id,
+                        text,
+                        author: Author::Human,
+                    }));
+                }
+                FoldAction::Insert { anchor, kind, text } => {
+                    let after = if prev_insert_id.is_some() && prev_anchor == anchor {
+                        prev_insert_id
+                    } else {
+                        anchor
+                    };
+                    let ops = self.apply_local(Edit::InsertAfter {
+                        after,
+                        kind,
+                        text,
+                        author: Author::Human,
+                    });
+                    if let Some(BlockOp::Insert { id, .. }) = ops.first() {
+                        prev_insert_id = Some(*id);
+                    }
+                    prev_anchor = anchor;
+                    produced.extend(ops);
+                }
+            }
+        }
+        produced
+    }
+
+    /// Current text of a live (non-tombstoned) block, for content-match folding.
+    fn text_of(&self, id: BlockId) -> Option<&str> {
+        self.entries
+            .get(&id)
+            .filter(|e| !e.tombstone)
+            .map(|e| e.text.as_str())
+    }
+
     /// Stashed loser content versions for a block (recoverable). Test/inspect aid.
     #[must_use]
     pub fn stashed(&self, id: BlockId) -> Vec<String> {
@@ -349,6 +454,94 @@ impl BlockDoc {
             .get(&id)
             .map(|e| e.stash.clone())
             .unwrap_or_default()
+    }
+}
+
+/// A resolved fold action, planned in pass 1 and applied in pass 2 of
+/// `fold_foreign`. Owned data only — no borrows into the pre-mutation doc — so
+/// pass 2 can freely mutate.
+enum FoldAction {
+    Delete(BlockId),
+    SetContent(BlockId, String),
+    Insert {
+        anchor: Option<BlockId>,
+        kind: BlockKind,
+        text: String,
+    },
+}
+
+/// Pass-1 state for `fold_foreign`. Holding `consumed` here lets `resolve_base`
+/// and `flush_gap` share the content-match cursor as ordinary `&mut self`
+/// methods, avoiding the `&mut dyn FnMut` nested-closure borrow tangle. All
+/// slice fields borrow read-only from the pre-mutation doc's derived data.
+struct FoldPlan<'a> {
+    foreign_texts: &'a [String],
+    foreign_blocks: &'a [crate::block::Block],
+    index_aligned: bool,
+    live: &'a [BlockId],
+    base_texts: &'a [String],
+    consumed: Vec<bool>,
+    actions: Vec<FoldAction>,
+    /// Last kept live id before the current gap.
+    anchor: Option<BlockId>,
+    gap_del: Vec<usize>,
+    gap_ins: Vec<usize>,
+}
+
+impl FoldPlan<'_> {
+    /// Map a `base` block index to a live `BlockId`. Index-aligned when the doc
+    /// equals `base`; otherwise the first unconsumed live block whose current
+    /// text matches, marking it consumed so each live block maps at most once.
+    fn resolve_base(&mut self, bi: usize, this: &BlockDoc) -> Option<BlockId> {
+        if self.index_aligned {
+            return Some(self.live[bi]);
+        }
+        for (k, id) in self.live.iter().enumerate() {
+            if !self.consumed[k] && this.text_of(*id) == Some(self.base_texts[bi].as_str()) {
+                self.consumed[k] = true;
+                return Some(*id);
+            }
+        }
+        None
+    }
+
+    /// Resolve the deletes/inserts accumulated in the current gap: pair them into
+    /// in-place substitutions, then emit any leftover deletes and inserts.
+    fn flush_gap(&mut self, this: &BlockDoc) {
+        let anchor = self.anchor;
+        let gap_del = std::mem::take(&mut self.gap_del);
+        let gap_ins = std::mem::take(&mut self.gap_ins);
+        let pair = gap_del.len().min(gap_ins.len());
+        for k in 0..pair {
+            let fi = gap_ins[k];
+            match self.resolve_base(gap_del[k], this) {
+                // Substitution in place: keep the block's identity.
+                Some(id) => self
+                    .actions
+                    .push(FoldAction::SetContent(id, self.foreign_texts[fi].clone())),
+                // Base block vanished but foreign has content here: insert it
+                // rather than drop it (floor).
+                None => self.actions.push(FoldAction::Insert {
+                    anchor,
+                    kind: self.foreign_blocks[fi].kind,
+                    text: self.foreign_texts[fi].clone(),
+                }),
+            }
+        }
+        for &bi in &gap_del[pair..] {
+            // Only apply a delete when the base block is uniquely matched; losing
+            // a delete never loses content, so ambiguity is skipped.
+            if let Some(id) = self.resolve_base(bi, this) {
+                self.actions.push(FoldAction::Delete(id));
+            }
+        }
+        for &fi in &gap_ins[pair..] {
+            self.actions.push(FoldAction::Insert {
+                anchor,
+                kind: self.foreign_blocks[fi].kind,
+                text: self.foreign_texts[fi].clone(),
+            });
+        }
     }
 }
 
@@ -598,5 +791,78 @@ mod tests {
         // converge to a single deterministic winner — not two forked blocks.
         assert_eq!(a.materialize(), b.materialize());
         assert_eq!(a.block_ids_in_order().len(), 1);
+    }
+
+    #[test]
+    fn fold_foreign_inserts_a_new_block_after_its_neighbor() {
+        let mut doc = BlockDoc::from_markdown(1, "a\n\nb\n");
+        let base = doc.materialize(); // "a\n\nb\n"
+        let ops = doc.fold_foreign(&base, "a\n\nmiddle\n\nb\n");
+        assert_eq!(doc.materialize(), "a\n\nmiddle\n\nb\n");
+        assert!(!ops.is_empty(), "an insert produced ops to fan out");
+    }
+
+    #[test]
+    fn fold_foreign_substitutes_content_in_place_keeping_the_id() {
+        let mut doc = BlockDoc::from_markdown(1, "keep\n\nold\n");
+        let id_before = doc.block_ids_in_order();
+        let base = doc.materialize();
+        doc.fold_foreign(&base, "keep\n\nnew\n");
+        assert_eq!(doc.materialize(), "keep\n\nnew\n");
+        // The edited block kept its identity (SetContent, not delete+insert).
+        let id_after = doc.block_ids_in_order();
+        assert_eq!(id_before, id_after, "substitution preserved block IDs");
+    }
+
+    #[test]
+    fn fold_foreign_deletes_a_removed_block() {
+        let mut doc = BlockDoc::from_markdown(1, "a\n\nb\n\nc\n");
+        let base = doc.materialize();
+        doc.fold_foreign(&base, "a\n\nc\n");
+        assert_eq!(doc.materialize(), "a\n\nc\n");
+    }
+
+    #[test]
+    fn fold_foreign_is_noop_when_disk_equals_base() {
+        let mut doc = BlockDoc::from_markdown(1, "a\n\nb\n");
+        let base = doc.materialize();
+        let ops = doc.fold_foreign(&base, &base);
+        assert!(ops.is_empty(), "identical foreign produces no ops");
+        assert_eq!(doc.materialize(), base);
+    }
+
+    #[test]
+    fn re_fold_against_the_consumed_bytes_does_not_duplicate_inserts() {
+        // Models the daemon's `last_written = disk` rule: after folding foreign_1,
+        // the NEXT fold uses foreign_1 as the base — so a further edit does not
+        // re-insert foreign_1's block.
+        let mut doc = BlockDoc::from_markdown(1, "a\n");
+        let base0 = doc.materialize(); // "a\n"
+        doc.fold_foreign(&base0, "a\n\nb\n"); // absorb b
+        let base1 = "a\n\nb\n".to_string(); // the consumed bytes become the new base
+        doc.fold_foreign(&base1, "a\n\nb\n\nc\n"); // absorb c
+        let out = doc.materialize();
+        assert_eq!(out, "a\n\nb\n\nc\n");
+        assert_eq!(out.matches("b").count(), 1, "b appears exactly once");
+    }
+
+    #[test]
+    fn fold_foreign_preserves_every_foreign_block_when_base_diverged() {
+        // A peer advanced the doc (materialize != base): the fallback path must not
+        // lose any foreign block's text (the "no silent loss" floor).
+        let mut doc = BlockDoc::from_markdown(1, "a\n\nb\n");
+        let base = doc.materialize();
+        // Peer edits the doc so it no longer equals `base`.
+        let id_b = doc.block_ids_in_order()[1];
+        doc.apply_local(Edit::UpdateText {
+            id: id_b,
+            text: "b (peer)".into(),
+            author: Author::Human,
+        });
+        // Foreign edit (made against the original `base`) adds a block.
+        doc.fold_foreign(&base, "a\n\nb\n\nc from disk\n");
+        let out = doc.materialize();
+        assert!(out.contains("c from disk"), "foreign addition preserved");
+        assert!(out.contains("a"), "untouched block preserved");
     }
 }
