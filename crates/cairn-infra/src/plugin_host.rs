@@ -12,13 +12,13 @@ use serde::Deserialize;
 
 use crate::PinnedHash;
 use cairn_plugin_protocol::{
-    write_message, CairnEvent, CairnEventKind, Capability, CommandDecl, DeleteNoteParams, Incoming,
-    InitializeParams, InitializeResult, InvokeParams, ListNotesResult, Manifest, NoteSummaryDto,
-    ProcessContentParams, ProcessContentResult, ProcessorDecl, ReadNoteParams, ReadNoteResult,
-    Request, Response, RpcError, SearchHitDto, SearchParams, SearchResultDto, WriteNoteParams,
-    CALLBACK_DENIED, CALLBACK_FAILED, JSONRPC_VERSION, METHOD_CAIRN_EVENT, METHOD_DELETE_NOTE,
-    METHOD_INITIALIZE, METHOD_INVOKE, METHOD_LIST_NOTES, METHOD_PROCESS_CONTENT, METHOD_READ_NOTE,
-    METHOD_SEARCH, METHOD_WRITE_NOTE,
+    write_message, AgentParams, AgentResult, CairnEvent, CairnEventKind, Capability, CommandDecl,
+    DeleteNoteParams, Incoming, InitializeParams, InitializeResult, InvokeParams, ListNotesResult,
+    Manifest, NoteSummaryDto, ProcessContentParams, ProcessContentResult, ProcessorDecl,
+    ReadNoteParams, ReadNoteResult, Request, Response, RpcError, SearchHitDto, SearchParams,
+    SearchResultDto, WriteNoteParams, CALLBACK_DENIED, CALLBACK_FAILED, JSONRPC_VERSION,
+    METHOD_AGENT, METHOD_CAIRN_EVENT, METHOD_DELETE_NOTE, METHOD_INITIALIZE, METHOD_INVOKE,
+    METHOD_LIST_NOTES, METHOD_PROCESS_CONTENT, METHOD_READ_NOTE, METHOD_SEARCH, METHOD_WRITE_NOTE,
 };
 use cairn_ports::{
     AdapterError, EventDispatchError, PluginCallbacks, PluginCommand, PluginEvent, PluginHost,
@@ -66,6 +66,7 @@ fn required_cap(method: &str) -> Option<Capability> {
         METHOD_DELETE_NOTE => Some(Capability::VaultWrite),
         METHOD_SEARCH => Some(Capability::VaultRead),
         METHOD_LIST_NOTES => Some(Capability::VaultRead),
+        METHOD_AGENT => Some(Capability::Agent),
         _ => None,
     }
 }
@@ -628,6 +629,25 @@ impl LoadedPlugin {
                         };
                         resp.result = serde_json::to_value(dto).ok();
                     }
+                    Err(e) => {
+                        resp.error = Some(RpcError {
+                            code: CALLBACK_FAILED,
+                            message: e.to_string(),
+                        });
+                    }
+                },
+                METHOD_AGENT => match serde_json::from_value::<AgentParams>(cb.params.clone()) {
+                    Ok(p) => match callbacks.run_agent(&p.prompt) {
+                        Ok(answer) => {
+                            resp.result = serde_json::to_value(AgentResult { answer }).ok();
+                        }
+                        Err(e) => {
+                            resp.error = Some(RpcError {
+                                code: CALLBACK_FAILED,
+                                message: e.to_string(),
+                            });
+                        }
+                    },
                     Err(e) => {
                         resp.error = Some(RpcError {
                             code: CALLBACK_FAILED,
@@ -1259,6 +1279,27 @@ mod tests {
             SandboxCapabilities { net: false }
         );
         assert_eq!(super::sandbox_caps(&[]), SandboxCapabilities::default());
+    }
+
+    #[test]
+    fn required_cap_gates_agent() {
+        use cairn_plugin_protocol::METHOD_AGENT;
+        assert_eq!(super::required_cap(METHOD_AGENT), Some(Capability::Agent));
+    }
+
+    #[test]
+    fn agent_is_host_only_not_a_sandbox_cap() {
+        use cairn_ports::SandboxCapabilities;
+        // `agent` opens no network in the jail: the host makes the model call.
+        assert_eq!(
+            super::sandbox_caps(&[Capability::Agent]),
+            SandboxCapabilities { net: false }
+        );
+        // net still opens it.
+        assert_eq!(
+            super::sandbox_caps(&[Capability::Net]),
+            SandboxCapabilities { net: true }
+        );
     }
 
     #[test]
