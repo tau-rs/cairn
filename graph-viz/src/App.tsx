@@ -103,7 +103,7 @@ export default function App() {
     }
   };
 
-  const label = (r?: Revision) => (r ? `${r.id.slice(0, 7)} · ${new Date(Number(r.timestamp_secs) * 1000).toISOString().slice(0, 10)} · ${r.message}` : "");
+  const label = (r?: Revision) => (r ? `${r.id.slice(0, 7)} · ${new Date(r.timestamp_secs * 1000).toISOString().slice(0, 10)} · ${r.message}` : "");
   const maxIdx = Math.max(0, timeline.length - 1);
 
   return (
