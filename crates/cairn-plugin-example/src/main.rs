@@ -24,6 +24,11 @@ struct QueryArgs {
     query: String,
 }
 
+#[derive(Deserialize)]
+struct AskArgs {
+    prompt: String,
+}
+
 fn main() {
     // Test fixture: `--init-delay-ms=<N>` sleeps before the stdio loop starts, so
     // the host's one-time `initialize` handshake is delayed by ~N ms. Used to
@@ -62,6 +67,11 @@ fn main() {
     plugin.command("find", "Find", |a: QueryArgs, host: &mut Host| {
         let hits = host.search(&a.query)?;
         Ok(json!({ "hits": hits.len() }))
+    });
+
+    plugin.command("ask", "Ask agent", |a: AskArgs, host: &mut Host| {
+        let answer = host.agent(&a.prompt)?;
+        Ok(json!({ "answer": answer }))
     });
 
     plugin.command(
