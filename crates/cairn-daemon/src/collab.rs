@@ -352,6 +352,15 @@ pub(crate) fn fold_foreign(collab: &Collab, path: &NotePath, foreign: &str) {
         return;
     };
     let base = sess.last_written.clone();
+    // Spec §13.3: if the live replica already diverged from the baseline (a peer
+    // edited concurrently), the block-diff falls back to content-matching; make
+    // that observable.
+    if sess.doc.materialize() != base {
+        tracing::warn!(
+            note = %path.as_str(),
+            "collab fold-back: live replica diverged from baseline; content-match fallback"
+        );
+    }
     let ops = sess.doc.fold_foreign(&base, foreign);
     for op in ops {
         let _ = sess.peers.send(Fanout {
@@ -371,7 +380,7 @@ pub(crate) fn fold_foreign(collab: &Collab, path: &NotePath, foreign: &str) {
 
 /// Whether a live session is open on this note (the daemon owns `N.md`).
 #[must_use]
-pub fn is_sessioned(collab: &Collab, path: &NotePath) -> bool {
+pub(crate) fn is_sessioned(collab: &Collab, path: &NotePath) -> bool {
     lock(collab).contains_key(path)
 }
 
@@ -379,7 +388,7 @@ pub fn is_sessioned(collab: &Collab, path: &NotePath) -> bool {
 /// the session's baseline, mark it dirty so the flush pass folds it (spec §13.5).
 /// A no-op when there is no session or when `disk` equals the last self-write
 /// (echo suppression — the daemon's own materialize writes must not re-arm it).
-pub fn note_foreign_edit(collab: &Collab, path: &NotePath, disk: &str) {
+pub(crate) fn note_foreign_edit(collab: &Collab, path: &NotePath, disk: &str) {
     let mut reg = lock(collab);
     if let Some(sess) = reg.get_mut(path) {
         if sess.last_written != disk {
