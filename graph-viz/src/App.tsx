@@ -92,8 +92,9 @@ export default function App() {
 
   const switchMode = (m: Mode) => {
     setMode(m);
+    // Leaving diff mode: drop the diff tint so it can't linger into live/scrub.
+    if (m !== "diff") setDiffByPath(undefined);
     if (m === "live") {
-      setDiffByPath(undefined);
       void run(async (isStale) => {
         const g = await getGraph();
         if (isStale()) return;

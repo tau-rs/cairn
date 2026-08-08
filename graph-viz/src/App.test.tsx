@@ -1,7 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 
-vi.mock("./graph/GraphView", () => ({ default: () => <div data-testid="graph" /> }));
+const graphProps: { current: any } = { current: null };
+vi.mock("./graph/GraphView", () => ({
+  default: (p: any) => {
+    graphProps.current = p;
+    return <div data-testid="graph" />;
+  },
+}));
 vi.mock("./client/daemonClient", () => ({
   getGraph: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
   graphAt: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
@@ -56,5 +62,18 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: /live/i }));
     // Live re-fetches the HEAD graph (and clears any diff overlay).
     await waitFor(() => expect(client.getGraph).toHaveBeenCalledTimes(2));
+  });
+
+  it("clears the diff tint when switching from diff back to scrub", async () => {
+    render(<App />);
+    await waitFor(() => expect(client.vaultHistory).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: /diff/i }));
+    const [fromSlider, toSlider] = await screen.findAllByRole("slider");
+    fireEvent.change(fromSlider, { target: { value: "0" } });
+    fireEvent.change(toSlider, { target: { value: "2" } });
+    fireEvent.mouseUp(toSlider);
+    await waitFor(() => expect(graphProps.current.diffByPath).toBeInstanceOf(Map)); // tint applied
+    fireEvent.click(screen.getByRole("button", { name: /scrub/i }));
+    expect(graphProps.current.diffByPath).toBeUndefined(); // tint cleared on leaving diff
   });
 });

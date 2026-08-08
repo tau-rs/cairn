@@ -27,6 +27,24 @@ describe("buildDiffGraph", () => {
     expect(ecls).toContain("keep.md->gone.md:removed");
   });
 
+  it("classifies an added edge already present in base via the map, without duplicating it", () => {
+    const base = {
+      nodes: [n("a.md"), n("b.md")],
+      edges: [{ from: "a.md", to: "b.md" }],
+    };
+    const diff = {
+      nodesAdded: [],
+      nodesChanged: [],
+      nodesRemoved: [],
+      edgesAdded: [{ from: "a.md", to: "b.md" }], // already in base at `to`
+      edgesRemoved: [],
+    };
+    const g = buildDiffGraph(base, diff);
+    const ab = g.edges.filter((e) => e.from === "a.md" && e.to === "b.md");
+    expect(ab).toHaveLength(1); // classified once, not re-appended
+    expect(ab[0].diff).toBe("added"); // via the base.edges map, not the ghost push
+  });
+
   it("exposes a color per class", () => {
     expect(DIFF_COLORS.added).toBeTruthy();
     expect(DIFF_COLORS.removed).toBeTruthy();
