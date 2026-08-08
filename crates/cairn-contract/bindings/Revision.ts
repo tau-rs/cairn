@@ -14,8 +14,11 @@ id: string,
 message: string, 
 /**
  * Commit time, seconds since the Unix epoch.
+ *
+ * Emitted to TS as `number`: Unix seconds fit safely under 2^53, and a
+ * `bigint` binding would force awkward coercion in the graph-viz UI.
  */
-timestamp_secs: bigint, 
+timestamp_secs: number, 
 /**
  * Author name.
  */
