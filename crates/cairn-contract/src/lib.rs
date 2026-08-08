@@ -492,6 +492,10 @@ pub struct Revision {
     /// Commit summary (first line).
     pub message: String,
     /// Commit time, seconds since the Unix epoch.
+    ///
+    /// Emitted to TS as `number`: Unix seconds fit safely under 2^53, and a
+    /// `bigint` binding would force awkward coercion in the graph-viz UI.
+    #[ts(type = "number")]
     pub timestamp_secs: i64,
     /// Author name.
     pub author: String,
