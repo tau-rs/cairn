@@ -64,7 +64,7 @@ fn plugin_add_lands_untrusted_and_prints_snippet() {
         .assert()
         .success()
         .stdout(contains("demo"))
-        .stdout(contains("no"));
+        .stdout(contains("untrusted"));
 
     Command::cargo_bin("cairn")
         .unwrap()

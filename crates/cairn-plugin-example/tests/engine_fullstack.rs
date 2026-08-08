@@ -46,7 +46,7 @@ impl Sandbox for PermissiveSandbox {
 
 /// Write `<vault>/.cairn/plugins/example/manifest.toml` pointing at the built
 /// example binary with the given capability list (TOML array body, e.g.
-/// `"\"fs:write\""`).
+/// `"\"vault:write\""`).
 ///
 /// The command path goes in a TOML *literal* (single-quoted) string: on Windows
 /// the path contains backslashes, which a basic `"..."` string would treat as
@@ -84,7 +84,7 @@ fn engine_with_real_plugin(vault_root: &Path) -> Engine {
 fn invoke_writenote_persists_to_vault_and_emits_event() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
-    write_manifest(root, "\"fs:write\"");
+    write_manifest(root, "\"vault:write\"");
     let mut engine = engine_with_real_plugin(root);
 
     // Sanity: the real subprocess handshake declared its command.
@@ -133,8 +133,8 @@ fn dispatch_event_routes_handler_write_through_real_engine() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     // The example's `on_event` handler writes a marker note via `write_note`, so
-    // it needs both the `events` subscription and `fs:write`.
-    write_manifest(root, "\"events\", \"fs:write\"");
+    // it needs both the `vault:events` subscription and `vault:write`.
+    write_manifest(root, "\"vault:events\", \"vault:write\"");
     let mut engine = engine_with_real_plugin(root);
 
     // Deliver a cairn event to the subscribed subprocess plugin. Its handler
