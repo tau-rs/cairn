@@ -161,6 +161,9 @@ async fn run() -> Result<(), String> {
         tracing::info!("mcp: /mcp read-only (pass --mcp-write to enable note mutation)");
     }
 
+    // Back the plugin `host/agent` callback with the same runtime as `/ask`.
+    engine.set_runtime(runtime.clone());
+
     let state = AppState::new(engine)
         .with_allowed_origins(cors_origins.clone())
         .with_token(token)

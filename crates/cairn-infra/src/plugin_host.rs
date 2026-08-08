@@ -128,6 +128,11 @@ impl PluginCallbacks for ReadOnlyCallbacks<'_> {
             "delete not permitted during content processing".into(),
         ))
     }
+    fn run_agent(&mut self, _prompt: &str) -> Result<String, PortError> {
+        Err(PortError::Adapter(
+            "agent not permitted during content processing".into(),
+        ))
+    }
 }
 
 /// One entry in `[plugins].trusted`. Untagged so both the bare string form
@@ -1314,12 +1319,16 @@ mod tests {
             fn delete_note(&mut self, _: &str) -> Result<(), PortError> {
                 Ok(())
             }
+            fn run_agent(&mut self, _: &str) -> Result<String, PortError> {
+                Ok(String::new())
+            }
         }
         let mut inner = Cb { read_calls: 0 };
         let mut ro = ReadOnlyCallbacks(&mut inner);
         assert_eq!(ro.read_note("a.md").unwrap(), "body");
         assert!(ro.write_note("a.md", "x").is_err());
         assert!(ro.delete_note("a.md").is_err());
+        assert!(ro.run_agent("hi").is_err());
         assert_eq!(inner.read_calls, 1);
     }
 }
