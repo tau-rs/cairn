@@ -362,6 +362,7 @@ pub(crate) fn fold_foreign(collab: &Collab, path: &NotePath, foreign: &str) {
         );
     }
     let ops = sess.doc.fold_foreign(&base, foreign);
+    let produced = !ops.is_empty();
     for op in ops {
         let _ = sess.peers.send(Fanout {
             origin: DAEMON_REPLICA,
@@ -373,9 +374,17 @@ pub(crate) fn fold_foreign(collab: &Collab, path: &NotePath, foreign: &str) {
     }
     // The consumed disk bytes are the new baseline: a re-fold on the next pass
     // diffs foreign→newer-foreign, never re-minting these Insert IDs (spec §13.1).
+    // Always reconcile the baseline — even for a fold that produced no ops (a
+    // foreign edit differing only in whitespace that normalizes away) — so the
+    // same divergence is not re-detected on every subsequent pass.
     sess.last_written = foreign.to_string();
-    sess.dirty = true;
-    sess.last_op = Instant::now();
+    // Only re-arm the flush when the fold actually changed the doc; a zero-op fold
+    // has nothing to rewrite, so it must not trigger a needless `collab sync`
+    // commit. Never *clears* dirty, so a real pending edit still flushes.
+    if produced {
+        sess.dirty = true;
+        sess.last_op = Instant::now();
+    }
 }
 
 /// Whether a live session is open on this note (the daemon owns `N.md`).
@@ -612,6 +621,31 @@ mod flush_tests {
             fanout_op(&f),
             Some(cairn_domain::BlockOp::Insert { .. })
         ));
+    }
+
+    #[test]
+    fn fold_foreign_whitespace_only_edit_does_not_mark_dirty() {
+        let reg = registry();
+        let p = NotePath::new("n.md").unwrap();
+        // Clean session; baseline is the canonical two-block form.
+        insert_seeded_session(&reg, &p, "a\n\nb\n", false);
+        add_participant(&reg, &p, 7);
+        let mut rx = test_subscribe(&reg, &p);
+
+        // Foreign edit differs only in whitespace that normalizes away (extra
+        // blank separator lines): parse_blocks yields the same block texts, so
+        // the fold produces zero ops.
+        fold_foreign(&reg, &p, "a\n\n\n\nb\n");
+
+        let reg = lock(&reg);
+        let sess = reg.get(&p).unwrap();
+        // No semantic change ⇒ session must NOT be re-armed for a rewrite/commit.
+        assert!(!sess.dirty, "whitespace-only fold must not mark dirty");
+        // But the baseline IS reconciled to the consumed bytes, so the divergence
+        // is not re-detected on every subsequent pass.
+        assert_eq!(sess.last_written, "a\n\n\n\nb\n");
+        // Nothing was fanned out to peers.
+        assert!(rx.try_recv().is_err(), "a zero-op fold fans out nothing");
     }
 
     #[test]
