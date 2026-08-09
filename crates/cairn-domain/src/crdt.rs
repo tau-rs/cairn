@@ -455,6 +455,31 @@ impl BlockDoc {
             .map(|e| e.stash.clone())
             .unwrap_or_default()
     }
+
+    /// Content versions retained in the CRDT but NOT shown by `materialize()`:
+    /// a live block's stashed losers (its winner is already visible), or ALL of a
+    /// tombstoned block's content (winner + losers, since nothing is materialized).
+    /// This is what makes a concurrently-edited-then-deleted block — or a foreign
+    /// `SetContent` folded onto a live-deleted block — recoverable rather than
+    /// silently lost (spec §3.2). Convergent by construction: a pure function of
+    /// the (convergent) content register + tombstone, so equal replica state gives
+    /// equal output — the `Delete` arm deliberately moves nothing (stashing at
+    /// delete time would be order-dependent and diverge). It surfaces a tombstoned
+    /// block's content whether or not the delete was truly concurrent with an edit
+    /// (distinguishing them needs causality we don't track); over-preserving is
+    /// consistent with the floor.
+    #[must_use]
+    pub fn recoverable(&self, id: BlockId) -> Vec<String> {
+        let Some(e) = self.entries.get(&id) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        if e.tombstone {
+            out.push(e.text.clone());
+        }
+        out.extend(e.stash.iter().cloned());
+        out
+    }
 }
 
 /// A resolved fold action, planned in pass 1 and applied in pass 2 of
@@ -864,5 +889,104 @@ mod tests {
         let out = doc.materialize();
         assert!(out.contains("c from disk"), "foreign addition preserved");
         assert!(out.contains("a"), "untouched block preserved");
+    }
+
+    fn sorted(mut v: Vec<String>) -> Vec<String> {
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn deleted_block_keeps_concurrent_edit_recoverable_either_order() {
+        // A block is concurrently edited (SetContent) and deleted (Delete). The
+        // edit must survive as recoverable regardless of op arrival order — a
+        // convergent realization of the "never lose work" floor (spec §3.2).
+        let run = |set_first: bool| {
+            let mut d = BlockDoc::from_markdown(1, "orig\n");
+            let id = d.block_ids_in_order()[0];
+            let set = BlockOp::SetContent {
+                id,
+                text: "edited".into(),
+                lamport: 5,
+                author: Author::Human,
+            };
+            let del = BlockOp::Delete { id, lamport: 6 };
+            if set_first {
+                d.merge(set);
+                d.merge(del);
+            } else {
+                d.merge(del);
+                d.merge(set);
+            }
+            (d.materialize(), sorted(d.recoverable(id)))
+        };
+        let (mat_a, rec_a) = run(true);
+        let (mat_b, rec_b) = run(false);
+        assert_eq!(mat_a, ""); // remove-wins: the block is gone from the doc
+        assert_eq!(mat_a, mat_b); // materialize converges
+        assert_eq!(rec_a, rec_b); // recovery set converges
+        assert!(rec_a.contains(&"edited".to_string()), "edit not lost");
+    }
+
+    #[test]
+    fn foreign_set_content_onto_deleted_block_is_recoverable() {
+        // Symmetric case: a live user deletes a block; a folded foreign edit then
+        // SetContents it. The foreign winner lands in a tombstoned entry — never
+        // materialized, but recoverable, both orders.
+        let run = |del_first: bool| {
+            let mut d = BlockDoc::from_markdown(1, "orig\n");
+            let id = d.block_ids_in_order()[0];
+            let del = BlockOp::Delete { id, lamport: 4 };
+            let set = BlockOp::SetContent {
+                id,
+                text: "foreign edit".into(),
+                lamport: 9,
+                author: Author::Human,
+            };
+            if del_first {
+                d.merge(del);
+                d.merge(set);
+            } else {
+                d.merge(set);
+                d.merge(del);
+            }
+            (d.materialize(), sorted(d.recoverable(id)))
+        };
+        let (mat_a, rec_a) = run(true);
+        let (mat_b, rec_b) = run(false);
+        assert_eq!(mat_a, "");
+        assert_eq!(mat_a, mat_b);
+        assert_eq!(rec_a, rec_b);
+        assert!(
+            rec_a.contains(&"foreign edit".to_string()),
+            "foreign edit onto a deleted block not lost"
+        );
+    }
+
+    #[test]
+    fn recoverable_on_live_block_returns_only_losers() {
+        // A live (non-tombstoned) block's winner is already in materialize(), so
+        // recoverable() surfaces only the stashed losers, never the visible text.
+        let mut doc = BlockDoc::from_markdown(1, "orig\n");
+        let id = doc.block_ids_in_order()[0];
+        doc.merge(BlockOp::SetContent {
+            id,
+            text: "loser".into(),
+            lamport: 5,
+            author: Author::Human,
+        });
+        doc.merge(BlockOp::SetContent {
+            id,
+            text: "winner".into(),
+            lamport: 7,
+            author: Author::Human,
+        });
+        assert_eq!(doc.materialize(), "winner\n");
+        let rec = doc.recoverable(id);
+        assert!(
+            !rec.contains(&"winner".to_string()),
+            "winner is visible, not recovery"
+        );
+        assert!(rec.contains(&"loser".to_string()), "loser is recoverable");
     }
 }
