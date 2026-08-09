@@ -73,6 +73,16 @@ pub enum Edit {
     },
 }
 
+/// One block's recoverable content: versions retained by the CRDT but not shown
+/// by `materialize()`. `tombstoned` distinguishes a deleted block (versions = its
+/// former content) from a live block (versions = stashed LWW losers).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoverableBlock {
+    pub id: BlockId,
+    pub tombstoned: bool,
+    pub versions: Vec<String>,
+}
+
 /// Internal per-block state.
 #[derive(Debug, Clone)]
 struct Entry {
@@ -478,6 +488,44 @@ impl BlockDoc {
             out.push(e.text.clone());
         }
         out.extend(e.stash.iter().cloned());
+        out
+    }
+
+    /// Every block with non-empty `recoverable` content, for a recovery view.
+    /// Order is deterministic and convergent: live blocks in materialized order
+    /// first, then tombstoned blocks by ascending id.
+    #[must_use]
+    pub fn recoverable_blocks(&self) -> Vec<RecoverableBlock> {
+        let mut out = Vec::new();
+        // Live blocks, in materialized document order.
+        for id in self.block_ids_in_order() {
+            let versions = self.recoverable(id);
+            if !versions.is_empty() {
+                out.push(RecoverableBlock {
+                    id,
+                    tombstoned: false,
+                    versions,
+                });
+            }
+        }
+        // Tombstoned blocks, by ascending id (block_ids_in_order excludes them).
+        let mut dead: Vec<BlockId> = self
+            .entries
+            .values()
+            .filter(|e| e.tombstone)
+            .map(|e| e.id)
+            .collect();
+        dead.sort();
+        for id in dead {
+            let versions = self.recoverable(id);
+            if !versions.is_empty() {
+                out.push(RecoverableBlock {
+                    id,
+                    tombstoned: true,
+                    versions,
+                });
+            }
+        }
         out
     }
 }
@@ -988,5 +1036,42 @@ mod tests {
             "winner is visible, not recovery"
         );
         assert!(rec.contains(&"loser".to_string()), "loser is recoverable");
+    }
+
+    #[test]
+    fn recoverable_blocks_enumerates_losers_and_tombstoned() {
+        // Block 0: live, carries a stashed LWW loser. Block 1: deleted with content.
+        let mut doc = BlockDoc::from_markdown(1, "keep\n\ndrop\n");
+        let ids = doc.block_ids_in_order();
+        let (keep, drop) = (ids[0], ids[1]);
+        // Stash a loser on the live block: a lower-ranked SetContent loses to the seed's Human rank.
+        doc.merge(BlockOp::SetContent {
+            id: keep,
+            text: "loser".into(),
+            lamport: 3,
+            author: Author::Agent,
+        });
+        // Delete the second block (its content stays recoverable).
+        doc.merge(BlockOp::Delete {
+            id: drop,
+            lamport: 9,
+        });
+
+        let rec = doc.recoverable_blocks();
+        assert_eq!(rec.len(), 2);
+        // Live block first (materialized order), then tombstoned.
+        assert_eq!(rec[0].id, keep);
+        assert!(!rec[0].tombstoned);
+        assert!(rec[0].versions.contains(&"loser".to_string()));
+        assert!(!rec[0].versions.contains(&"keep".to_string())); // winner is visible, not recovery
+        assert_eq!(rec[1].id, drop);
+        assert!(rec[1].tombstoned);
+        assert!(rec[1].versions.contains(&"drop".to_string()));
+    }
+
+    #[test]
+    fn recoverable_blocks_empty_when_nothing_retained() {
+        let doc = BlockDoc::from_markdown(1, "a\n\nb\n");
+        assert!(doc.recoverable_blocks().is_empty());
     }
 }

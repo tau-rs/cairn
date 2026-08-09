@@ -14,6 +14,6 @@ pub mod block;
 pub use block::{Block, BlockKind};
 
 pub mod crdt;
-pub use crdt::{Author, BlockDoc, BlockId, BlockOp, Edit};
+pub use crdt::{Author, BlockDoc, BlockId, BlockOp, Edit, RecoverableBlock};
 
 mod blockdiff;
