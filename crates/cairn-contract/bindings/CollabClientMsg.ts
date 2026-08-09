@@ -4,4 +4,4 @@ import type { WireBlockOp } from "./WireBlockOp";
 /**
  * Messages a collaboration client sends to the daemon over `/collab`.
  */
-export type CollabClientMsg = { "type": "join", note: string, replica: bigint, } | { "type": "op", note: string, op: WireBlockOp, } | { "type": "leave", note: string, };
+export type CollabClientMsg = { "type": "join", note: string, replica: bigint, } | { "type": "op", note: string, op: WireBlockOp, } | { "type": "leave", note: string, } | { "type": "recover", note: string, };

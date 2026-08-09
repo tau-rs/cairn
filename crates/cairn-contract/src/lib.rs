@@ -657,6 +657,17 @@ pub enum WireBlockOp {
     },
 }
 
+/// One block's recoverable content on the wire (mirror of `cairn-domain`
+/// `RecoverableBlock`). `id` is the shared live-only block id, so a joined
+/// client correlates it with blocks it already knows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WireRecoverableBlock {
+    pub id: WireBlockId,
+    pub tombstoned: bool,
+    pub versions: Vec<String>,
+}
+
 /// Messages a collaboration client sends to the daemon over `/collab`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -668,6 +679,9 @@ pub enum CollabClientMsg {
     Op { note: String, op: WireBlockOp },
     /// Unsubscribe from `note`.
     Leave { note: String },
+    /// Ask for the note's recoverable content (view-only; answered to this
+    /// socket only, never fanned out).
+    Recover { note: String },
 }
 
 /// Messages the daemon sends to a collaboration client over `/collab`.
@@ -683,6 +697,11 @@ pub enum CollabServerMsg {
     Op { note: String, op: WireBlockOp },
     /// A per-note error (e.g. replica-id collision, bad path).
     Error { note: String, message: String },
+    /// The note's recoverable content, in reply to `Recover`.
+    Recoverable {
+        note: String,
+        blocks: Vec<WireRecoverableBlock>,
+    },
 }
 
 #[cfg(test)]
@@ -1161,6 +1180,36 @@ mod collab_wire_tests {
         };
         let text = serde_json::to_string(&msg).unwrap();
         let back: CollabClientMsg = serde_json::from_str(&text).unwrap();
+        assert_eq!(msg, back);
+    }
+
+    #[test]
+    fn recover_request_serde_round_trips() {
+        let msg = CollabClientMsg::Recover {
+            note: "n.md".into(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"recover\""));
+        let back: CollabClientMsg = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg, back);
+    }
+
+    #[test]
+    fn recoverable_response_serde_round_trips() {
+        let msg = CollabServerMsg::Recoverable {
+            note: "n.md".into(),
+            blocks: vec![WireRecoverableBlock {
+                id: WireBlockId {
+                    replica: 1,
+                    counter: 2,
+                },
+                tombstoned: true,
+                versions: vec!["old".into(), "older".into()],
+            }],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"recoverable\""));
+        let back: CollabServerMsg = serde_json::from_str(&json).unwrap();
         assert_eq!(msg, back);
     }
 }
