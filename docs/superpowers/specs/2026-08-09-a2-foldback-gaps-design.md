@@ -80,11 +80,16 @@ floor, so a plain delete's content also reads as recoverable. This is intended.
 
 ### Ordering note
 
-The `Vec` order of `recoverable` (and of `stash` generally) is push-order and is
-not guaranteed byte-for-byte identical across replicas in the multi-loser case —
-a pre-existing property of `stash`. The **set** of retained versions converges,
-which is what the floor requires. Tests compare sorted output, not `Vec`
-equality, to reflect this.
+`stash` is a `BTreeSet<(author_rank, lamport, text)>`, so the order of
+`recoverable` (and of `stashed`) is a pure function of content — byte-for-byte
+identical across replicas in the multi-loser case, not merely set-equal. Each
+loser is keyed by its own `(author_rank, lamport, text)`, so the same text lands
+under the same key whichever side lost; re-applying a losing op is idempotent
+(the set dedups). Tests assert `Vec` equality across merge orders, not just
+sorted-set equality.
+
+(Historical: the stash was originally a push-ordered `Vec<String>` that converged
+only as a set; the ordering was hardened to the current keyed set.)
 
 ### Tests
 
