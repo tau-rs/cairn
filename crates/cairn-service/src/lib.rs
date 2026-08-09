@@ -651,6 +651,18 @@ fn block_kind_from_wire(k: cairn_contract::WireBlockKind) -> cairn_domain::block
     }
 }
 
+/// Map a domain `RecoverableBlock` to its wire mirror.
+#[must_use]
+pub fn recoverable_block_to_wire(
+    b: cairn_domain::RecoverableBlock,
+) -> cairn_contract::WireRecoverableBlock {
+    cairn_contract::WireRecoverableBlock {
+        id: block_id_to_wire(b.id),
+        tombstoned: b.tombstoned,
+        versions: b.versions,
+    }
+}
+
 /// Map a domain `BlockOp` to its wire mirror (the only CRDT type on the wire).
 #[must_use]
 pub fn block_op_to_wire(op: cairn_domain::BlockOp) -> cairn_contract::WireBlockOp {
@@ -1848,5 +1860,27 @@ mod augmented_answer_tests {
             let round = block_op_from_wire(block_op_to_wire(op.clone()));
             assert_eq!(op, round);
         }
+    }
+
+    #[test]
+    fn recoverable_block_maps_to_wire() {
+        let domain = cairn_domain::RecoverableBlock {
+            id: cairn_domain::BlockId {
+                replica: 4,
+                counter: 7,
+            },
+            tombstoned: true,
+            versions: vec!["v1".into(), "v2".into()],
+        };
+        let wire = recoverable_block_to_wire(domain);
+        assert_eq!(
+            wire.id,
+            cairn_contract::WireBlockId {
+                replica: 4,
+                counter: 7
+            }
+        );
+        assert!(wire.tombstoned);
+        assert_eq!(wire.versions, vec!["v1".to_string(), "v2".to_string()]);
     }
 }
