@@ -287,6 +287,19 @@ pub fn dispatch_query(engine: &Engine, query: &Query) -> Result<QueryResponse, S
                 .collect();
             Ok(QueryResponse::History { revisions })
         }
+        Query::StructuralRevisions { limit } => {
+            let revisions = engine
+                .structural_revisions(*limit)?
+                .into_iter()
+                .map(|r| Revision {
+                    id: r.id,
+                    message: r.message,
+                    timestamp_secs: r.timestamp_secs,
+                    author: r.author,
+                })
+                .collect();
+            Ok(QueryResponse::History { revisions })
+        }
         Query::NoteAt { path, revision } => {
             let p = parse_path(path)?;
             let contents = engine.note_at(&p, revision)?;
@@ -1317,6 +1330,24 @@ mod tests {
         };
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0].message, "add b");
+    }
+
+    #[test]
+    fn structural_revisions_dispatches_to_history() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut ev = Vec::new();
+        let a = cairn_domain::NotePath::new("a.md").unwrap();
+        eng.write_note(&a, "hello", &mut ev).unwrap();
+        eng.commit("c1", &mut ev).unwrap(); // node added -> structural
+
+        match dispatch_query(&eng, &Query::StructuralRevisions { limit: None }).unwrap() {
+            QueryResponse::History { revisions } => {
+                assert_eq!(revisions.len(), 1);
+                assert_eq!(revisions[0].message, "c1");
+            }
+            other => panic!("expected History, got {other:?}"),
+        }
     }
 
     #[test]
