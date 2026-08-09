@@ -307,7 +307,26 @@ impl AppState {
         let items = collab::drain_due(&self.collab, debounce);
         for item in items {
             let mut guard = self.engine();
-            let disk = guard.read_note(&item.path).unwrap_or_default();
+            // A read error must NOT be treated as an empty foreign edit: folding
+            // against "" tombstones every block, and the next pass then writes and
+            // commits an empty file — wiping a sessioned note (its content survives
+            // only in git history). A brand-new note (nothing on disk yet, empty
+            // baseline) legitimately reads as empty; an existing note that is
+            // momentarily unreadable or was deleted out from under the session is
+            // skipped this pass, preserving the live in-memory content.
+            let disk = match guard.read_note(&item.path) {
+                Ok(text) => text,
+                Err(_) if item.baseline.is_empty() => String::new(),
+                Err(e) => {
+                    drop(guard);
+                    tracing::warn!(
+                        note = %item.path.as_str(),
+                        error = %e,
+                        "collab flush: note unreadable/absent; skipping to preserve live content"
+                    );
+                    continue;
+                }
+            };
             if disk != item.baseline {
                 // Release the engine lock before taking the collab lock, then fold
                 // the foreign on-disk edit into the live replica and fan it out
@@ -1064,5 +1083,54 @@ mod collab_flush_tests {
             .note_at(&path, "HEAD")
             .unwrap()
             .contains("uncommitted"));
+    }
+
+    #[test]
+    fn flush_does_not_wipe_a_sessioned_note_when_the_file_is_deleted() {
+        // Regression: `run_collab_flush_pass` read the file with
+        // `read_note(...).unwrap_or_default()`, so an external delete (or a
+        // transient read error) of a sessioned note yielded disk="" != baseline →
+        // `fold_foreign(.., "")` tombstoned every block and set last_written="",
+        // and the next pass wrote+committed an empty file, wiping the note. A read
+        // error must be skipped, never folded as an empty foreign edit.
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(engine_over(tmp.path()));
+        let path = NotePath::new("n.md").unwrap();
+
+        // Commit a real note to HEAD + disk, and open a session on it.
+        {
+            let mut guard = state.engine();
+            let mut tap = EventTap {
+                tx: state.events.clone(),
+                collected: Vec::new(),
+            };
+            guard.write_note(&path, "keep me\n", &mut tap).unwrap();
+            guard.commit("seed", &mut tap).unwrap();
+        }
+        collab::insert_dirty_session(&state.collab, &path, "keep me\n", vec![]);
+        collab::add_participant(&state.collab, &path, 1); // active session, not abandoned
+
+        // The file is deleted out from under the live session (read_note → NotFound).
+        std::fs::remove_file(tmp.path().join("n.md")).unwrap();
+
+        // Two passes: pre-fix, pass 1 folds "" → tombstones every block, pass 2
+        // writes the empty materialize and commits it. Neither may destroy the note.
+        state.run_collab_flush_pass(std::time::Duration::ZERO);
+        state.run_collab_flush_pass(std::time::Duration::ZERO);
+
+        // HEAD must still hold the content — no empty deletion commit landed — and
+        // the live session must be preserved rather than folded to nothing.
+        assert!(
+            state
+                .engine()
+                .note_at(&path, "HEAD")
+                .unwrap()
+                .contains("keep me"),
+            "HEAD must not be overwritten with an empty file after an external delete"
+        );
+        assert!(
+            collab::is_sessioned(&state.collab, &path),
+            "the session must survive an external delete, not be wiped"
+        );
     }
 }
