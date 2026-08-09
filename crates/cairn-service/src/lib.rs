@@ -602,7 +602,7 @@ fn block_id_to_wire(id: cairn_domain::BlockId) -> cairn_contract::WireBlockId {
         counter: id.counter,
     }
 }
-fn block_id_from_wire(id: cairn_contract::WireBlockId) -> cairn_domain::BlockId {
+pub fn block_id_from_wire(id: cairn_contract::WireBlockId) -> cairn_domain::BlockId {
     cairn_domain::BlockId {
         replica: id.replica,
         counter: id.counter,
