@@ -4,7 +4,7 @@
 
 use crate::block::{join_blocks, BlockKind};
 use crate::blockdiff::DiffStep;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 /// Lamport timestamp.
 pub type Lamport = u64;
@@ -97,8 +97,11 @@ struct Entry {
     content_lamport: Lamport,
     content_author: Author,
     tombstone: bool,
-    /// Loser content versions retained on conflict (never silently dropped).
-    stash: Vec<String>,
+    /// Loser content versions retained on conflict (never silently dropped),
+    /// keyed by each loser's own `(author_rank, lamport, text)`. A `BTreeSet`
+    /// makes the stash order a pure function of content — independent of merge
+    /// order, so replicas converge byte-for-byte — and dedups re-applied ops.
+    stash: BTreeSet<(u8, Lamport, String)>,
 }
 
 /// A live, mergeable representation of one note's blocks.
@@ -140,7 +143,7 @@ impl BlockDoc {
                     content_lamport: doc.clock,
                     content_author: Author::Human,
                     tombstone: false,
-                    stash: Vec::new(),
+                    stash: BTreeSet::new(),
                 },
             );
             prev = Some(id);
@@ -191,7 +194,7 @@ impl BlockDoc {
                     content_lamport: lamport,
                     content_author: Author::Human,
                     tombstone: false,
-                    stash: Vec::new(),
+                    stash: BTreeSet::new(),
                 });
             }
             BlockOp::Delete { id, lamport } => {
@@ -299,18 +302,35 @@ impl BlockDoc {
         // loser's text is always stashed rather than dropped.
         let incoming = (author_rank(author), lamport);
         let current = (author_rank(e.content_author), e.content_lamport);
+        // Each stashed loser is keyed by ITS OWN (author_rank, lamport, text), so
+        // the same text always lands under the same key regardless of which side
+        // lost — making the stash a convergent set (see `Entry.stash`).
         match incoming.cmp(&current) {
             std::cmp::Ordering::Greater => {
-                e.stash.push(std::mem::replace(&mut e.text, text));
+                let displaced = (author_rank(e.content_author), e.content_lamport);
+                e.stash.insert((
+                    displaced.0,
+                    displaced.1,
+                    std::mem::replace(&mut e.text, text),
+                ));
                 e.content_author = author;
                 e.content_lamport = lamport;
             }
-            std::cmp::Ordering::Less => e.stash.push(text),
+            std::cmp::Ordering::Less => {
+                e.stash.insert((incoming.0, incoming.1, text));
+            }
             std::cmp::Ordering::Equal => match text.cmp(&e.text) {
                 std::cmp::Ordering::Greater => {
-                    e.stash.push(std::mem::replace(&mut e.text, text));
+                    let displaced = (author_rank(e.content_author), e.content_lamport);
+                    e.stash.insert((
+                        displaced.0,
+                        displaced.1,
+                        std::mem::replace(&mut e.text, text),
+                    ));
                 }
-                std::cmp::Ordering::Less => e.stash.push(text),
+                std::cmp::Ordering::Less => {
+                    e.stash.insert((incoming.0, incoming.1, text));
+                }
                 std::cmp::Ordering::Equal => {} // identical content: idempotent no-op
             },
         }
@@ -462,7 +482,7 @@ impl BlockDoc {
     pub fn stashed(&self, id: BlockId) -> Vec<String> {
         self.entries
             .get(&id)
-            .map(|e| e.stash.clone())
+            .map(|e| e.stash.iter().map(|(_, _, t)| t.clone()).collect())
             .unwrap_or_default()
     }
 
@@ -487,7 +507,7 @@ impl BlockDoc {
         if e.tombstone {
             out.push(e.text.clone());
         }
-        out.extend(e.stash.iter().cloned());
+        out.extend(e.stash.iter().map(|(_, _, t)| t.clone()));
         out
     }
 
@@ -1073,5 +1093,89 @@ mod tests {
     fn recoverable_blocks_empty_when_nothing_retained() {
         let doc = BlockDoc::from_markdown(1, "a\n\nb\n");
         assert!(doc.recoverable_blocks().is_empty());
+    }
+
+    #[test]
+    fn stash_order_is_convergent_across_merge_orders() {
+        // Multi-loser convergence: the SAME set of losing SetContent ops applied
+        // in DIFFERENT orders must yield byte-for-byte equal recovery output, not
+        // merely equal sets. The stash is ordered by (author_rank, lamport, text),
+        // a pure function of content, so it converges independently of merge order.
+        let build = |reversed: bool| {
+            let mut d = BlockDoc::from_markdown(1, "seed\n");
+            let id = d.block_ids_in_order()[0];
+            let mut ops = vec![
+                BlockOp::SetContent {
+                    id,
+                    text: "aaa".into(),
+                    lamport: 2,
+                    author: Author::Agent,
+                },
+                BlockOp::SetContent {
+                    id,
+                    text: "zzz".into(),
+                    lamport: 8,
+                    author: Author::Agent,
+                },
+                BlockOp::SetContent {
+                    id,
+                    text: "mmm".into(),
+                    lamport: 3,
+                    author: Author::Human,
+                },
+                BlockOp::SetContent {
+                    id,
+                    text: "WIN".into(),
+                    lamport: 20,
+                    author: Author::Human,
+                },
+            ];
+            if reversed {
+                ops.reverse();
+            }
+            for op in ops {
+                d.merge(op);
+            }
+            d
+        };
+        let fwd = build(false);
+        let rev = build(true);
+        let id = fwd.block_ids_in_order()[0];
+        assert_eq!(fwd.materialize(), "WIN\n");
+        assert_eq!(rev.materialize(), "WIN\n");
+        // Vec-equality, not just set-equality: (author_rank, lamport, text) order.
+        // Agent losers (rank 0) first, then Human losers (rank 1) by lamport.
+        let expected = vec![
+            "aaa".to_string(),  // (0, 2)
+            "zzz".to_string(),  // (0, 8)
+            "seed".to_string(), // (1, 1) — displaced seed
+            "mmm".to_string(),  // (1, 3)
+        ];
+        assert_eq!(fwd.recoverable(id), expected);
+        assert_eq!(rev.recoverable(id), expected);
+        assert_eq!(fwd.recoverable_blocks(), rev.recoverable_blocks());
+    }
+
+    #[test]
+    fn applying_a_losing_op_twice_leaves_stash_unchanged() {
+        // Idempotence: re-merging the same losing op must not duplicate its stash
+        // entry (a plain Vec push would; a keyed set dedups).
+        let mut doc = BlockDoc::from_markdown(1, "seed\n");
+        let id = doc.block_ids_in_order()[0];
+        let losing = BlockOp::SetContent {
+            id,
+            text: "loser".into(),
+            lamport: 3,
+            author: Author::Agent,
+        };
+        doc.merge(losing.clone());
+        let once = doc.stashed(id);
+        doc.merge(losing);
+        assert_eq!(
+            doc.stashed(id),
+            once,
+            "re-applying a losing op must not duplicate its stash entry"
+        );
+        assert_eq!(once, vec!["loser".to_string()]);
     }
 }
