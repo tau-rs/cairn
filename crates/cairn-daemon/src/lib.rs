@@ -438,6 +438,7 @@ fn query_kind(query: &Query) -> &'static str {
         Query::ListPlugins => "list_plugins",
         Query::NoteHistory { .. } => "note_history",
         Query::VaultHistory { .. } => "vault_history",
+        Query::StructuralRevisions { .. } => "structural_revisions",
         Query::NoteAt { .. } => "note_at",
         Query::GetSuggestions { .. } => "get_suggestions",
     }

@@ -126,6 +126,14 @@ pub enum Query {
         /// Max commits to return; `None` returns all.
         limit: Option<u32>,
     },
+    /// Vault revisions that changed the link graph — a note node or a link edge
+    /// added/removed — newest first, capped at `limit`. Metadata-only edits
+    /// (title, tags, body text with no link change) are excluded. The response
+    /// is a `QueryResponse::History`, like `VaultHistory`.
+    StructuralRevisions {
+        /// Max structural revisions to return; `None` returns all.
+        limit: Option<u32>,
+    },
     /// A note's contents at a past revision.
     NoteAt {
         /// Relative note path.

@@ -61,6 +61,10 @@ path: string, } | { "type": "vault_history",
 /**
  * Max commits to return; `None` returns all.
  */
+limit: number | null, } | { "type": "structural_revisions", 
+/**
+ * Max structural revisions to return; `None` returns all.
+ */
 limit: number | null, } | { "type": "note_at", 
 /**
  * Relative note path.
