@@ -233,6 +233,10 @@ where
                     });
                 }
             }
+            CollabClientMsg::Recover { note: _ } => {
+                // View-only recovery content request; handler implemented in Task 4.
+                // For now, silently ignore to unblock contract layer compilation.
+            }
         }
     }
 
