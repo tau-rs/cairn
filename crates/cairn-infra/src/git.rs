@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use cairn_ports::{AdapterError, HistoricalBlob, PortError, Revision, Vcs};
+use cairn_ports::{AdapterError, HistoricalBlob, MdCommit, PortError, Revision, Vcs};
 use git2::{Repository, Signature};
 
 fn adapt<E: std::error::Error + Send + Sync + 'static>(e: E) -> PortError {
@@ -19,6 +19,31 @@ fn commit_touched_path(commit: &git2::Commit, path: &Path) -> Result<bool, git2:
         let parent = commit.parent(i)?;
         let prev = parent.tree()?.get_path(path).ok().map(|e| e.id());
         if prev != cur {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Whether `commit`'s tree differs from `parent`'s in any `.md` path. For the
+/// root commit (`parent` = `None`), whether the tree contains any `.md` blob.
+fn tree_has_md_change(
+    repo: &Repository,
+    commit: &git2::Commit,
+    parent: Option<&git2::Commit>,
+) -> Result<bool, git2::Error> {
+    let new_tree = commit.tree()?;
+    let old_tree = match parent {
+        Some(p) => Some(p.tree()?),
+        None => None,
+    };
+    let diff = repo.diff_tree_to_tree(old_tree.as_ref(), Some(&new_tree), None)?;
+    for delta in diff.deltas() {
+        let is_md = [delta.new_file().path(), delta.old_file().path()]
+            .into_iter()
+            .flatten()
+            .any(|p| p.extension().is_some_and(|e| e == "md"));
+        if is_md {
             return Ok(true);
         }
     }
@@ -252,6 +277,39 @@ impl Vcs for GitVcs {
             .peel_to_blob()
             .map_err(|_| PortError::NotFound(format!("{path} at {revision} is not a file")))?;
         Ok(String::from_utf8_lossy(blob.content()).into_owned())
+    }
+
+    fn md_change_log(&self) -> Result<Vec<MdCommit>, PortError> {
+        let repo = Repository::open(&self.root).map_err(adapt)?;
+        let mut walk = repo.revwalk().map_err(adapt)?;
+        // No HEAD (empty repo) -> no history.
+        if walk.push_head().is_err() {
+            return Ok(Vec::new());
+        }
+        // TOPOLOGICAL keeps children before parents (newest first), matching
+        // vault_history even when commits share a timestamp.
+        walk.set_sorting(git2::Sort::TIME | git2::Sort::TOPOLOGICAL)
+            .map_err(adapt)?;
+        let mut out = Vec::new();
+        for oid in walk {
+            let oid = oid.map_err(adapt)?;
+            let commit = repo.find_commit(oid).map_err(adapt)?;
+            // First parent only: "what this commit changed on the mainline".
+            let parent = commit.parent(0).ok();
+            let md_changed = tree_has_md_change(&repo, &commit, parent.as_ref()).map_err(adapt)?;
+            out.push(MdCommit {
+                revision: Revision {
+                    id: oid.to_string()[..7].to_string(),
+                    message: commit.summary().ok().flatten().unwrap_or("").to_string(),
+                    timestamp_secs: commit.time().seconds(),
+                    author: commit.author().name().unwrap_or("").to_string(),
+                },
+                oid: oid.to_string(),
+                parent: parent.map(|p| p.id().to_string()),
+                md_changed,
+            });
+        }
+        Ok(out)
     }
 }
 
@@ -519,5 +577,42 @@ mod tests {
             vcs.read_tree_at("nope"),
             Err(PortError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn md_change_log_flags_md_and_non_md_commits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut vcs = GitVcs::open_or_init(tmp.path()).unwrap();
+        fs::write(tmp.path().join("a.md"), "v1").unwrap();
+        vcs.commit_all("add a.md").unwrap(); // root: .md present -> structural candidate
+        fs::write(tmp.path().join("config.txt"), "x").unwrap();
+        vcs.commit_all("add config").unwrap(); // no .md touched
+        fs::write(tmp.path().join("a.md"), "v2").unwrap();
+        vcs.commit_all("edit a.md").unwrap(); // .md touched
+
+        let log = vcs.md_change_log().unwrap();
+        assert_eq!(log.len(), 3);
+        // Newest-first.
+        assert_eq!(log[0].revision.message, "edit a.md");
+        assert!(log[0].md_changed);
+        assert_eq!(log[1].revision.message, "add config");
+        assert!(
+            !log[1].md_changed,
+            "a commit touching no .md is not a candidate"
+        );
+        assert_eq!(log[2].revision.message, "add a.md");
+        assert!(log[2].md_changed, "root commit adding a .md is a candidate");
+        // Shape: full oid, 7-char short id, parent linkage.
+        assert_eq!(log[0].oid.len(), 40);
+        assert_eq!(log[0].revision.id.len(), 7);
+        assert_eq!(log[0].parent.as_deref(), Some(log[1].oid.as_str()));
+        assert_eq!(log[2].parent, None, "root has no parent");
+    }
+
+    #[test]
+    fn md_change_log_empty_for_empty_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vcs = GitVcs::open_or_init(tmp.path()).unwrap();
+        assert!(vcs.md_change_log().unwrap().is_empty());
     }
 }

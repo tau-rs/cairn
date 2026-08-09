@@ -2347,6 +2347,9 @@ mod tests {
             self.tree_reads.fetch_add(1, Ord2::SeqCst);
             self.inner.read_tree_at(r)
         }
+        fn md_change_log(&self) -> Result<Vec<cairn_ports::MdCommit>, PortError> {
+            self.inner.md_change_log()
+        }
     }
 
     #[test]

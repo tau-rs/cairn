@@ -235,6 +235,23 @@ pub struct Revision {
     pub author: String,
 }
 
+/// One commit's structural-candidacy signal for the graph time-view: the commit
+/// as a [`Revision`], its full oid, its first-parent oid, and whether it changed
+/// any `.md` path vs that parent. Returned newest-first by [`Vcs::md_change_log`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MdCommit {
+    /// The commit as a `Revision` (7-char id, summary, time, author).
+    pub revision: Revision,
+    /// The commit's full oid (40-hex), for graph-cache keying.
+    pub oid: String,
+    /// First-parent oid, or `None` for the root commit.
+    pub parent: Option<String>,
+    /// Whether any `.md` path differs between this commit and its first parent
+    /// (for the root commit: whether the tree contains any `.md` blob). A
+    /// `false` value means the commit cannot have changed the link graph.
+    pub md_changed: bool,
+}
+
 /// Version control over the cairn directory.
 pub trait Vcs {
     /// Stage all changes and create a commit with `message`. Returns the
@@ -286,6 +303,14 @@ pub trait Vcs {
     /// [`PortError::NotFound`] if the revspec does not resolve; [`PortError::Adapter`]
     /// on a git failure.
     fn read_tree_at(&self, revision: &str) -> Result<Vec<HistoricalBlob>, PortError>;
+
+    /// Every commit newest-first, each flagged with whether it changed any `.md`
+    /// path vs its first parent — the cheap pre-filter for the structural-graph
+    /// time-view. Ordering matches [`Vcs::vault_history`].
+    ///
+    /// # Errors
+    /// [`PortError::Adapter`] on a git failure. An empty repo yields `Ok(vec![])`.
+    fn md_change_log(&self) -> Result<Vec<MdCommit>, PortError>;
 }
 
 /// A change to a note detected on disk.
