@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use axum::extract::ws::{Message, WebSocket};
 use cairn_contract::{CollabClientMsg, CollabServerMsg};
 use cairn_domain::{BlockDoc, NotePath};
-use cairn_service::{block_op_from_wire, block_op_to_wire};
+use cairn_service::{block_op_from_wire, block_op_to_wire, recoverable_block_to_wire};
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{broadcast, mpsc};
 
@@ -233,9 +233,23 @@ where
                     });
                 }
             }
-            CollabClientMsg::Recover { note: _ } => {
-                // View-only recovery content request; handler implemented in Task 4.
-                // For now, silently ignore to unblock contract layer compilation.
+            CollabClientMsg::Recover { note } => {
+                let Ok(path) = NotePath::new(&note) else {
+                    let _ = out_tx
+                        .send(CollabServerMsg::Error {
+                            note,
+                            message: "invalid note path".into(),
+                        })
+                        .await;
+                    continue;
+                };
+                let blocks = recoverable_blocks(&collab, &path)
+                    .into_iter()
+                    .map(recoverable_block_to_wire)
+                    .collect();
+                let _ = out_tx
+                    .send(CollabServerMsg::Recoverable { note, blocks })
+                    .await;
             }
         }
     }
@@ -395,6 +409,19 @@ pub(crate) fn fold_foreign(collab: &Collab, path: &NotePath, foreign: &str) {
 #[must_use]
 pub(crate) fn is_sessioned(collab: &Collab, path: &NotePath) -> bool {
     lock(collab).contains_key(path)
+}
+
+/// The recoverable content of a session's live replica (view-only). Empty when
+/// there is no session for `path`. Read-only: never merges, marks dirty, or fans
+/// out — the caller replies to the requesting socket only.
+pub(crate) fn recoverable_blocks(
+    collab: &Collab,
+    path: &NotePath,
+) -> Vec<cairn_domain::RecoverableBlock> {
+    lock(collab)
+        .get(path)
+        .map(|sess| sess.doc.recoverable_blocks())
+        .unwrap_or_default()
 }
 
 /// Record a foreign on-disk edit detected by the watcher: if `disk` diverges from
@@ -686,5 +713,38 @@ mod flush_tests {
             lock(&reg).contains_key(&p),
             "empty+dirty session kept for ticker"
         );
+    }
+
+    #[test]
+    fn recoverable_blocks_reads_session_and_does_not_fan_out() {
+        let reg = registry();
+        let p = NotePath::new("n.md").unwrap();
+        insert_dirty_session(&reg, &p, "gone\n", vec![]);
+        add_participant(&reg, &p, 7);
+        // Delete the only block so its content is recoverable-but-hidden.
+        let id = {
+            let reg = lock(&reg);
+            reg.get(&p).unwrap().doc.block_ids_in_order()[0]
+        };
+        merge_op(&reg, &p, BlockOp::Delete { id, lamport: 5 });
+
+        // A peer is subscribed; a read-only recovery query must NOT fan anything out.
+        let mut rx = test_subscribe(&reg, &p);
+        let blocks = recoverable_blocks(&reg, &p);
+
+        assert_eq!(blocks.len(), 1);
+        assert!(blocks[0].tombstoned);
+        assert!(blocks[0].versions.contains(&"gone".to_string()));
+        assert!(
+            rx.try_recv().is_err(),
+            "recovery is read-only, nothing fanned out"
+        );
+    }
+
+    #[test]
+    fn recoverable_blocks_absent_session_is_empty() {
+        let reg = registry();
+        let p = NotePath::new("nope.md").unwrap();
+        assert!(recoverable_blocks(&reg, &p).is_empty());
     }
 }
