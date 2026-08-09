@@ -51,3 +51,21 @@ updates:
           - "axum*"
           - "tower*"
           - "hyper*"
+      # candle-core/-nn/-transformers share types across their API boundary
+      # and must move in lockstep; grouping stops a split bump that can never
+      # compile (mixed candle versions -> two `candle_core` copies in-tree).
+      candle:
+        patterns:
+          - "candle*"
+    ignore:
+      # candle 0.11 pulls the unstable `stdarch_neon_f16` feature, which
+      # breaks `--features neural` on Apple Silicon + stable Rust. CI is
+      # x86_64 so it would go green while hiding the local breakage. Hold the
+      # 0.11 major until upstream drops the nightly requirement; 0.9.x
+      # patch/minor bumps (incl. security fixes) still flow.
+      - dependency-name: "candle-core"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "candle-nn"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "candle-transformers"
+        update-types: ["version-update:semver-major"]
