@@ -927,11 +927,11 @@ impl Engine {
                 continue; // a commit touching no .md cannot change the graph
             }
             let child = self.built_at(&c.oid)?;
-            let parent_graph = match &c.parent {
-                Some(p) => self.built_at(p)?.graph.clone(),
-                None => Graph::default(), // root: compare against the empty graph
+            let is_structural = match &c.parent {
+                Some(p) => child.graph != self.built_at(p)?.graph,
+                None => child.graph != Graph::default(), // root: compare against the empty graph
             };
-            if child.graph != parent_graph {
+            if is_structural {
                 out.push(c.revision);
             }
         }
@@ -2668,6 +2668,24 @@ mod tests {
     }
 
     #[test]
+    fn structural_revisions_excludes_frontmatter_only_edits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut ev = Vec::new();
+        let a = NotePath::new("a.md").unwrap();
+        eng.write_note(&a, "---\ntags: [x]\n---\nbody", &mut ev)
+            .unwrap();
+        eng.commit("c1 create", &mut ev).unwrap(); // node added -> structural
+        eng.write_note(&a, "---\ntags: [x, y]\n---\nbody", &mut ev)
+            .unwrap();
+        eng.commit("c2 tag edit", &mut ev).unwrap(); // metadata only -> NOT structural
+
+        let revs = eng.structural_revisions(None).unwrap();
+        assert_eq!(revs.len(), 1);
+        assert_eq!(revs[0].message, "c1 create");
+    }
+
+    #[test]
     fn structural_revisions_includes_link_and_node_changes() {
         let tmp = tempfile::tempdir().unwrap();
         let mut eng = engine(tmp.path());
@@ -2708,14 +2726,30 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut eng = engine(tmp.path());
         let mut ev = Vec::new();
-        for i in 0..3 {
-            let p = NotePath::new(&format!("n{i}.md")).unwrap();
-            eng.write_note(&p, "x", &mut ev).unwrap();
-            eng.commit(&format!("c{i}"), &mut ev).unwrap(); // each adds a node -> structural
-        }
+        let n0 = NotePath::new("n0.md").unwrap();
+        eng.write_note(&n0, "x", &mut ev).unwrap();
+        eng.commit("c0", &mut ev).unwrap(); // node added -> structural
+        let n1 = NotePath::new("n1.md").unwrap();
+        eng.write_note(&n1, "x", &mut ev).unwrap();
+        eng.commit("c1", &mut ev).unwrap(); // node added -> structural
+
+        // Interleave a non-structural (text-only) commit: a naive "cap the
+        // first N commits walked" implementation would stop before reaching
+        // c1, since this one consumes a walk slot without being structural.
+        eng.write_note(&n0, "x, more prose but no links", &mut ev)
+            .unwrap();
+        eng.commit("c_text", &mut ev).unwrap(); // text only -> NOT structural
+        let n2 = NotePath::new("n2.md").unwrap();
+        eng.write_note(&n2, "x", &mut ev).unwrap();
+        eng.commit("c2", &mut ev).unwrap(); // node added -> structural
+
         let revs = eng.structural_revisions(Some(2)).unwrap();
-        assert_eq!(revs.len(), 2);
-        assert_eq!(revs[0].message, "c2"); // newest two
+        assert_eq!(
+            revs.len(),
+            2,
+            "limit caps STRUCTURAL revisions, not raw commits walked"
+        );
+        assert_eq!(revs[0].message, "c2"); // newest two structural, skipping c_text
         assert_eq!(revs[1].message, "c1");
     }
 
