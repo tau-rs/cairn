@@ -22,7 +22,7 @@ pub const DAEMON_REPLICA: u64 = u64::MAX;
 /// A fan-out envelope carrying the originating replica so a peer skips its own
 /// echo (merge is idempotent, but skipping avoids redundant traffic).
 #[derive(Clone)]
-struct Fanout {
+pub(crate) struct Fanout {
     origin: u64,
     msg: CollabServerMsg,
 }
@@ -59,15 +59,24 @@ fn lock(collab: &Collab) -> std::sync::MutexGuard<'_, HashMap<NotePath, Session>
     collab.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Drive one upgraded `/collab` socket. `seed` reads a note's current markdown
-/// to seed a fresh session (empty string when the note does not exist yet).
+/// What the `/collab` seed closure returns: the HEAD markdown to seed the replica
+/// (and initialize `last_written`), plus whether the working tree already diverges
+/// from HEAD so the first flush folds that pre-existing edit (spec §13.4).
+pub struct Seed {
+    pub markdown: String,
+    pub dirty: bool,
+}
+
+/// Drive one upgraded `/collab` socket. `seed` reads a note's HEAD markdown to
+/// seed a fresh session (empty when the note does not exist yet at HEAD), plus
+/// whether the working tree already diverges from that HEAD snapshot.
 ///
 /// Assumes ONE replica id per connection: `my_replica` and the disconnect
 /// cleanup below are connection-global, so multiplexing distinct replica ids
 /// over a single socket is out of scope for PR-1 (to be enforced in PR-2).
 pub async fn run_collab<S>(socket: WebSocket, collab: Collab, seed: S)
 where
-    S: Fn(&NotePath) -> String + Clone + Send + 'static,
+    S: Fn(&NotePath) -> Seed + Clone + Send + 'static,
 {
     let (mut sink, mut stream) = socket.split();
     let (out_tx, mut out_rx) = mpsc::channel::<CollabServerMsg>(64);
@@ -116,21 +125,25 @@ where
                 // first.
                 let seed_fn = seed.clone();
                 let seed_path = path.clone();
-                let seeded = tokio::task::spawn_blocking(move || seed_fn(&seed_path))
+                let seeded: Seed = tokio::task::spawn_blocking(move || seed_fn(&seed_path))
                     .await
-                    .unwrap_or_default();
+                    .unwrap_or(Seed {
+                        markdown: String::new(),
+                        dirty: false,
+                    });
                 // Get-or-create the session; take a snapshot + a subscription.
                 let joined = {
                     let mut reg = lock(&collab);
                     let sess = reg.entry(path.clone()).or_insert_with(|| {
                         let (tx, _rx) = broadcast::channel(256);
                         Session {
-                            doc: BlockDoc::from_markdown(DAEMON_REPLICA, &seeded),
+                            doc: BlockDoc::from_markdown(DAEMON_REPLICA, &seeded.markdown),
                             peers: tx,
                             participants: HashSet::new(),
-                            dirty: false,
+                            // Diverged worktree ⇒ dirty so the first flush folds it.
+                            dirty: seeded.dirty,
                             last_op: Instant::now(),
-                            last_written: seeded.clone(),
+                            last_written: seeded.markdown.clone(),
                         }
                     });
                     if sess.participants.insert(replica) {
@@ -259,9 +272,6 @@ pub(crate) enum FlushOutcome {
     /// `write_note` landed these bytes on disk (commit may have failed — the
     /// bytes are still the on-disk truth, so they become the new baseline).
     Committed(String),
-    /// A foreign on-disk edit diverged from the baseline; the write was skipped
-    /// (fold-back is A2).
-    Conflict,
     /// `write_note` itself failed; nothing landed.
     WriteError,
 }
@@ -302,7 +312,9 @@ pub(crate) fn drain_due(collab: &Collab, debounce: Duration) -> Vec<FlushItem> {
 
 /// Settle one flushed session after its phase-2 write, under the collab lock.
 /// A no-op if the session was reaped meanwhile. Reaps an abandoned session only
-/// once its edits are safely on disk (or unrecoverable in A1), never before.
+/// once its edits are safely on disk, never before. Foreign edits are folded
+/// back before the write (see `fold_foreign`), so a settled outcome is only
+/// Committed or WriteError.
 pub(crate) fn settle_flush(collab: &Collab, path: &NotePath, outcome: FlushOutcome) {
     let mut reg = lock(collab);
     let Some(sess) = reg.get_mut(path) else {
@@ -316,18 +328,6 @@ pub(crate) fn settle_flush(collab: &Collab, path: &NotePath, outcome: FlushOutco
             sess.last_written = written;
             sess.participants.is_empty() && !sess.dirty
         }
-        // Foreign edit on disk. An active session keeps its edits for retry /
-        // A2 fold-back; an abandoned one is reaped rather than re-warning every
-        // tick forever (the foreign on-disk edit is preserved either way — A1's
-        // "never lose foreign work" floor).
-        FlushOutcome::Conflict => {
-            if sess.participants.is_empty() {
-                true
-            } else {
-                sess.dirty = true;
-                false
-            }
-        }
         // Transient write failure: keep the edits and retry next pass.
         FlushOutcome::WriteError => {
             sess.dirty = true;
@@ -336,6 +336,65 @@ pub(crate) fn settle_flush(collab: &Collab, path: &NotePath, outcome: FlushOutco
     };
     if reap {
         reg.remove(path);
+    }
+}
+
+/// Fold a foreign on-disk edit into a session's live replica, under the collab
+/// lock only. Merges the block-diff of `foreign` against the session's baseline
+/// into `doc`, fans the produced ops out to peers, advances `last_written` to the
+/// consumed `foreign` bytes, and leaves the session dirty so the next flush pass
+/// writes the merged result. A no-op if the session was reaped meanwhile. This is
+/// the fold-back critical section that replaces A1's conflict-skip (spec §13.1/§13.2),
+/// called from `run_collab_flush_pass` when the on-disk bytes diverge from baseline.
+pub(crate) fn fold_foreign(collab: &Collab, path: &NotePath, foreign: &str) {
+    let mut reg = lock(collab);
+    let Some(sess) = reg.get_mut(path) else {
+        return;
+    };
+    let base = sess.last_written.clone();
+    // Spec §13.3: if the live replica already diverged from the baseline (a peer
+    // edited concurrently), the block-diff falls back to content-matching; make
+    // that observable.
+    if sess.doc.materialize() != base {
+        tracing::warn!(
+            note = %path.as_str(),
+            "collab fold-back: live replica diverged from baseline; content-match fallback"
+        );
+    }
+    let ops = sess.doc.fold_foreign(&base, foreign);
+    for op in ops {
+        let _ = sess.peers.send(Fanout {
+            origin: DAEMON_REPLICA,
+            msg: CollabServerMsg::Op {
+                note: path.as_str().to_string(),
+                op: block_op_to_wire(op),
+            },
+        });
+    }
+    // The consumed disk bytes are the new baseline: a re-fold on the next pass
+    // diffs foreign→newer-foreign, never re-minting these Insert IDs (spec §13.1).
+    sess.last_written = foreign.to_string();
+    sess.dirty = true;
+    sess.last_op = Instant::now();
+}
+
+/// Whether a live session is open on this note (the daemon owns `N.md`).
+#[must_use]
+pub(crate) fn is_sessioned(collab: &Collab, path: &NotePath) -> bool {
+    lock(collab).contains_key(path)
+}
+
+/// Record a foreign on-disk edit detected by the watcher: if `disk` diverges from
+/// the session's baseline, mark it dirty so the flush pass folds it (spec §13.5).
+/// A no-op when there is no session or when `disk` equals the last self-write
+/// (echo suppression — the daemon's own materialize writes must not re-arm it).
+pub(crate) fn note_foreign_edit(collab: &Collab, path: &NotePath, disk: &str) {
+    let mut reg = lock(collab);
+    if let Some(sess) = reg.get_mut(path) {
+        if sess.last_written != disk {
+            sess.dirty = true;
+            sess.last_op = Instant::now();
+        }
     }
 }
 
@@ -365,6 +424,24 @@ pub(crate) fn insert_dirty_session(
     );
 }
 
+/// Insert a session seeded from `head`, dirty iff the worktree diverged. Test-only.
+#[cfg(test)]
+pub(crate) fn insert_seeded_session(collab: &Collab, path: &NotePath, head: &str, dirty: bool) {
+    let (tx, _rx) = broadcast::channel(256);
+    let mut reg = lock(collab);
+    reg.insert(
+        path.clone(),
+        Session {
+            doc: BlockDoc::from_markdown(DAEMON_REPLICA, head),
+            peers: tx,
+            participants: HashSet::new(),
+            dirty,
+            last_op: Instant::now(),
+            last_written: head.to_string(),
+        },
+    );
+}
+
 /// Merge an op into an existing session and mark it dirty, exactly as the WS
 /// `Op` arm does. Test-only.
 #[cfg(test)]
@@ -384,6 +461,33 @@ pub(crate) fn add_participant(collab: &Collab, path: &NotePath, replica: u64) {
     if let Some(sess) = reg.get_mut(path) {
         sess.participants.insert(replica);
     }
+}
+
+/// Subscribe to a session's fan-out channel to observe folded/relayed ops. Test-only.
+#[cfg(test)]
+pub(crate) fn test_subscribe(collab: &Collab, path: &NotePath) -> broadcast::Receiver<Fanout> {
+    let reg = lock(collab);
+    reg.get(path).expect("session exists").peers.subscribe()
+}
+
+/// Extract the domain op from a fan-out envelope. Test-only.
+#[cfg(test)]
+pub(crate) fn fanout_op(f: &Fanout) -> Option<cairn_domain::BlockOp> {
+    match &f.msg {
+        CollabServerMsg::Op { op, .. } => Some(block_op_from_wire(op.clone())),
+        _ => None,
+    }
+}
+
+/// Current materialized replica text + baseline for a session. Test-only.
+#[cfg(test)]
+pub(crate) fn test_session_markdown_and_baseline(
+    collab: &Collab,
+    path: &NotePath,
+) -> Option<(String, String)> {
+    let reg = lock(collab);
+    reg.get(path)
+        .map(|s| (s.doc.materialize(), s.last_written.clone()))
 }
 
 #[cfg(test)]
@@ -477,21 +581,59 @@ mod flush_tests {
     }
 
     #[test]
-    fn settle_conflict_reaps_abandoned_but_keeps_active() {
+    fn fold_foreign_merges_disk_edit_fans_out_and_advances_baseline() {
         let reg = registry();
-        let active = NotePath::new("active.md").unwrap();
-        let gone = NotePath::new("gone.md").unwrap();
-        insert_dirty_session(&reg, &active, "", vec![ins("a")]);
-        insert_dirty_session(&reg, &gone, "", vec![ins("g")]);
-        lock(&reg).get_mut(&active).unwrap().participants.insert(1);
-        let _ = drain_due(&reg, Duration::ZERO);
-        // Active session with a foreign conflict: kept + re-armed for A2 fold-back.
-        settle_flush(&reg, &active, FlushOutcome::Conflict);
-        assert!(lock(&reg).get(&active).unwrap().dirty);
-        // Abandoned session with a foreign conflict: reaped (no warn-loop; the
-        // on-disk foreign edit is preserved).
-        settle_flush(&reg, &gone, FlushOutcome::Conflict);
-        assert!(!lock(&reg).contains_key(&gone));
+        let p = NotePath::new("n.md").unwrap();
+        // Session seeded + last_written == "a\n" (one block "a").
+        insert_dirty_session(&reg, &p, "a\n", vec![]);
+        add_participant(&reg, &p, 7);
+        // A peer is subscribed to the fan-out channel.
+        let mut rx = test_subscribe(&reg, &p);
+
+        // Foreign on-disk edit: appended a block "b".
+        fold_foreign(&reg, &p, "a\n\nb\n");
+
+        // (1) Merged into the daemon replica.
+        {
+            let reg = lock(&reg);
+            let sess = reg.get(&p).unwrap();
+            assert!(
+                sess.doc.materialize().contains("b"),
+                "foreign edit in replica"
+            );
+            // (2) Baseline advanced to the consumed disk bytes.
+            assert_eq!(sess.last_written, "a\n\nb\n");
+            // (3) Session stays dirty so the next pass writes the merged result.
+            assert!(sess.dirty);
+        }
+        // (4) Fanned out to peers: at least one Insert op arrived.
+        let f = rx.try_recv().expect("a folded op was fanned out");
+        assert!(matches!(
+            fanout_op(&f),
+            Some(cairn_domain::BlockOp::Insert { .. })
+        ));
+    }
+
+    #[test]
+    fn note_foreign_edit_marks_dirty_only_on_real_divergence() {
+        let reg = registry();
+        let p = NotePath::new("n.md").unwrap();
+        insert_dirty_session(&reg, &p, "base\n", vec![]);
+        // Clear dirty to model a settled session.
+        lock(&reg).get_mut(&p).unwrap().dirty = false;
+
+        // A self-write echo (disk == last_written) must NOT re-arm the session.
+        note_foreign_edit(&reg, &p, "base\n");
+        assert!(!lock(&reg).get(&p).unwrap().dirty, "self-echo ignored");
+
+        // A real foreign edit (disk != last_written) re-arms it for the flush fold.
+        note_foreign_edit(&reg, &p, "base\n\nforeign\n");
+        assert!(
+            lock(&reg).get(&p).unwrap().dirty,
+            "foreign edit marks dirty"
+        );
+        assert!(is_sessioned(&reg, &p));
+        assert!(!is_sessioned(&reg, &NotePath::new("other.md").unwrap()));
     }
 
     #[test]

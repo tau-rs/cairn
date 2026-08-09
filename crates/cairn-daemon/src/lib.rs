@@ -218,6 +218,22 @@ impl AppState {
     /// events to subscribers. Best-effort: a transient failure is logged, not
     /// propagated, so the watch loop keeps running.
     pub fn apply_change_blocking(&self, change: &cairn_ports::FsChange) {
+        // A sessioned note is owned by the daemon: defer a foreign `Changed` to
+        // the collab flush (which folds it) instead of the generic re-index /
+        // auto-commit. Whole-file `Removed` is not intercepted — content-edit
+        // fold-back only (spec §13.5); a spurious delete self-heals on re-flush.
+        if let cairn_ports::FsChange::Changed(path) = change {
+            if collab::is_sessioned(&self.collab, path) {
+                // Read disk OUTSIDE the collab lock (engine lock), then mark.
+                // The engine guard is a temporary here — it drops at the end of
+                // this statement, so the collab lock in `note_foreign_edit`
+                // below is never taken while the engine lock is held (lock
+                // order: collab → engine → collab, sequential, never nested).
+                let disk = self.engine().read_note(path).unwrap_or_default();
+                collab::note_foreign_edit(&self.collab, path, &disk);
+                return;
+            }
+        }
         let mut guard = self.engine();
         let mut tap = EventTap {
             tx: self.events.clone(),
@@ -293,12 +309,17 @@ impl AppState {
             let mut guard = self.engine();
             let disk = guard.read_note(&item.path).unwrap_or_default();
             if disk != item.baseline {
+                // Release the engine lock before taking the collab lock, then fold
+                // the foreign on-disk edit into the live replica and fan it out
+                // (collab lock only). No write this pass — the fold leaves the
+                // session dirty, so the NEXT pass re-materializes the merged result
+                // and writes it via the normal disk==baseline path (spec §13.1).
                 drop(guard);
-                tracing::warn!(
+                tracing::info!(
                     note = %item.path.as_str(),
-                    "collab flush: foreign on-disk edit; skipping write (fold-back is A2)"
+                    "collab flush: foreign on-disk edit; folding back"
                 );
-                collab::settle_flush(&self.collab, &item.path, collab::FlushOutcome::Conflict);
+                collab::fold_foreign(&self.collab, &item.path, &disk);
                 continue;
             }
             let mut tap = EventTap {
@@ -608,8 +629,16 @@ async fn collab_handler(
     let seed_state = state.clone();
     ws.on_upgrade(move |socket| {
         collab::run_collab(socket, collab, move |path| {
-            // Seed from the note's current content; empty if it does not exist.
-            seed_state.engine().read_note(path).unwrap_or_default()
+            // Seed from git HEAD (the snapshot boundary); mark dirty if the working
+            // tree already diverges so the first flush folds the uncommitted edit
+            // (spec §13.4). Empty when the note is not yet in HEAD.
+            let guard = seed_state.engine();
+            let head = guard.note_at(path, "HEAD").unwrap_or_default();
+            let worktree = guard.read_note(path).unwrap_or_default();
+            collab::Seed {
+                dirty: worktree != head,
+                markdown: head,
+            }
         })
     })
 }
@@ -925,5 +954,115 @@ mod collab_flush_tests {
             at_head.contains("second"),
             "second edit committed via re-flush (baseline advanced, no false conflict)"
         );
+    }
+
+    #[test]
+    fn flush_folds_foreign_disk_edit_into_replica_and_fans_out() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(engine_over(tmp.path()));
+        let path = NotePath::new("n.md").unwrap();
+
+        // Open session (insert_dirty_session already sets dirty=true); baseline == "seed\n".
+        collab::insert_dirty_session(&state.collab, &path, "seed\n", vec![]);
+        collab::add_participant(&state.collab, &path, 1);
+        // Subscribe a peer BEFORE the fold to observe fan-out.
+        let mut rx = collab::test_subscribe(&state.collab, &path);
+
+        // A foreign editor rewrites the file, adding a line.
+        std::fs::write(tmp.path().join("n.md"), "seed\n\nforeign line\n").unwrap();
+
+        // Flush pass 1: disk != baseline ⇒ fold (no write this pass).
+        state.run_collab_flush_pass(std::time::Duration::ZERO);
+
+        // Folded into the daemon replica; baseline advanced to the consumed bytes.
+        let (markdown, baseline) =
+            collab::test_session_markdown_and_baseline(&state.collab, &path).unwrap();
+        assert!(markdown.contains("foreign line"));
+        assert_eq!(baseline, "seed\n\nforeign line\n");
+        // Fanned out to the peer.
+        let mut saw_insert = false;
+        while let Ok(f) = rx.try_recv() {
+            if matches!(
+                collab::fanout_op(&f),
+                Some(cairn_domain::BlockOp::Insert { .. })
+            ) {
+                saw_insert = true;
+            }
+        }
+        assert!(saw_insert, "foreign block fanned out as an Insert");
+
+        // Flush pass 2: now disk == baseline ⇒ the merged result is written+committed.
+        state.run_collab_flush_pass(std::time::Duration::ZERO);
+        let guard = state.engine();
+        assert!(guard
+            .note_at(&path, "HEAD")
+            .unwrap()
+            .contains("foreign line"));
+    }
+
+    #[test]
+    fn watcher_defers_sessioned_note_to_the_flush_not_generic_ingest() {
+        // A Changed(N) for a note with an open session must NOT auto-commit via
+        // the generic path; it marks the session dirty so the collab flush folds
+        // it. This is the same in-crate mod as the other collab-flush tests
+        // (kept out of tests/watch.rs so it can reach `collab::insert_dirty_session`
+        // / `collab::add_participant` without a new public test-only API surface).
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(engine_over(tmp.path()));
+        let path = NotePath::new("n.md").unwrap();
+
+        // Open a session; baseline == on-disk == "base\n".
+        std::fs::write(tmp.path().join("n.md"), "base\n").unwrap();
+        collab::insert_dirty_session(&state.collab, &path, "base\n", vec![]);
+        collab::add_participant(&state.collab, &path, 1); // keep it open, not reaped
+                                                          // Settle it (writes/commits "base\n", matching disk) so it sits
+                                                          // dirty=false, exactly like an already-flushed open session. Debounce
+                                                          // ZERO so it's due regardless of quiescence (it has a participant, so
+                                                          // "empty" alone would not make it due).
+        state.run_collab_flush_pass(std::time::Duration::ZERO);
+
+        // Foreign edit on disk, then the watcher fires.
+        std::fs::write(tmp.path().join("n.md"), "base\n\nforeign\n").unwrap();
+        state.apply_change_blocking(&FsChange::Changed(path.clone()));
+
+        // The flush now folds it (disk != baseline), then writes+commits on pass 2.
+        state.run_collab_flush_pass(std::time::Duration::ZERO); // fold
+        state.run_collab_flush_pass(std::time::Duration::ZERO); // write merged
+        let guard = state.engine();
+        assert!(guard.note_at(&path, "HEAD").unwrap().contains("foreign"));
+    }
+
+    #[test]
+    fn opening_a_session_reconciles_a_pre_existing_uncommitted_worktree_edit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(engine_over(tmp.path()));
+        let path = NotePath::new("n.md").unwrap();
+
+        // Commit a base version to HEAD, then leave an uncommitted worktree edit.
+        {
+            let mut guard = state.engine();
+            let mut tap = EventTap {
+                tx: state.events.clone(),
+                collected: Vec::new(),
+            };
+            guard.write_note(&path, "base\n", &mut tap).unwrap();
+            guard.commit("seed", &mut tap).unwrap();
+        }
+        std::fs::write(tmp.path().join("n.md"), "base\n\nuncommitted\n").unwrap();
+
+        // Seed a session the way the /collab handler will (HEAD + dirty-if-diverged).
+        let head = state.engine().note_at(&path, "HEAD").unwrap_or_default();
+        let worktree = state.engine().read_note(&path).unwrap_or_default();
+        collab::insert_seeded_session(&state.collab, &path, &head, worktree != head);
+        collab::add_participant(&state.collab, &path, 1);
+
+        // First flush folds the uncommitted edit; second writes the merged result.
+        state.run_collab_flush_pass(std::time::Duration::ZERO);
+        state.run_collab_flush_pass(std::time::Duration::ZERO);
+        assert!(state
+            .engine()
+            .note_at(&path, "HEAD")
+            .unwrap()
+            .contains("uncommitted"));
     }
 }
