@@ -1,5 +1,6 @@
 //! A `Vcs` adapter over a local git repository using `git2`.
 
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 use cairn_ports::{AdapterError, HistoricalBlob, MdCommit, PortError, Revision, Vcs};
@@ -279,25 +280,27 @@ impl Vcs for GitVcs {
         Ok(String::from_utf8_lossy(blob.content()).into_owned())
     }
 
-    fn md_change_log(&self) -> Result<Vec<MdCommit>, PortError> {
+    fn walk_md_changes(
+        &self,
+        visit: &mut dyn FnMut(MdCommit) -> Result<ControlFlow<()>, PortError>,
+    ) -> Result<(), PortError> {
         let repo = Repository::open(&self.root).map_err(adapt)?;
         let mut walk = repo.revwalk().map_err(adapt)?;
         // No HEAD (empty repo) -> no history.
         if walk.push_head().is_err() {
-            return Ok(Vec::new());
+            return Ok(());
         }
         // TOPOLOGICAL keeps children before parents (newest first), matching
         // vault_history even when commits share a timestamp.
         walk.set_sorting(git2::Sort::TIME | git2::Sort::TOPOLOGICAL)
             .map_err(adapt)?;
-        let mut out = Vec::new();
         for oid in walk {
             let oid = oid.map_err(adapt)?;
             let commit = repo.find_commit(oid).map_err(adapt)?;
             // First parent only: "what this commit changed on the mainline".
             let parent = commit.parent(0).ok();
             let md_changed = tree_has_md_change(&repo, &commit, parent.as_ref()).map_err(adapt)?;
-            out.push(MdCommit {
+            let mc = MdCommit {
                 revision: Revision {
                     id: oid.to_string()[..7].to_string(),
                     message: commit.summary().ok().flatten().unwrap_or("").to_string(),
@@ -307,9 +310,14 @@ impl Vcs for GitVcs {
                 oid: oid.to_string(),
                 parent: parent.map(|p| p.id().to_string()),
                 md_changed,
-            });
+            };
+            // The caller decides when it has seen enough; stopping here means the
+            // revwalk never loads the remaining (older) commits.
+            if visit(mc)?.is_break() {
+                break;
+            }
         }
-        Ok(out)
+        Ok(())
     }
 }
 
@@ -579,6 +587,17 @@ mod tests {
         ));
     }
 
+    /// Drain `walk_md_changes` into a `Vec`, visiting every commit.
+    fn collect_md_changes(vcs: &GitVcs) -> Vec<MdCommit> {
+        let mut out = Vec::new();
+        vcs.walk_md_changes(&mut |c| {
+            out.push(c);
+            Ok(std::ops::ControlFlow::Continue(()))
+        })
+        .unwrap();
+        out
+    }
+
     #[test]
     fn md_change_log_flags_md_and_non_md_commits() {
         let tmp = tempfile::tempdir().unwrap();
@@ -590,7 +609,7 @@ mod tests {
         fs::write(tmp.path().join("a.md"), "v2").unwrap();
         vcs.commit_all("edit a.md").unwrap(); // .md touched
 
-        let log = vcs.md_change_log().unwrap();
+        let log = collect_md_changes(&vcs);
         assert_eq!(log.len(), 3);
         // Newest-first.
         assert_eq!(log[0].revision.message, "edit a.md");
@@ -613,6 +632,26 @@ mod tests {
     fn md_change_log_empty_for_empty_repo() {
         let tmp = tempfile::tempdir().unwrap();
         let vcs = GitVcs::open_or_init(tmp.path()).unwrap();
-        assert!(vcs.md_change_log().unwrap().is_empty());
+        assert!(collect_md_changes(&vcs).is_empty());
+    }
+
+    #[test]
+    fn walk_md_changes_stops_on_break() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut vcs = GitVcs::open_or_init(tmp.path()).unwrap();
+        for i in 0..5 {
+            fs::write(tmp.path().join(format!("n{i}.md")), "x").unwrap();
+            vcs.commit_all(&format!("c{i}")).unwrap();
+        }
+
+        // Break on the very first visit: the revwalk must not load any further
+        // commit once the visitor asks to stop.
+        let mut visited = 0;
+        vcs.walk_md_changes(&mut |_c| {
+            visited += 1;
+            Ok(std::ops::ControlFlow::Break(()))
+        })
+        .unwrap();
+        assert_eq!(visited, 1, "walk halts on the first Break");
     }
 }

@@ -9,6 +9,7 @@ use cairn_ports::{
 };
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -914,27 +915,34 @@ impl Engine {
     /// the commit's built graph against its first parent's. `built_at` caches by
     /// oid, so consecutive commits parse each tree at most once.
     ///
+    /// The walk short-circuits: once `limit` structural revisions are collected
+    /// it stops the underlying revwalk instead of scanning to the root, so the
+    /// cost is `O(commits up to the nth structural rev)`, not `O(history)`.
+    /// `limit: None` still walks the whole history.
+    ///
     /// # Errors
     /// Returns [`PortError`] if the VCS adapter or a tree read fails.
     pub fn structural_revisions(&self, limit: Option<u32>) -> Result<Vec<Revision>, PortError> {
         let cap = limit.map(|n| n as usize);
-        let mut out = Vec::new();
-        for c in self.vcs.md_change_log()? {
-            if cap.is_some_and(|n| out.len() >= n) {
-                break;
+        let mut out: Vec<Revision> = Vec::new();
+        self.vcs.walk_md_changes(&mut |c| {
+            if c.md_changed {
+                let child = self.built_at(&c.oid)?;
+                let is_structural = match &c.parent {
+                    Some(p) => child.graph != self.built_at(p)?.graph,
+                    None => child.graph != Graph::default(), // root: vs the empty graph
+                };
+                if is_structural {
+                    out.push(c.revision);
+                }
             }
-            if !c.md_changed {
-                continue; // a commit touching no .md cannot change the graph
-            }
-            let child = self.built_at(&c.oid)?;
-            let is_structural = match &c.parent {
-                Some(p) => child.graph != self.built_at(p)?.graph,
-                None => child.graph != Graph::default(), // root: compare against the empty graph
-            };
-            if is_structural {
-                out.push(c.revision);
-            }
-        }
+            // Stop the walk once we have enough; `None` never breaks (walks all).
+            Ok(if cap.is_some_and(|n| out.len() >= n) {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            })
+        })?;
         Ok(out)
     }
 
@@ -2349,10 +2357,12 @@ mod tests {
 
     use std::sync::atomic::{AtomicUsize as Au, Ordering as Ord2};
 
-    /// A `Vcs` that counts `read_tree_at` calls, delegating to an inner `GitVcs`.
+    /// A `Vcs` that counts `read_tree_at` calls and `walk_md_changes` visits,
+    /// delegating to an inner `GitVcs`.
     struct CountingVcs {
         inner: GitVcs,
         tree_reads: Arc<Au>,
+        md_walk_visits: Arc<Au>,
     }
     impl Vcs for CountingVcs {
         fn commit_all(&mut self, m: &str) -> Result<String, PortError> {
@@ -2380,8 +2390,16 @@ mod tests {
             self.tree_reads.fetch_add(1, Ord2::SeqCst);
             self.inner.read_tree_at(r)
         }
-        fn md_change_log(&self) -> Result<Vec<cairn_ports::MdCommit>, PortError> {
-            self.inner.md_change_log()
+        fn walk_md_changes(
+            &self,
+            visit: &mut dyn FnMut(
+                cairn_ports::MdCommit,
+            ) -> Result<std::ops::ControlFlow<()>, PortError>,
+        ) -> Result<(), PortError> {
+            self.inner.walk_md_changes(&mut |c| {
+                self.md_walk_visits.fetch_add(1, Ord2::SeqCst);
+                visit(c)
+            })
         }
     }
 
@@ -2429,6 +2447,7 @@ mod tests {
         let vcs = CountingVcs {
             inner: GitVcs::open_or_init(tmp.path()).unwrap(),
             tree_reads: reads.clone(),
+            md_walk_visits: Arc::new(Au::new(0)),
         };
         let mut eng = Engine::new(
             LocalFsStore::open(tmp.path()).unwrap(),
@@ -2758,5 +2777,42 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let eng = engine(tmp.path());
         assert!(eng.structural_revisions(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn structural_revisions_stops_walking_at_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let visits = Arc::new(Au::new(0));
+        let vcs = CountingVcs {
+            inner: GitVcs::open_or_init(tmp.path()).unwrap(),
+            tree_reads: Arc::new(Au::new(0)),
+            md_walk_visits: visits.clone(),
+        };
+        let mut eng = Engine::new(
+            LocalFsStore::open(tmp.path()).unwrap(),
+            InMemoryIndex::default(),
+            vcs,
+        );
+        let mut ev = Vec::new();
+        // A large synthetic history: 30 commits, each adds a node -> each is
+        // structural. If the walk were O(history) it would visit all 30.
+        for i in 0..30 {
+            let p = NotePath::new(&format!("n{i}.md")).unwrap();
+            eng.write_note(&p, "x", &mut ev).unwrap();
+            eng.commit(&format!("c{i}"), &mut ev).unwrap();
+        }
+
+        let revs = eng.structural_revisions(Some(3)).unwrap();
+        assert_eq!(revs.len(), 3);
+        assert_eq!(revs[0].message, "c29"); // newest-first
+        assert_eq!(revs[1].message, "c28");
+        assert_eq!(revs[2].message, "c27");
+        // The walk short-circuited at the limit: only the 3 newest commits were
+        // visited, not all 30 down to the root.
+        assert_eq!(
+            visits.load(Ord2::SeqCst),
+            3,
+            "walk stops after `limit` structural revs, not O(history)"
+        );
     }
 }
