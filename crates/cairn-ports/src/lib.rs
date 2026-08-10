@@ -1,6 +1,7 @@
 //! Port traits for Cairn. The application depends only on these; adapters
 //! in `cairn-infra` (and future plugins) implement them.
 
+use std::ops::ControlFlow;
 use std::path::Path;
 use std::process::Command;
 
@@ -237,7 +238,7 @@ pub struct Revision {
 
 /// One commit's structural-candidacy signal for the graph time-view: the commit
 /// as a [`Revision`], its full oid, its first-parent oid, and whether it changed
-/// any `.md` path vs that parent. Returned newest-first by [`Vcs::md_change_log`].
+/// any `.md` path vs that parent. Streamed newest-first by [`Vcs::walk_md_changes`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MdCommit {
     /// The commit as a `Revision` (7-char id, summary, time, author).
@@ -304,13 +305,25 @@ pub trait Vcs {
     /// on a git failure.
     fn read_tree_at(&self, revision: &str) -> Result<Vec<HistoricalBlob>, PortError>;
 
-    /// Every commit newest-first, each flagged with whether it changed any `.md`
-    /// path vs its first parent — the cheap pre-filter for the structural-graph
-    /// time-view. Ordering matches [`Vcs::vault_history`].
+    /// Walk every commit newest-first, invoking `visit` with each commit's
+    /// [`MdCommit`] `.md`-change signal — the cheap pre-filter for the
+    /// structural-graph time-view. Ordering matches [`Vcs::vault_history`].
+    ///
+    /// Streaming rather than eager so a caller that only needs the newest few
+    /// structural revisions can stop the walk early: return
+    /// [`ControlFlow::Break`] from `visit` and no further commit is loaded or
+    /// diffed. Returning [`ControlFlow::Continue`] walks to the root.
+    ///
+    /// [`ControlFlow::Break`]: std::ops::ControlFlow::Break
+    /// [`ControlFlow::Continue`]: std::ops::ControlFlow::Continue
     ///
     /// # Errors
-    /// [`PortError::Adapter`] on a git failure. An empty repo yields `Ok(vec![])`.
-    fn md_change_log(&self) -> Result<Vec<MdCommit>, PortError>;
+    /// [`PortError::Adapter`] on a git failure, or any error `visit` returns. An
+    /// empty repo yields `Ok(())` without invoking `visit`.
+    fn walk_md_changes(
+        &self,
+        visit: &mut dyn FnMut(MdCommit) -> Result<ControlFlow<()>, PortError>,
+    ) -> Result<(), PortError>;
 }
 
 /// A change to a note detected on disk.
