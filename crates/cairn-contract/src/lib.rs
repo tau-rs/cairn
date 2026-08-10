@@ -682,6 +682,15 @@ pub enum CollabClientMsg {
     /// Ask for the note's recoverable content (view-only; answered to this
     /// socket only, never fanned out).
     Recover { note: String },
+    /// Promote a recoverable version of a block back into the live document:
+    /// `version_index` indexes the block's `versions` from `Recoverable`. Unlike
+    /// view-only `Recover`, this mutates the note and fans the resulting insert
+    /// out to peers.
+    Restore {
+        note: String,
+        id: WireBlockId,
+        version_index: usize,
+    },
 }
 
 /// Messages the daemon sends to a collaboration client over `/collab`.
@@ -1190,6 +1199,22 @@ mod collab_wire_tests {
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"recover\""));
+        let back: CollabClientMsg = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg, back);
+    }
+
+    #[test]
+    fn restore_request_serde_round_trips() {
+        let msg = CollabClientMsg::Restore {
+            note: "n.md".into(),
+            id: WireBlockId {
+                replica: 1,
+                counter: 2,
+            },
+            version_index: 3,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"restore\""));
         let back: CollabClientMsg = serde_json::from_str(&json).unwrap();
         assert_eq!(msg, back);
     }

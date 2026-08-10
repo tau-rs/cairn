@@ -550,6 +550,38 @@ impl BlockDoc {
     }
 }
 
+impl BlockDoc {
+    /// Promote a recoverable version of `id` back into the live document by
+    /// re-inserting it as a NEW live block, anchored right after the (retained)
+    /// source block so it lands in the source's original slot. `version_index`
+    /// indexes into `recoverable(id)` — the same ordering the recovery surface
+    /// showed (a tombstoned block's `[winner, ..losers]`, or a live block's
+    /// stashed losers). Restore is additive and convergent by construction: the
+    /// produced op is a plain `Insert` with a fresh `BlockId`, so it inherits
+    /// Insert's commutativity + idempotency, and it never mutates the tombstone or
+    /// the source register — delete stays delete-wins. Returns the op(s) to fan
+    /// out; empty (and inert — no clock advance) when `id` is unknown or
+    /// `version_index` is out of range.
+    pub fn restore(&mut self, id: BlockId, version_index: usize) -> Vec<BlockOp> {
+        let Some(text) = self.recoverable(id).get(version_index).cloned() else {
+            return Vec::new();
+        };
+        let Some(kind) = self.entries.get(&id).map(|e| e.kind) else {
+            return Vec::new();
+        };
+        // Anchor after the source block: its RGA entry is retained even when
+        // tombstoned, so the new block sorts ahead of the source's former
+        // successor (siblings order by newest ins_lamport first) and reappears in
+        // the source's original position.
+        self.apply_local(Edit::InsertAfter {
+            after: Some(id),
+            kind,
+            text,
+            author: Author::Human,
+        })
+    }
+}
+
 /// A resolved fold action, planned in pass 1 and applied in pass 2 of
 /// `fold_foreign`. Owned data only — no borrows into the pre-mutation doc — so
 /// pass 2 can freely mutate.
@@ -1177,5 +1209,130 @@ mod tests {
             "re-applying a losing op must not duplicate its stash entry"
         );
         assert_eq!(once, vec!["loser".to_string()]);
+    }
+
+    #[test]
+    fn restore_reinserts_deleted_content_in_original_slot() {
+        // Delete a middle block, then restore v0: the tombstone keeps its RGA
+        // anchor, so the re-inserted content lands back between its neighbours.
+        let mut doc = BlockDoc::from_markdown(1, "a\n\nb\n\nc\n");
+        let b_id = doc.block_ids_in_order()[1];
+        doc.merge(BlockOp::Delete {
+            id: b_id,
+            lamport: 9,
+        });
+        assert_eq!(doc.materialize(), "a\n\nc\n");
+        let ops = doc.restore(b_id, 0);
+        assert_eq!(ops.len(), 1, "restore produces one Insert to fan out");
+        assert!(matches!(ops[0], BlockOp::Insert { .. }));
+        assert_eq!(doc.materialize(), "a\n\nb\n\nc\n");
+    }
+
+    #[test]
+    fn restore_and_concurrent_delete_converge_either_order() {
+        // The restore Insert and the Delete of the source block must converge
+        // regardless of arrival order (the convergence law). The restored block
+        // survives both ways: it is a fresh id, unaffected by the tombstone.
+        let mut src = BlockDoc::from_markdown(1, "a\n\nb\n\nc\n");
+        let b_id = src.block_ids_in_order()[1];
+        let del = BlockOp::Delete {
+            id: b_id,
+            lamport: 9,
+        };
+        src.merge(del.clone());
+        let restore_ops = src.restore(b_id, 0);
+
+        let play = |del_first: bool| {
+            // Fresh replica 1 mints the same ids as `src` (deterministic counter).
+            let mut d = BlockDoc::from_markdown(1, "a\n\nb\n\nc\n");
+            if del_first {
+                d.merge(del.clone());
+                for op in &restore_ops {
+                    d.merge(op.clone());
+                }
+            } else {
+                for op in &restore_ops {
+                    d.merge(op.clone());
+                }
+                d.merge(del.clone());
+            }
+            d.materialize()
+        };
+        assert_eq!(play(true), play(false));
+        assert_eq!(play(true), "a\n\nb\n\nc\n", "restored block survives");
+    }
+
+    #[test]
+    fn restore_of_live_stash_loser_inserts_adjacent_and_is_idempotent() {
+        // A live block's stashed LWW loser is restored as a NEW block adjacent to
+        // the winner; replaying the op changes nothing (idempotent).
+        let mut doc = BlockDoc::from_markdown(1, "orig\n");
+        let id = doc.block_ids_in_order()[0];
+        doc.merge(BlockOp::SetContent {
+            id,
+            text: "loser".into(),
+            lamport: 3,
+            author: Author::Agent,
+        });
+        assert_eq!(doc.materialize(), "orig\n"); // human seed wins; "loser" stashed
+        assert_eq!(doc.recoverable(id), vec!["loser".to_string()]);
+        let ops = doc.restore(id, 0);
+        assert_eq!(ops.len(), 1);
+        assert_eq!(doc.materialize(), "orig\n\nloser\n");
+        // Re-merging the restore op is a no-op (CRDT idempotency law).
+        let once = doc.materialize();
+        for op in &ops {
+            doc.merge(op.clone());
+        }
+        assert_eq!(doc.materialize(), once);
+    }
+
+    #[test]
+    fn restore_is_repeatable_two_replicas_converge() {
+        // Two replicas independently restore the same deleted block: each mints its
+        // own Insert (distinct replica ids), so both copies survive and the
+        // replicas converge — restore is additive, not deduped.
+        let mut a = BlockDoc::from_markdown(1, "x\n\ny\n");
+        let mut b = BlockDoc::from_markdown(2, "");
+        for op in a.state_as_ops() {
+            b.merge(op); // b adopts a's shared ids
+        }
+        let y_id = a.block_ids_in_order()[1];
+        let del = BlockOp::Delete {
+            id: y_id,
+            lamport: 50,
+        };
+        a.merge(del.clone());
+        b.merge(del.clone());
+
+        let a_ops = a.restore(y_id, 0);
+        let b_ops = b.restore(y_id, 0);
+        for op in &b_ops {
+            a.merge(op.clone());
+        }
+        for op in &a_ops {
+            b.merge(op.clone());
+        }
+        assert_eq!(a.materialize(), b.materialize());
+        assert_eq!(
+            a.materialize().matches("y").count(),
+            2,
+            "both independent restores survive"
+        );
+    }
+
+    #[test]
+    fn restore_invalid_id_or_index_is_noop() {
+        let mut doc = BlockDoc::from_markdown(1, "a\n");
+        let id = doc.block_ids_in_order()[0];
+        // Live block with nothing stashed ⇒ recoverable is empty ⇒ index 0 misses.
+        assert!(doc.restore(id, 0).is_empty());
+        // Unknown block id.
+        let bogus = BlockId {
+            replica: 99,
+            counter: 99,
+        };
+        assert!(doc.restore(bogus, 0).is_empty());
+        assert_eq!(doc.materialize(), "a\n", "document unchanged");
     }
 }

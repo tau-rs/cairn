@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 use axum::extract::ws::{Message, WebSocket};
 use cairn_contract::{CollabClientMsg, CollabServerMsg};
 use cairn_domain::{BlockDoc, NotePath};
-use cairn_service::{block_op_from_wire, block_op_to_wire, recoverable_block_to_wire};
+use cairn_service::{
+    block_id_from_wire, block_op_from_wire, block_op_to_wire, recoverable_block_to_wire,
+};
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{broadcast, mpsc};
 
@@ -251,6 +253,22 @@ where
                     .send(CollabServerMsg::Recoverable { note, blocks })
                     .await;
             }
+            CollabClientMsg::Restore {
+                note,
+                id,
+                version_index,
+            } => {
+                let Ok(path) = NotePath::new(&note) else {
+                    let _ = out_tx
+                        .send(CollabServerMsg::Error {
+                            note,
+                            message: "invalid note path".into(),
+                        })
+                        .await;
+                    continue;
+                };
+                restore_block(&collab, &path, block_id_from_wire(id), version_index);
+            }
         }
     }
 
@@ -422,6 +440,40 @@ pub(crate) fn recoverable_blocks(
         .get(path)
         .map(|sess| sess.doc.recoverable_blocks())
         .unwrap_or_default()
+}
+
+/// Restore a recoverable version into a session's live replica: synthesize the
+/// insert on the session doc and fan it out authored as the daemon (origin
+/// `DAEMON_REPLICA`) so it reaches every peer INCLUDING the requester — which does
+/// not yet hold the restored block. Marks the session dirty so the next flush
+/// materializes it. A no-op when there is no session or the id/version is unknown.
+/// The mutating counterpart of the view-only `recoverable_blocks`; mirrors the
+/// `Op`-arm / fold-back fanout.
+pub(crate) fn restore_block(
+    collab: &Collab,
+    path: &NotePath,
+    id: cairn_domain::BlockId,
+    version_index: usize,
+) {
+    let mut reg = lock(collab);
+    let Some(sess) = reg.get_mut(path) else {
+        return;
+    };
+    let ops = sess.doc.restore(id, version_index);
+    let produced = !ops.is_empty();
+    for op in ops {
+        let _ = sess.peers.send(Fanout {
+            origin: DAEMON_REPLICA,
+            msg: CollabServerMsg::Op {
+                note: path.as_str().to_string(),
+                op: block_op_to_wire(op),
+            },
+        });
+    }
+    if produced {
+        sess.dirty = true;
+        sess.last_op = Instant::now();
+    }
 }
 
 /// Record a foreign on-disk edit detected by the watcher: if `disk` diverges from
@@ -746,5 +798,63 @@ mod flush_tests {
         let reg = registry();
         let p = NotePath::new("nope.md").unwrap();
         assert!(recoverable_blocks(&reg, &p).is_empty());
+    }
+
+    #[test]
+    fn restore_block_fans_out_insert_and_marks_dirty() {
+        let reg = registry();
+        let p = NotePath::new("n.md").unwrap();
+        insert_dirty_session(&reg, &p, "keep\n\ngone\n", vec![]);
+        add_participant(&reg, &p, 7);
+        let gone = {
+            let reg = lock(&reg);
+            reg.get(&p).unwrap().doc.block_ids_in_order()[1]
+        };
+        merge_op(
+            &reg,
+            &p,
+            BlockOp::Delete {
+                id: gone,
+                lamport: 5,
+            },
+        );
+        // Clear dirty so the assertion proves the restore itself re-arms the flush.
+        lock(&reg).get_mut(&p).unwrap().dirty = false;
+
+        let mut rx = test_subscribe(&reg, &p);
+        restore_block(&reg, &p, gone, 0);
+
+        // Exactly one Insert fanned out, authored as the daemon so it reaches the
+        // requester too.
+        let f = rx.try_recv().expect("restore fanned out an op");
+        assert_eq!(f.origin, DAEMON_REPLICA);
+        assert!(matches!(fanout_op(&f), Some(BlockOp::Insert { .. })));
+        assert!(rx.try_recv().is_err(), "exactly one op fanned out");
+        // Session re-armed and the deleted content is live again, in its old slot.
+        assert!(lock(&reg).get(&p).unwrap().dirty, "restore marks dirty");
+        assert_eq!(
+            lock(&reg).get(&p).unwrap().doc.materialize(),
+            "keep\n\ngone\n"
+        );
+    }
+
+    #[test]
+    fn restore_block_invalid_is_inert() {
+        let reg = registry();
+        let p = NotePath::new("n.md").unwrap();
+        insert_dirty_session(&reg, &p, "a\n", vec![]);
+        let id = { lock(&reg).get(&p).unwrap().doc.block_ids_in_order()[0] };
+        lock(&reg).get_mut(&p).unwrap().dirty = false;
+
+        let mut rx = test_subscribe(&reg, &p);
+        // Live block with nothing recoverable ⇒ index 0 misses: no fanout, no dirty.
+        restore_block(&reg, &p, id, 0);
+        assert!(rx.try_recv().is_err(), "invalid restore fans nothing out");
+        assert!(
+            !lock(&reg).get(&p).unwrap().dirty,
+            "invalid restore stays clean"
+        );
+        // Absent session is a silent no-op (must not panic).
+        restore_block(&reg, &NotePath::new("nope.md").unwrap(), id, 0);
     }
 }
