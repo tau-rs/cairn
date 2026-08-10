@@ -72,7 +72,7 @@ jobs:
         with:
           shared-key: linux
           with-mold: true
-      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
+      - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
         with:
           tool: cargo-hack
       - run: cargo hack --feature-powerset --workspace check --all-targets
@@ -128,7 +128,7 @@ jobs:
           shared-key: linux
           with-nextest: true
           with-mold: true
-      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
+      - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
         with:
           tool: cargo-mutants
       - run: cargo mutants --workspace --no-shuffle --timeout 120 -j 2
@@ -157,7 +157,7 @@ jobs:
           with-nextest: true
           with-sccache: true
           with-mold: true
-      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
+      - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
         with:
           tool: cargo-llvm-cov
       - name: Generate lcov coverage
