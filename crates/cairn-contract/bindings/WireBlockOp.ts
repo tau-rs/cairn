@@ -7,4 +7,16 @@ import type { WireBlockKind } from "./WireBlockKind";
  * A replicated block operation on the wire (mirror of `cairn-domain`
  * `BlockOp`). The only CRDT type carried by `/collab`.
  */
-export type WireBlockOp = { "op": "insert", id: WireBlockId, after: WireBlockId | null, lamport: bigint, kind: WireBlockKind, text: string, } | { "op": "delete", id: WireBlockId, lamport: bigint, } | { "op": "set_content", id: WireBlockId, text: string, lamport: bigint, author: WireAuthor, };
+export type WireBlockOp = { "op": "insert", id: WireBlockId, after: WireBlockId | null, 
+/**
+ * Lamport clock. String-encoded (unbounded u64). See `u64_string`.
+ */
+lamport: string, kind: WireBlockKind, text: string, } | { "op": "delete", id: WireBlockId, 
+/**
+ * Lamport clock. String-encoded (unbounded u64). See `u64_string`.
+ */
+lamport: string, } | { "op": "set_content", id: WireBlockId, text: string, 
+/**
+ * Lamport clock. String-encoded (unbounded u64). See `u64_string`.
+ */
+lamport: string, author: WireAuthor, };

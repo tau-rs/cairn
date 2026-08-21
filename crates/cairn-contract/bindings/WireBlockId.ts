@@ -4,4 +4,12 @@
  * A block's live-only identity, mirrored for the wire. See `cairn-domain`
  * `BlockId`. Stripped on materialize; meaningful only within a live session.
  */
-export type WireBlockId = { replica: bigint, counter: bigint, };
+export type WireBlockId = { 
+/**
+ * Authoring replica id. String-encoded — reaches `u64::MAX`. See `u64_string`.
+ */
+replica: string, 
+/**
+ * Per-replica monotonic counter. String-encoded. See `u64_string`.
+ */
+counter: string, };
