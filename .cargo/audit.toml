@@ -19,4 +19,15 @@ ignore = [
     # semver range and tantivy 0.26.1 is already the latest release, so there is
     # no upgrade path today. Re-evaluate when tantivy bumps its `lru` req.
     "RUSTSEC-2026-0253",
+
+    # RUSTSEC-2024-0436 — `paste` 1.0.15 is unmaintained (no CVE). It is a
+    # BUILD-TIME proc-macro that emits no runtime code, pulled purely
+    # transitively behind cairn-infra's optional `neural` feature via
+    # candle-core 0.9.2 -> gemm/pulp (and tokenizers). 1.0.15 is its final
+    # release, so there is no version to move to, and dropping it requires the
+    # upstream ML stack to migrate off `paste`; candle is pinned at 0.9.2 (0.11
+    # breaks aarch64 builds, held via #153). cargo-deny already excludes this
+    # via its `unmaintained = "workspace"` scope. Re-evaluate when candle/gemm
+    # drop their `paste` dependency.
+    "RUSTSEC-2024-0436",
 ]
