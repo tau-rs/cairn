@@ -5,4 +5,9 @@ import type { WireBlockOp } from "./WireBlockOp";
 /**
  * Messages a collaboration client sends to the daemon over `/collab`.
  */
-export type CollabClientMsg = { "type": "join", note: string, replica: bigint, } | { "type": "op", note: string, op: WireBlockOp, } | { "type": "leave", note: string, } | { "type": "recover", note: string, } | { "type": "restore", note: string, id: WireBlockId, version_index: number, };
+export type CollabClientMsg = { "type": "join", note: string, 
+/**
+ * Client-chosen replica id. String-encoded uniformly with the rest of
+ * the wire so a future large replica can't silently corrupt. See `u64_string`.
+ */
+replica: string, } | { "type": "op", note: string, op: WireBlockOp, } | { "type": "leave", note: string, } | { "type": "recover", note: string, } | { "type": "restore", note: string, id: WireBlockId, version_index: number, };

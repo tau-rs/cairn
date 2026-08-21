@@ -599,12 +599,38 @@ pub enum ContractError {
     },
 }
 
+/// Serde codec that carries a `u64` as a decimal JSON **string** (and forces the
+/// ts-rs binding to `string`). Block-id replicas reach `u64::MAX` (the daemon's
+/// seed replica) and lamports are unbounded; JS numbers are f64, so a bare JSON
+/// number above 2^53 is silently rounded by `JSON.parse` and the id no longer
+/// round-trips. Every u64 on the `/collab` wire is string-encoded so it survives
+/// losslessly. The wire is string-only: a bare number no longer deserializes.
+mod u64_string {
+    use serde::{de, Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(value: &u64, ser: S) -> Result<S::Ok, S::Error> {
+        ser.serialize_str(&value.to_string())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<u64, D::Error> {
+        let s = String::deserialize(de)?;
+        s.parse::<u64>()
+            .map_err(|e| de::Error::custom(format!("invalid u64 wire string {s:?}: {e}")))
+    }
+}
+
 /// A block's live-only identity, mirrored for the wire. See `cairn-domain`
 /// `BlockId`. Stripped on materialize; meaningful only within a live session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct WireBlockId {
+    /// Authoring replica id. String-encoded — reaches `u64::MAX`. See `u64_string`.
+    #[serde(with = "u64_string")]
+    #[ts(type = "string")]
     pub replica: u64,
+    /// Per-replica monotonic counter. String-encoded. See `u64_string`.
+    #[serde(with = "u64_string")]
+    #[ts(type = "string")]
     pub counter: u64,
 }
 
@@ -641,17 +667,26 @@ pub enum WireBlockOp {
     Insert {
         id: WireBlockId,
         after: Option<WireBlockId>,
+        /// Lamport clock. String-encoded (unbounded u64). See `u64_string`.
+        #[serde(with = "u64_string")]
+        #[ts(type = "string")]
         lamport: u64,
         kind: WireBlockKind,
         text: String,
     },
     Delete {
         id: WireBlockId,
+        /// Lamport clock. String-encoded (unbounded u64). See `u64_string`.
+        #[serde(with = "u64_string")]
+        #[ts(type = "string")]
         lamport: u64,
     },
     SetContent {
         id: WireBlockId,
         text: String,
+        /// Lamport clock. String-encoded (unbounded u64). See `u64_string`.
+        #[serde(with = "u64_string")]
+        #[ts(type = "string")]
         lamport: u64,
         author: WireAuthor,
     },
@@ -674,7 +709,14 @@ pub struct WireRecoverableBlock {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CollabClientMsg {
     /// Seed me from the live session and subscribe to `note`.
-    Join { note: String, replica: u64 },
+    Join {
+        note: String,
+        /// Client-chosen replica id. String-encoded uniformly with the rest of
+        /// the wire so a future large replica can't silently corrupt. See `u64_string`.
+        #[serde(with = "u64_string")]
+        #[ts(type = "string")]
+        replica: u64,
+    },
     /// One local edit to broadcast.
     Op { note: String, op: WireBlockOp },
     /// Unsubscribe from `note`.
@@ -1178,7 +1220,7 @@ mod collab_wire_tests {
         let v: serde_json::Value = serde_json::to_value(&op).unwrap();
         assert_eq!(v["op"], "insert");
         assert_eq!(v["kind"], "paragraph");
-        assert_eq!(v["id"]["replica"], 1);
+        assert_eq!(v["id"]["replica"], "1");
     }
 
     #[test]
@@ -1190,6 +1232,67 @@ mod collab_wire_tests {
         let text = serde_json::to_string(&msg).unwrap();
         let back: CollabClientMsg = serde_json::from_str(&text).unwrap();
         assert_eq!(msg, back);
+    }
+
+    // The `/collab` wire carries every u64 (block-id replica/counter and
+    // lamports) as a decimal JSON *string*, so values above 2^53 survive a
+    // JavaScript `JSON.parse` losslessly. See `mod u64_string`.
+
+    #[test]
+    fn wire_block_id_u64_max_round_trips_as_strings() {
+        let id = WireBlockId {
+            replica: u64::MAX,
+            counter: u64::MAX - 1,
+        };
+        let v: serde_json::Value = serde_json::to_value(id).unwrap();
+        assert!(v["replica"].is_string(), "replica must serialize as string");
+        assert!(v["counter"].is_string(), "counter must serialize as string");
+        assert_eq!(v["replica"], serde_json::json!("18446744073709551615"));
+        assert_eq!(v["counter"], serde_json::json!("18446744073709551614"));
+        let back: WireBlockId = serde_json::from_value(v).unwrap();
+        assert_eq!(back, id);
+    }
+
+    #[test]
+    fn wire_block_op_lamport_and_ids_are_strings() {
+        let op = WireBlockOp::Delete {
+            id: WireBlockId {
+                replica: u64::MAX,
+                counter: 5,
+            },
+            lamport: u64::MAX,
+        };
+        let v: serde_json::Value = serde_json::to_value(&op).unwrap();
+        assert!(v["lamport"].is_string(), "lamport must serialize as string");
+        assert!(v["id"]["replica"].is_string());
+        assert_eq!(v["lamport"], serde_json::json!("18446744073709551615"));
+        let back: WireBlockOp = serde_json::from_value(v).unwrap();
+        assert_eq!(back, op);
+    }
+
+    #[test]
+    fn join_replica_is_string() {
+        let msg = CollabClientMsg::Join {
+            note: "n.md".into(),
+            replica: u64::MAX,
+        };
+        let v: serde_json::Value = serde_json::to_value(&msg).unwrap();
+        assert!(v["replica"].is_string());
+        let back: CollabClientMsg = serde_json::from_value(v).unwrap();
+        assert_eq!(back, msg);
+    }
+
+    #[test]
+    fn wire_block_id_rejects_non_numeric_string() {
+        let bad = serde_json::json!({ "replica": "not-a-number", "counter": "0" });
+        assert!(serde_json::from_value::<WireBlockId>(bad).is_err());
+    }
+
+    #[test]
+    fn wire_block_id_rejects_bare_number() {
+        // Breaking wire change: the legacy numeric encoding must no longer parse.
+        let bad = serde_json::json!({ "replica": 1, "counter": 2 });
+        assert!(serde_json::from_value::<WireBlockId>(bad).is_err());
     }
 
     #[test]

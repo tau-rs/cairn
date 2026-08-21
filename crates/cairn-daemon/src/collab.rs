@@ -857,4 +857,81 @@ mod flush_tests {
         // Absent session is a silent no-op (must not panic).
         restore_block(&reg, &NotePath::new("nope.md").unwrap(), id, 0);
     }
+
+    /// The exact QA gap: a block authored by the daemon seed replica
+    /// (`replica == u64::MAX`) must survive the `/collab` wire. A bare JSON
+    /// number above 2^53 is rounded by JS `JSON.parse`, so the echoed id no
+    /// longer matched. Every u64 is now string-encoded: the id emitted in
+    /// `Recoverable` and echoed back in `Restore` round-trips exactly.
+    #[test]
+    fn daemon_seeded_block_recovers_and_restores_over_string_wire() {
+        let reg = registry();
+        let p = NotePath::new("n.md").unwrap();
+        // Blocks are authored by DAEMON_REPLICA (u64::MAX), the seed replica.
+        insert_dirty_session(&reg, &p, "keep\n\ngone\n", vec![]);
+        let gone = {
+            let reg = lock(&reg);
+            reg.get(&p).unwrap().doc.block_ids_in_order()[1]
+        };
+        assert_eq!(
+            gone.replica, DAEMON_REPLICA,
+            "seed blocks are authored by the daemon replica"
+        );
+
+        // Delete it, then recover: the tombstoned block is listed with its content.
+        merge_op(
+            &reg,
+            &p,
+            BlockOp::Delete {
+                id: gone,
+                lamport: 5,
+            },
+        );
+        let wire: Vec<_> = recoverable_blocks(&reg, &p)
+            .into_iter()
+            .map(recoverable_block_to_wire)
+            .collect();
+        let target = wire
+            .iter()
+            .find(|b| b.tombstoned && b.versions.iter().any(|v| v == "gone"))
+            .expect("deleted daemon-seeded block is recoverable");
+        assert_eq!(target.id.replica, DAEMON_REPLICA);
+
+        // OUTBOUND: the id rides `Recoverable` as a decimal STRING, not a bare
+        // number JS would round — the assertion the old numeric wire failed.
+        let out = serde_json::to_string(&CollabServerMsg::Recoverable {
+            note: p.as_str().to_string(),
+            blocks: wire.clone(),
+        })
+        .unwrap();
+        assert!(
+            out.contains(r#""replica":"18446744073709551615""#),
+            "daemon replica must serialize as a quoted decimal string, got: {out}"
+        );
+
+        // INBOUND: a client echoes the id back in a string-encoded `Restore`; it
+        // deserializes and converts to the exact same domain id (lossless).
+        let restore_json = format!(
+            r#"{{"type":"restore","note":"n.md","id":{{"replica":"{}","counter":"{}"}},"version_index":0}}"#,
+            target.id.replica, target.id.counter
+        );
+        let CollabClientMsg::Restore {
+            id, version_index, ..
+        } = serde_json::from_str(&restore_json).unwrap()
+        else {
+            panic!("expected a Restore message");
+        };
+        let recovered_id = block_id_from_wire(id);
+        assert_eq!(recovered_id, gone, "u64::MAX id round-trips over the wire");
+
+        // The restore re-inserts the block in its old slot and re-arms the flush.
+        lock(&reg).get_mut(&p).unwrap().dirty = false;
+        restore_block(&reg, &p, recovered_id, version_index);
+        assert!(lock(&reg).get(&p).unwrap().dirty, "restore marks dirty");
+        assert_eq!(
+            lock(&reg).get(&p).unwrap().doc.materialize(),
+            "keep\n\ngone\n",
+            "the daemon-seeded content is live again"
+        );
+    }
 }
