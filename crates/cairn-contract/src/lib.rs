@@ -599,12 +599,37 @@ pub enum ContractError {
     },
 }
 
+/// Serde codec that carries a `u64` as a decimal *string* on the wire. JSON
+/// numbers are IEEE doubles once parsed in JS, so any id > 2^53 (e.g. a seed
+/// replica ≈ 2^64) loses precision as a bare number; a string survives exactly.
+mod u64_str {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &u64, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&v.to_string())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+        String::deserialize(d)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 /// A block's live-only identity, mirrored for the wire. See `cairn-domain`
 /// `BlockId`. Stripped on materialize; meaningful only within a live session.
+///
+/// Both fields are `u64` but ride the wire as decimal strings (see [`u64_str`]):
+/// a seed replica id ≈ 2^64 exceeds JS's 2^53 safe-integer range, so a JSON
+/// number would be silently corrupted and the block could not round-trip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct WireBlockId {
+    #[serde(with = "u64_str")]
+    #[ts(type = "string")]
     pub replica: u64,
+    #[serde(with = "u64_str")]
+    #[ts(type = "string")]
     pub counter: u64,
 }
 
@@ -1178,7 +1203,7 @@ mod collab_wire_tests {
         let v: serde_json::Value = serde_json::to_value(&op).unwrap();
         assert_eq!(v["op"], "insert");
         assert_eq!(v["kind"], "paragraph");
-        assert_eq!(v["id"]["replica"], 1);
+        assert_eq!(v["id"]["replica"], "1");
     }
 
     #[test]
@@ -1217,6 +1242,29 @@ mod collab_wire_tests {
         assert!(json.contains("\"type\":\"restore\""));
         let back: CollabClientMsg = serde_json::from_str(&json).unwrap();
         assert_eq!(msg, back);
+    }
+
+    #[test]
+    fn wire_block_id_encodes_u64_as_string_and_round_trips() {
+        // A seed-replica id (≈ 2^64) exceeds 2^53, so a JSON *number* would be
+        // corrupted by JS `JSON.parse` (IEEE double). String-encoding keeps the
+        // full u64 exact across the wire. serde_json is lossless in Rust, so the
+        // load-bearing assertion is the wire *shape*: both id fields are quoted.
+        let id = WireBlockId {
+            replica: u64::MAX,
+            counter: u64::MAX - 1,
+        };
+        let json = serde_json::to_string(&id).unwrap();
+        assert!(
+            json.contains("\"replica\":\"18446744073709551615\""),
+            "replica must serialize as a quoted string, got: {json}"
+        );
+        assert!(
+            json.contains("\"counter\":\"18446744073709551614\""),
+            "counter must serialize as a quoted string, got: {json}"
+        );
+        let back: WireBlockId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
     }
 
     #[test]

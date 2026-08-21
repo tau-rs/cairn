@@ -3,5 +3,9 @@
 /**
  * A block's live-only identity, mirrored for the wire. See `cairn-domain`
  * `BlockId`. Stripped on materialize; meaningful only within a live session.
+ *
+ * Both fields are `u64` but ride the wire as decimal strings (see [`u64_str`]):
+ * a seed replica id ≈ 2^64 exceeds JS's 2^53 safe-integer range, so a JSON
+ * number would be silently corrupted and the block could not round-trip.
  */
-export type WireBlockId = { replica: bigint, counter: bigint, };
+export type WireBlockId = { replica: string, counter: string, };
