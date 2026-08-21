@@ -22,6 +22,12 @@ approved**, not blindly trusted.
 
 ## Trust model: an approved plugin is fully-trusted code
 
+> **Status (post-S3):** this section documents the original allowlist PR. Since
+> then an OS sandbox and content-hash pinning have shipped (see "Follow-ups"
+> below), so the "no OS-level sandbox" caveat here is now historical — a sandbox
+> exists, but it still is not a boundary for running untrusted code. The
+> user-facing summary lives in `README.md` ("Plugin trust model").
+
 State this plainly, because it is easy to misread the allowlist as a sandbox:
 
 **An approved (trusted-listed) plugin is fully-trusted code. It runs as a child
@@ -175,12 +181,22 @@ The existing ~14 host tests are updated to pass a trust set containing
 `"example"` (via a small local `load`/`load_with_timeout` helper to keep the
 churn centralized).
 
-## Follow-ups (PR body, not this PR)
+## Follow-ups (post-S3, tracked in #40)
 
-- Manifest signing / content hashing pinned in the trust list (detect a trusted
-  directory whose contents changed).
-- OS-level sandbox for the spawned child (seccomp/landlock/sandbox-exec).
-- Interactive first-run approval + surfacing declared capabilities to the user.
+All four increments have since shipped; the "Trust model" section above describes
+the *original* allowlist PR and is retained as history. The current model
+(content pinning + OS sandbox + interactive approval) is documented for users in
+the **"Plugin trust model"** section of the top-level `README.md`, and for plugin
+authors in the security note in `crates/cairn-plugin-sdk/src/lib.rs`.
+
+- Manifest signing / content hashing pinned in the trust list. **Done** — a pin
+  is a `sha256:` digest of the directory tree; a trusted dir whose contents
+  changed hashes to `Drift` and refuses to spawn (`PinnedHash::of_dir`, the
+  pre-spawn check in `plugin_host.rs`).
+- OS-level sandbox for the spawned child. **Done** — Seatbelt/`sandbox-exec`
+  (macOS, #60), bubblewrap (Linux, #61), AppContainer (Windows, #62).
+- Interactive first-run approval + surfacing declared capabilities. **Done** —
+  `cairn plugin trust` renders an approval screen (command, content hash, typed
+  capability vocabulary) and prompts y/N on stdin (#138).
 - Documentation: state explicitly that an approved plugin is fully trusted code.
-  *(Done — see "Trust model" above and the security note in
-  `crates/cairn-plugin-sdk/src/lib.rs`.)*
+  **Done** — the README "Plugin trust model" section and the SDK security note.
