@@ -1,0 +1,22 @@
+# cargo-audit configuration. See https://github.com/rustsec/rustsec/tree/main/cargo-audit
+#
+# The scheduled CVE scanner (.github/workflows/security-daily.yml) runs
+# `cargo audit` against the committed lockfile and files a GitHub issue for any
+# advisory it has not seen before. Record accepted advisories here so they are
+# not re-surfaced (and so the acceptance rationale lives in-repo, not only in a
+# closed issue). cargo-deny keeps its own advisory `ignore` list in deny.toml;
+# only advisories that cargo-deny actually denies belong there.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2026-0253 — `lru` 0.16.4 `LruCache::pop()` is not panic-safe: a
+    # use-after-free is possible only if a stored cache KEY has a panicking
+    # `Drop` and is used under `catch_unwind`. `lru` reaches cairn purely
+    # transitively via `tantivy` 0.26.1 (`lru ^0.16.3`); no cairn crate depends
+    # on or calls `lru` directly, and tantivy keys its internal caches with
+    # plain ids that have no panicking `Drop`, so the precondition is
+    # unreachable from cairn. No patched `lru` is published within tantivy's
+    # semver range and tantivy 0.26.1 is already the latest release, so there is
+    # no upgrade path today. Re-evaluate when tantivy bumps its `lru` req.
+    "RUSTSEC-2026-0253",
+]
