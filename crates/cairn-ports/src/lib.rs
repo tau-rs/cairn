@@ -386,6 +386,22 @@ pub trait Vcs {
     /// [`PortError::NotFound`] if the revspec does not resolve;
     /// [`PortError::Adapter`] on a git failure.
     fn commit_summary(&self, revision: &str) -> Result<DiffSummary, PortError>;
+
+    /// Create or replace the cairn name for `revision` (annotated tag
+    /// `refs/tags/cairn/<slug>`; the tag message holds `name` exactly).
+    /// Re-naming an already-named commit replaces its name.
+    ///
+    /// # Errors
+    /// [`PortError::NotFound`] if the revspec does not resolve;
+    /// [`PortError::AlreadyExists`] if `name` already labels a different
+    /// commit; [`PortError::Adapter`] on a git failure.
+    fn name_version(&mut self, revision: &str, name: &str) -> Result<(), PortError>;
+
+    /// All cairn names: 7-char short commit id → exact display name.
+    ///
+    /// # Errors
+    /// [`PortError::Adapter`] on a git failure.
+    fn named_versions(&self) -> Result<std::collections::HashMap<String, String>, PortError>;
 }
 
 /// A change to a note detected on disk.

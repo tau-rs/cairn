@@ -2409,6 +2409,12 @@ mod tests {
         fn commit_summary(&self, _revision: &str) -> Result<cairn_ports::DiffSummary, PortError> {
             Ok(cairn_ports::DiffSummary::default())
         }
+        fn name_version(&mut self, _revision: &str, _name: &str) -> Result<(), PortError> {
+            Ok(())
+        }
+        fn named_versions(&self) -> Result<std::collections::HashMap<String, String>, PortError> {
+            Ok(Default::default())
+        }
     }
 
     #[test]

@@ -201,6 +201,28 @@ fn tree_has_md_change(
     Ok(false)
 }
 
+/// Lowercased, alphanumerics kept, everything else collapsed to single '-',
+/// trimmed. Empty (all-symbol) slugs fall back to the commit id.
+fn slugify(name: &str, fallback: &str) -> String {
+    let mut out = String::new();
+    let mut dash = false;
+    for c in name.to_lowercase().chars() {
+        if c.is_alphanumeric() {
+            out.push(c);
+            dash = false;
+        } else if !dash && !out.is_empty() {
+            out.push('-');
+            dash = true;
+        }
+    }
+    let out = out.trim_end_matches('-').to_string();
+    if out.is_empty() {
+        fallback.to_string()
+    } else {
+        out
+    }
+}
+
 /// The commit identity for cairn-made commits: the repo's configured git
 /// identity (`user.name`/`user.email`, as merged from local/global/system
 /// config) when both are set, else a `Cairn` default so a commit can still be
@@ -522,6 +544,81 @@ impl Vcs for GitVcs {
         let read_new = |p: &Path| blob_of(Some(&new_tree), p);
         let read_old = |p: &Path| blob_of(old_tree.as_ref(), p);
         summarize_diff(&diff, &read_new, &read_old).map_err(adapt)
+    }
+
+    fn name_version(&mut self, revision: &str, name: &str) -> Result<(), PortError> {
+        let repo = Repository::open(&self.root).map_err(adapt)?;
+        let commit = repo
+            .revparse_single(revision)
+            .and_then(|o| o.peel_to_commit())
+            .map_err(|_| PortError::NotFound(format!("revision {revision}")))?;
+        let short = commit.id().to_string()[..7].to_string();
+
+        // Uniqueness of display names + replace-on-same-commit: walk cairn tags.
+        let mut to_delete: Vec<String> = Vec::new();
+        for r in repo.references_glob("refs/tags/cairn/*").map_err(adapt)? {
+            let r = r.map_err(adapt)?;
+            let Ok(refname) = r.name().map(str::to_string) else {
+                continue;
+            };
+            let Ok(tag) = r.peel_to_tag() else { continue };
+            let existing_name = tag
+                .message()
+                .ok()
+                .flatten()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let target = tag.target_id().to_string();
+            if existing_name == name && !target.starts_with(&short) {
+                return Err(PortError::AlreadyExists(format!(
+                    "name \"{name}\" already labels commit {}",
+                    &target[..7]
+                )));
+            }
+            if target.starts_with(&short) {
+                to_delete.push(refname); // replace this commit's old name
+            }
+        }
+        for refname in to_delete {
+            repo.find_reference(&refname)
+                .and_then(|mut r| r.delete())
+                .map_err(adapt)?;
+        }
+
+        // Unique ref: suffix -2, -3… on slug collisions with other commits.
+        let base = slugify(name, &short);
+        let mut tagname = format!("cairn/{base}");
+        let mut n = 1;
+        while repo.find_reference(&format!("refs/tags/{tagname}")).is_ok() {
+            n += 1;
+            tagname = format!("cairn/{base}-{n}");
+        }
+        let sig = signature_from_config(&repo.config().map_err(adapt)?)?;
+        repo.tag(&tagname, commit.as_object(), &sig, name, false)
+            .map_err(adapt)?;
+        Ok(())
+    }
+
+    fn named_versions(&self) -> Result<std::collections::HashMap<String, String>, PortError> {
+        let repo = Repository::open(&self.root).map_err(adapt)?;
+        let mut out = std::collections::HashMap::new();
+        for r in repo.references_glob("refs/tags/cairn/*").map_err(adapt)? {
+            let r = r.map_err(adapt)?;
+            let Ok(tag) = r.peel_to_tag() else { continue };
+            let name = tag
+                .message()
+                .ok()
+                .flatten()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if name.is_empty() {
+                continue;
+            }
+            out.insert(tag.target_id().to_string()[..7].to_string(), name);
+        }
+        Ok(out)
     }
 }
 
@@ -990,5 +1087,73 @@ mod tests {
             vcs.commit_summary("nope"),
             Err(PortError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn name_version_round_trips_unicode_display_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut vcs = GitVcs::open_or_init(tmp.path()).unwrap();
+        fs::write(tmp.path().join("a.md"), "x").unwrap();
+        let c1 = vcs.commit_all("c1").unwrap();
+        vcs.name_version(&c1, "Avant la grande réorg ✨").unwrap();
+        let names = vcs.named_versions().unwrap();
+        assert_eq!(
+            names.get(&c1).map(String::as_str),
+            Some("Avant la grande réorg ✨")
+        );
+    }
+
+    #[test]
+    fn name_version_replaces_on_same_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut vcs = GitVcs::open_or_init(tmp.path()).unwrap();
+        fs::write(tmp.path().join("a.md"), "x").unwrap();
+        let c1 = vcs.commit_all("c1").unwrap();
+        vcs.name_version(&c1, "first").unwrap();
+        vcs.name_version(&c1, "second").unwrap();
+        let names = vcs.named_versions().unwrap();
+        assert_eq!(names.len(), 1, "old tag removed");
+        assert_eq!(names.get(&c1).map(String::as_str), Some("second"));
+    }
+
+    #[test]
+    fn name_version_rejects_reuse_on_different_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut vcs = GitVcs::open_or_init(tmp.path()).unwrap();
+        fs::write(tmp.path().join("a.md"), "x").unwrap();
+        let c1 = vcs.commit_all("c1").unwrap();
+        fs::write(tmp.path().join("a.md"), "y").unwrap();
+        let c2 = vcs.commit_all("c2").unwrap();
+        vcs.name_version(&c1, "milestone").unwrap();
+        let err = vcs.name_version(&c2, "milestone").unwrap_err();
+        assert!(matches!(err, PortError::AlreadyExists(_)));
+        // Same name on the SAME commit is an idempotent success.
+        vcs.name_version(&c1, "milestone").unwrap();
+    }
+
+    #[test]
+    fn name_version_unknown_revision_is_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut vcs = GitVcs::open_or_init(tmp.path()).unwrap();
+        assert!(matches!(
+            vcs.name_version("nope", "x"),
+            Err(PortError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn name_version_slug_collision_suffixes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut vcs = GitVcs::open_or_init(tmp.path()).unwrap();
+        fs::write(tmp.path().join("a.md"), "x").unwrap();
+        let c1 = vcs.commit_all("c1").unwrap();
+        fs::write(tmp.path().join("a.md"), "y").unwrap();
+        let c2 = vcs.commit_all("c2").unwrap();
+        // Different display names, same slug ("v1!" and "v1?" → "v1").
+        vcs.name_version(&c1, "v1!").unwrap();
+        vcs.name_version(&c2, "v1?").unwrap();
+        let names = vcs.named_versions().unwrap();
+        assert_eq!(names.get(&c1).map(String::as_str), Some("v1!"));
+        assert_eq!(names.get(&c2).map(String::as_str), Some("v1?"));
     }
 }
