@@ -13,6 +13,8 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
+pub mod commit_msg;
+
 /// Schema version of `.cairn/state.json`. Tags the hash regime: bump this
 /// whenever `Note::content_hash`'s algorithm changes so stale persisted hashes
 /// are rebuilt (cold) rather than silently trusted.
