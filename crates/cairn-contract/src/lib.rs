@@ -31,10 +31,20 @@ pub enum Command {
         /// New relative path (may be in a different directory).
         to: String,
     },
-    /// Commit all changes with a message.
+    /// Commit all changes. With no message the engine generates one from the
+    /// pending diff — this is the "seal now" gesture.
     Commit {
-        /// Commit message.
-        message: String,
+        /// Commit message; `None`/absent ⇒ engine-generated.
+        #[serde(default)]
+        message: Option<String>,
+    },
+    /// Label a commit as a named version (replaces the commit's prior name;
+    /// reusing a name held by a different commit is invalid).
+    NameVersion {
+        /// Commit id (short or full) to label.
+        commit: String,
+        /// Display name, any string.
+        name: String,
     },
     /// Restore a note to a past revision (writes that version as current).
     RestoreNote {
@@ -234,6 +244,8 @@ pub enum CommandResponse {
         /// Short commit id.
         commit: String,
     },
+    /// Commit requested but the working tree matched HEAD; nothing was created.
+    NothingToCommit,
     /// Result of a plugin command (arbitrary JSON).
     PluginResult {
         /// The command's JSON output.
@@ -491,6 +503,18 @@ pub struct SearchResult {
     pub highlights: Vec<(u32, u32)>,
 }
 
+/// What a commit changed, in note terms (engine-computed).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ChangeSummary {
+    /// Number of files touched.
+    pub files_changed: u32,
+    /// Unicode-whitespace-split words added.
+    pub words_added: u32,
+    /// Unicode-whitespace-split words removed.
+    pub words_removed: u32,
+}
+
 /// One commit in a note's history (response element of `NoteHistory`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -507,6 +531,12 @@ pub struct Revision {
     pub timestamp_secs: i64,
     /// Author name.
     pub author: String,
+    /// Change summary; `None` where the engine skipped computing it.
+    #[serde(default)]
+    pub summary: Option<ChangeSummary>,
+    /// Named-version label, if this commit carries one.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 /// Result of a successful query.
@@ -1109,6 +1139,64 @@ mod tests {
                 "pluginValues.ts is missing widget kind \"{wire}\""
             );
         }
+    }
+
+    #[test]
+    fn commit_message_is_optional_and_legacy_string_still_parses() {
+        // Legacy payload (message as string) must keep deserializing.
+        let legacy = r#"{"type":"commit","message":"hi"}"#;
+        let c: Command = serde_json::from_str(legacy).unwrap();
+        assert_eq!(
+            c,
+            Command::Commit {
+                message: Some("hi".into())
+            }
+        );
+        // Seal-now forms: explicit null and absent.
+        let sealed: Command = serde_json::from_str(r#"{"type":"commit","message":null}"#).unwrap();
+        assert_eq!(sealed, Command::Commit { message: None });
+        let absent: Command = serde_json::from_str(r#"{"type":"commit"}"#).unwrap();
+        assert_eq!(absent, Command::Commit { message: None });
+    }
+
+    #[test]
+    fn name_version_command_and_nothing_to_commit_roundtrip() {
+        let cmd = Command::NameVersion {
+            commit: "ab12f3e".into(),
+            name: "Milestone".into(),
+        };
+        let j = serde_json::to_string(&cmd).unwrap();
+        assert!(j.contains("\"type\":\"name_version\""));
+        assert_eq!(serde_json::from_str::<Command>(&j).unwrap(), cmd);
+
+        let r = CommandResponse::NothingToCommit;
+        let j = serde_json::to_string(&r).unwrap();
+        assert!(j.contains("\"type\":\"nothing_to_commit\""));
+        assert_eq!(serde_json::from_str::<CommandResponse>(&j).unwrap(), r);
+    }
+
+    #[test]
+    fn revision_new_fields_default_and_roundtrip() {
+        // Legacy payload without the new fields must parse.
+        let legacy = r#"{"id":"ab12f3e","message":"m","timestamp_secs":1,"author":"a"}"#;
+        let r: Revision = serde_json::from_str(legacy).unwrap();
+        assert_eq!(r.summary, None);
+        assert_eq!(r.name, None);
+        // Enriched round-trip.
+        let full = Revision {
+            id: "ab12f3e".into(),
+            message: "Edit \"A\" (+2 words)".into(),
+            timestamp_secs: 1,
+            author: "a".into(),
+            summary: Some(ChangeSummary {
+                files_changed: 1,
+                words_added: 2,
+                words_removed: 0,
+            }),
+            name: Some("Milestone".into()),
+        };
+        let j = serde_json::to_string(&full).unwrap();
+        assert_eq!(serde_json::from_str::<Revision>(&j).unwrap(), full);
     }
 
     #[test]

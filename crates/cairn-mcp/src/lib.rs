@@ -406,6 +406,7 @@ pub fn render_command_result(resp: &CommandResponse) -> ToolResult {
     match resp {
         CommandResponse::Done => ToolResult::text("done"),
         CommandResponse::Committed { commit } => ToolResult::text(format!("committed {commit}")),
+        CommandResponse::NothingToCommit => ToolResult::text("nothing to commit"),
         CommandResponse::PluginResult { result } => {
             ToolResult::text(result.to_string()).with_structured(result.clone())
         }
@@ -475,7 +476,7 @@ pub fn parse_tool_call(name: &str, args: &Value) -> Result<ToolDispatch, RpcErro
             path: arg(args, "path")?,
         }),
         "commit" => C(Command::Commit {
-            message: arg(args, "message")?,
+            message: Some(arg(args, "message")?),
         }),
         other => return Err(RpcError::method_not_found(other)),
     })
@@ -585,7 +586,7 @@ mod tests {
         assert_eq!(
             parse_tool_call("commit", &json!({ "message": "wip" })).unwrap(),
             ToolDispatch::Command(Command::Commit {
-                message: "wip".into()
+                message: Some("wip".into())
             })
         );
     }

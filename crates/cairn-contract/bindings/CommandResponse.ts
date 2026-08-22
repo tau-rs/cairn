@@ -8,7 +8,7 @@ export type CommandResponse = { "type": "done" } | { "type": "committed",
 /**
  * Short commit id.
  */
-commit: string, } | { "type": "plugin_result", 
+commit: string, } | { "type": "nothing_to_commit" } | { "type": "plugin_result", 
 /**
  * The command's JSON output.
  */

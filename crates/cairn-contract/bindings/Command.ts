@@ -26,9 +26,17 @@ from: string,
  */
 to: string, } | { "type": "commit", 
 /**
- * Commit message.
+ * Commit message; `None`/absent ⇒ engine-generated.
  */
-message: string, } | { "type": "restore_note", 
+message: string | null, } | { "type": "name_version", 
+/**
+ * Commit id (short or full) to label.
+ */
+commit: string, 
+/**
+ * Display name, any string.
+ */
+name: string, } | { "type": "restore_note", 
 /**
  * Relative note path.
  */

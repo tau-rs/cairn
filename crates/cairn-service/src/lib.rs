@@ -151,6 +151,23 @@ fn map_scope(scope: &cairn_contract::SuggestionScope) -> Result<cairn_app::Scope
     })
 }
 
+/// Map an engine [`cairn_app::EnrichedRevision`] to the wire [`Revision`],
+/// folding its diff summary (if any) into a [`cairn_contract::ChangeSummary`].
+fn revision_to_wire(r: cairn_app::EnrichedRevision) -> Revision {
+    Revision {
+        id: r.revision.id,
+        message: r.revision.message,
+        timestamp_secs: r.revision.timestamp_secs,
+        author: r.revision.author,
+        summary: r.summary.map(|s| cairn_contract::ChangeSummary {
+            files_changed: u32::try_from(s.changes.len()).unwrap_or(u32::MAX),
+            words_added: s.words_added,
+            words_removed: s.words_removed,
+        }),
+        name: r.name,
+    }
+}
+
 fn map_suggested_edge(e: cairn_app::SuggestedEdgeData) -> SuggestedEdge {
     SuggestedEdge {
         from: e.from.as_str().to_string(),
@@ -188,15 +205,16 @@ pub fn dispatch_command(
             engine.rename_note(&from, &to, sink)?;
             Ok(CommandResponse::Done)
         }
-        Command::Commit { message } => match engine.commit(Some(message), sink)? {
+        Command::Commit { message } => match engine.commit(message.as_deref(), sink)? {
             cairn_app::CommitOutcome::Committed(commit) => {
                 Ok(CommandResponse::Committed { commit })
             }
-            // No wire `NothingToCommit` variant yet (arrives with the contract
-            // rewiring in a later task); `Done` is the closest existing
-            // "succeeded, no further payload" response.
-            cairn_app::CommitOutcome::NothingToCommit => Ok(CommandResponse::Done),
+            cairn_app::CommitOutcome::NothingToCommit => Ok(CommandResponse::NothingToCommit),
         },
+        Command::NameVersion { commit, name } => {
+            engine.name_version(commit, name)?;
+            Ok(CommandResponse::Done)
+        }
         Command::RestoreNote { path, revision } => {
             let p = parse_path(path)?;
             engine.restore_note(&p, revision, sink)?;
@@ -270,12 +288,7 @@ pub fn dispatch_query(engine: &Engine, query: &Query) -> Result<QueryResponse, S
             let revisions = engine
                 .note_history(&p)?
                 .into_iter()
-                .map(|r| Revision {
-                    id: r.revision.id,
-                    message: r.revision.message,
-                    timestamp_secs: r.revision.timestamp_secs,
-                    author: r.revision.author,
-                })
+                .map(revision_to_wire)
                 .collect();
             Ok(QueryResponse::History { revisions })
         }
@@ -283,12 +296,7 @@ pub fn dispatch_query(engine: &Engine, query: &Query) -> Result<QueryResponse, S
             let revisions = engine
                 .vault_history(*limit)?
                 .into_iter()
-                .map(|r| Revision {
-                    id: r.revision.id,
-                    message: r.revision.message,
-                    timestamp_secs: r.revision.timestamp_secs,
-                    author: r.revision.author,
-                })
+                .map(revision_to_wire)
                 .collect();
             Ok(QueryResponse::History { revisions })
         }
@@ -296,12 +304,7 @@ pub fn dispatch_query(engine: &Engine, query: &Query) -> Result<QueryResponse, S
             let revisions = engine
                 .structural_revisions(*limit)?
                 .into_iter()
-                .map(|r| Revision {
-                    id: r.revision.id,
-                    message: r.revision.message,
-                    timestamp_secs: r.revision.timestamp_secs,
-                    author: r.revision.author,
-                })
+                .map(revision_to_wire)
                 .collect();
             Ok(QueryResponse::History { revisions })
         }
@@ -827,12 +830,105 @@ mod tests {
         let commit = dispatch_command(
             &mut eng,
             &Command::Commit {
-                message: "first".into(),
+                message: Some("first".into()),
             },
             &mut sink,
         )
         .unwrap();
         assert!(matches!(commit, CommandResponse::Committed { .. }));
+    }
+
+    #[test]
+    fn commit_none_seals_and_clean_tree_is_nothing_to_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut sink: Vec<AppEvent> = Vec::new();
+        assert_eq!(
+            dispatch_command(&mut eng, &Command::Commit { message: None }, &mut sink).unwrap(),
+            CommandResponse::NothingToCommit
+        );
+        dispatch_command(
+            &mut eng,
+            &Command::WriteNote {
+                path: "a.md".into(),
+                contents: "# A\n\nhi there\n".into(),
+            },
+            &mut sink,
+        )
+        .unwrap();
+        let resp =
+            dispatch_command(&mut eng, &Command::Commit { message: None }, &mut sink).unwrap();
+        assert!(matches!(resp, CommandResponse::Committed { .. }));
+    }
+
+    #[test]
+    fn name_version_dispatch_and_history_carries_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut sink: Vec<AppEvent> = Vec::new();
+        dispatch_command(
+            &mut eng,
+            &Command::WriteNote {
+                path: "a.md".into(),
+                contents: "one two".into(),
+            },
+            &mut sink,
+        )
+        .unwrap();
+        let CommandResponse::Committed { commit } =
+            dispatch_command(&mut eng, &Command::Commit { message: None }, &mut sink).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            dispatch_command(
+                &mut eng,
+                &Command::NameVersion {
+                    commit: commit.clone(),
+                    name: "Milestone".into()
+                },
+                &mut sink,
+            )
+            .unwrap(),
+            CommandResponse::Done
+        );
+        // Reuse on a different commit → InvalidRequest.
+        dispatch_command(
+            &mut eng,
+            &Command::WriteNote {
+                path: "a.md".into(),
+                contents: "three".into(),
+            },
+            &mut sink,
+        )
+        .unwrap();
+        let CommandResponse::Committed { commit: c2 } =
+            dispatch_command(&mut eng, &Command::Commit { message: None }, &mut sink).unwrap()
+        else {
+            panic!()
+        };
+        let err = dispatch_command(
+            &mut eng,
+            &Command::NameVersion {
+                commit: c2,
+                name: "Milestone".into(),
+            },
+            &mut sink,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ServiceError::InvalidRequest(_)));
+
+        // History rows carry name + summary on the wire.
+        let QueryResponse::History { revisions } =
+            dispatch_query(&eng, &Query::VaultHistory { limit: None }).unwrap()
+        else {
+            panic!()
+        };
+        let named = revisions.iter().find(|r| r.id == commit).unwrap();
+        assert_eq!(named.name.as_deref(), Some("Milestone"));
+        let s = named.summary.as_ref().unwrap();
+        assert_eq!(s.files_changed, 1);
+        assert_eq!(s.words_added, 2);
     }
 
     #[test]
@@ -1231,7 +1327,7 @@ mod tests {
         dispatch_command(
             &mut eng,
             &Command::Commit {
-                message: "v1".into(),
+                message: Some("v1".into()),
             },
             &mut sink,
         )
@@ -1248,7 +1344,7 @@ mod tests {
         dispatch_command(
             &mut eng,
             &Command::Commit {
-                message: "v2".into(),
+                message: Some("v2".into()),
             },
             &mut sink,
         )
@@ -1324,7 +1420,7 @@ mod tests {
             dispatch_command(
                 &mut eng,
                 &Command::Commit {
-                    message: msg.into(),
+                    message: Some(msg.into()),
                 },
                 &mut sink,
             )

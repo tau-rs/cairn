@@ -417,6 +417,7 @@ fn command_kind(command: &Command) -> &'static str {
         Command::DeleteNote { .. } => "delete_note",
         Command::RenameNote { .. } => "rename_note",
         Command::Commit { .. } => "commit",
+        Command::NameVersion { .. } => "name_version",
         Command::RestoreNote { .. } => "restore_note",
         Command::InvokePluginCommand { .. } => "invoke_plugin_command",
     }
