@@ -168,43 +168,46 @@ async fn run() -> Result<(), String> {
     // Back the plugin `host/agent` callback with the same runtime as `/ask`.
     engine.set_runtime(runtime.clone());
 
-    let state = AppState::new(engine)
+    // The seal loop's activity channel: attached to `AppState` only when
+    // auto-commit is on, so `mark_activity` is a no-op otherwise and the loop
+    // (never spawned) has no dangling sender.
+    let (seal_tx, seal_rx) = std::sync::mpsc::channel();
+    let mut state = AppState::new(engine)
         .with_allowed_origins(cors_origins.clone())
         .with_token(token)
         .with_runtime(runtime)
         .with_mcp_write(cli.mcp_write);
+    if config.sync.auto_commit {
+        state = state.with_sealer(seal_tx);
+    }
+    let state = state;
     let app = build_router(state.clone()).layer(cors_layer(&cors_origins));
+
+    if config.sync.auto_commit {
+        let idle = config.sync.idle();
+        let backstop = config.sync.backstop();
+        tracing::info!(
+            "seal: auto-committing sessions after {:?} idle ({:?} backstop)",
+            idle,
+            backstop
+        );
+        let sealer = state.clone();
+        tokio::task::spawn_blocking(move || {
+            cairn_service::run_seal_loop(&seal_rx, idle, backstop, || sealer.seal_blocking());
+        });
+    }
 
     if !cli.no_watch {
         match NotifyWatcher.watch(&cli.cairn) {
             Ok(handle) => {
                 let grace = Duration::from_millis(config.sync.confirm_grace_ms);
-                if config.sync.auto_commit {
-                    let quiet = config.sync.idle();
-                    tracing::info!(
-                        "sync: auto-committing external edits after {:?} quiet",
-                        quiet
-                    );
-                    let ws_change = state.clone();
-                    let ws_commit = state.clone();
-                    tokio::task::spawn_blocking(move || {
-                        cairn_service::run_watch_loop_timeout(
-                            &handle,
-                            quiet,
-                            move |change| ws_change.apply_change_confirmed_blocking(change, grace),
-                            move || {
-                                ws_commit.commit_external_blocking("cairn: sync external edits")
-                            },
-                        );
+                let watch_state = state.clone();
+                tokio::task::spawn_blocking(move || {
+                    cairn_service::run_watch_loop(&handle, |change| {
+                        watch_state.apply_change_confirmed_blocking(change, grace);
+                        watch_state.mark_activity();
                     });
-                } else {
-                    let watch_state = state.clone();
-                    tokio::task::spawn_blocking(move || {
-                        cairn_service::run_watch_loop(&handle, |change| {
-                            watch_state.apply_change_confirmed_blocking(change, grace)
-                        });
-                    });
-                }
+                });
                 tracing::info!("watching {} for changes", cli.cairn.display());
             }
             Err(e) => tracing::warn!("file watcher disabled: {e}"),
