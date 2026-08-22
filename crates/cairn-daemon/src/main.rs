@@ -53,6 +53,10 @@ async fn run() -> Result<(), String> {
         None => Config::load_default(&cli.cairn)?,
     };
 
+    if config.sync.quiet_period_ms.is_some() {
+        tracing::warn!("sync.quiet_period_ms is deprecated; use idle_seconds");
+    }
+
     let mut startup: Vec<Event> = Vec::new();
     let persist = config.index.persist && !cli.no_persist;
     let mut engine = if persist {
@@ -176,10 +180,10 @@ async fn run() -> Result<(), String> {
             Ok(handle) => {
                 let grace = Duration::from_millis(config.sync.confirm_grace_ms);
                 if config.sync.auto_commit {
-                    let quiet = Duration::from_millis(config.sync.quiet_period_ms);
+                    let quiet = config.sync.idle();
                     tracing::info!(
-                        "sync: auto-committing external edits after {}ms quiet",
-                        config.sync.quiet_period_ms
+                        "sync: auto-committing external edits after {:?} quiet",
+                        quiet
                     );
                     let ws_change = state.clone();
                     let ws_commit = state.clone();
@@ -210,10 +214,10 @@ async fn run() -> Result<(), String> {
     // Collab commit-agent: debounce-materialize + commit sessioned notes. Runs
     // independently of the file watcher — the daemon is the sole disk writer for
     // a live session (design spec §12). Ticks every 250ms; a session commits
-    // after `quiet_period_ms` of no ops (or immediately once abandoned).
+    // after `idle()` of no ops (or immediately once abandoned).
     {
         let flush_state = state.clone();
-        let quiet = Duration::from_millis(config.sync.quiet_period_ms);
+        let quiet = config.sync.idle();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_millis(250));
             // A slow pass (many notes / slow git) must not fire back-to-back

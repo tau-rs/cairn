@@ -24,39 +24,66 @@ pub struct Config {
     pub sync: SyncConfig,
 }
 
-/// Settings for syncing externally-detected edits — files changed on disk
-/// outside cairn's own command path (e.g. by an agent's native filesystem
-/// tools). See ADR-0012.
+/// Settings for sealing editing sessions into commits (any edit source).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SyncConfig {
-    /// Auto-commit externally-detected changes after a quiet period. Default
-    /// `false`: external edits re-index but stay uncommitted until an explicit
-    /// commit (cairn's own command writes are unaffected either way).
-    #[serde(default)]
+    /// Auto-commit sealed editing sessions. Default `true`.
+    #[serde(default = "default_true_sync")]
     pub auto_commit: bool,
-    /// Quiet period (ms) with no further external change before an auto-commit
-    /// fires, coalescing a burst into one commit. Default 2000.
-    #[serde(default = "default_quiet_period_ms")]
-    pub quiet_period_ms: u64,
+    /// Idle seconds with no further change before a session seals. Default 2.
+    #[serde(default)]
+    pub idle_seconds: Option<u64>,
+    /// Deprecated alias for the idle window, in ms. `idle_seconds` wins.
+    #[serde(default)]
+    pub quiet_period_ms: Option<u64>,
+    /// Backstop: a never-idle session seals after this many minutes. Default 20.
+    #[serde(default = "default_backstop_minutes")]
+    pub backstop_minutes: u64,
     /// Grace (ms) to wait and re-check before honoring a watcher `Removed`,
     /// absorbing the transient gap of a non-atomic / tmp-rename write. Default 50.
     #[serde(default = "default_confirm_grace_ms")]
     pub confirm_grace_ms: u64,
 }
 
+impl SyncConfig {
+    /// The idle window: `idle_seconds` → `quiet_period_ms` (deprecated) → 2 s.
+    #[must_use]
+    pub fn idle(&self) -> std::time::Duration {
+        if let Some(s) = self.idle_seconds {
+            return std::time::Duration::from_secs(s);
+        }
+        if let Some(ms) = self.quiet_period_ms {
+            return std::time::Duration::from_millis(ms);
+        }
+        std::time::Duration::from_secs(2)
+    }
+
+    /// The long-session backstop.
+    #[must_use]
+    pub fn backstop(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.backstop_minutes * 60)
+    }
+}
+
 impl Default for SyncConfig {
     fn default() -> Self {
         Self {
-            auto_commit: false,
-            quiet_period_ms: default_quiet_period_ms(),
-            confirm_grace_ms: default_confirm_grace_ms(),
+            auto_commit: true,
+            idle_seconds: None,
+            quiet_period_ms: None,
+            backstop_minutes: 20,
+            confirm_grace_ms: 50,
         }
     }
 }
 
-fn default_quiet_period_ms() -> u64 {
-    2000
+fn default_true_sync() -> bool {
+    true
+}
+
+fn default_backstop_minutes() -> u64 {
+    20
 }
 
 fn default_confirm_grace_ms() -> u64 {
@@ -142,19 +169,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sync_defaults_and_overrides() {
+    fn sync_defaults_on_with_idle_and_backstop() {
         let c: Config = toml::from_str("").unwrap();
-        assert!(!c.sync.auto_commit, "auto-commit off by default");
-        assert_eq!(c.sync.quiet_period_ms, 2000);
+        assert!(c.sync.auto_commit, "auto-commit ON by default");
+        assert_eq!(c.sync.idle(), std::time::Duration::from_secs(2));
+        assert_eq!(c.sync.backstop(), std::time::Duration::from_secs(20 * 60));
         assert_eq!(c.sync.confirm_grace_ms, 50);
+    }
 
-        let c: Config = toml::from_str(
-            "[sync]\nauto_commit = true\nquiet_period_ms = 500\nconfirm_grace_ms = 10",
-        )
-        .unwrap();
-        assert!(c.sync.auto_commit);
-        assert_eq!(c.sync.quiet_period_ms, 500);
-        assert_eq!(c.sync.confirm_grace_ms, 10);
+    #[test]
+    fn sync_idle_seconds_overrides_and_wins_over_alias() {
+        let c: Config = toml::from_str("[sync]\nidle_seconds = 5\nquiet_period_ms = 900").unwrap();
+        assert_eq!(c.sync.idle(), std::time::Duration::from_secs(5));
+        assert!(
+            c.sync.quiet_period_ms.is_some(),
+            "alias surfaced for the deprecation warning"
+        );
+    }
+
+    #[test]
+    fn sync_quiet_period_ms_alias_still_honored() {
+        let c: Config = toml::from_str("[sync]\nquiet_period_ms = 900").unwrap();
+        assert_eq!(c.sync.idle(), std::time::Duration::from_millis(900));
+        let c: Config =
+            toml::from_str("[sync]\nauto_commit = false\nbackstop_minutes = 45").unwrap();
+        assert!(!c.sync.auto_commit);
+        assert_eq!(c.sync.backstop(), std::time::Duration::from_secs(45 * 60));
     }
 
     #[test]
