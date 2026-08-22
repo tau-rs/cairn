@@ -2401,6 +2401,12 @@ mod tests {
                 visit(c)
             })
         }
+        fn pending_summary(&self) -> Result<cairn_ports::DiffSummary, PortError> {
+            Ok(cairn_ports::DiffSummary::default())
+        }
+        fn commit_summary(&self, _revision: &str) -> Result<cairn_ports::DiffSummary, PortError> {
+            Ok(cairn_ports::DiffSummary::default())
+        }
     }
 
     #[test]

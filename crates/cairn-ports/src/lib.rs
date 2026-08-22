@@ -223,6 +223,52 @@ pub trait SemanticIndex {
     fn neighbors(&self, focus: &NotePath, top_k: usize) -> Result<Vec<Similarity>, PortError>;
 }
 
+/// How a seal/commit changed one file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChangeOp {
+    /// File is new.
+    Add,
+    /// File content changed.
+    Edit,
+    /// File moved; `from` is the old relative path.
+    Rename {
+        /// Previous relative path.
+        from: String,
+    },
+    /// File was removed.
+    Delete,
+}
+
+/// One file's change within a [`DiffSummary`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoteChange {
+    /// Relative path (new path for renames).
+    pub path: String,
+    /// Operation class.
+    pub op: ChangeOp,
+    /// Display title: frontmatter `title:` → first `# ` heading → file stem.
+    /// Derived from the new content (old content for `Delete`).
+    pub title: String,
+    /// Nearest markdown heading at/above the first changed line of the new
+    /// content. `None` for `Add`/`Delete` or when no heading precedes the change.
+    pub heading: Option<String>,
+    /// Unicode-whitespace-split tokens on added diff lines.
+    pub words_added: u32,
+    /// Unicode-whitespace-split tokens on removed diff lines.
+    pub words_removed: u32,
+}
+
+/// What a commit (or the pending working tree) changed, in note terms.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiffSummary {
+    /// Per-file changes. Empty ⇒ the tree is byte-identical (nothing to commit).
+    pub changes: Vec<NoteChange>,
+    /// Total added words across `changes`.
+    pub words_added: u32,
+    /// Total removed words across `changes`.
+    pub words_removed: u32,
+}
+
 /// One commit in a note's history.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Revision {
@@ -324,6 +370,22 @@ pub trait Vcs {
         &self,
         visit: &mut dyn FnMut(MdCommit) -> Result<ControlFlow<()>, PortError>,
     ) -> Result<(), PortError>;
+
+    /// Summarize the working tree vs HEAD — what a seal would commit. Empty
+    /// `changes` ⇒ nothing to commit. Untracked files count as `Add`; renames
+    /// are detected.
+    ///
+    /// # Errors
+    /// [`PortError::Adapter`] on a git failure.
+    fn pending_summary(&self) -> Result<DiffSummary, PortError>;
+
+    /// Summarize `revision` vs its first parent (vs the empty tree for the
+    /// root commit).
+    ///
+    /// # Errors
+    /// [`PortError::NotFound`] if the revspec does not resolve;
+    /// [`PortError::Adapter`] on a git failure.
+    fn commit_summary(&self, revision: &str) -> Result<DiffSummary, PortError>;
 }
 
 /// A change to a note detected on disk.

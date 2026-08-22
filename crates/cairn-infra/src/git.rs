@@ -3,11 +3,161 @@
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
-use cairn_ports::{AdapterError, HistoricalBlob, MdCommit, PortError, Revision, Vcs};
+use cairn_ports::{
+    AdapterError, ChangeOp, DiffSummary, HistoricalBlob, MdCommit, NoteChange, PortError, Revision,
+    Vcs,
+};
 use git2::{Repository, Signature};
 
 fn adapt<E: std::error::Error + Send + Sync + 'static>(e: E) -> PortError {
     PortError::Adapter(AdapterError::new(e))
+}
+
+/// Unicode-whitespace-split token count.
+fn word_count(s: &str) -> u32 {
+    u32::try_from(s.split_whitespace().count()).unwrap_or(u32::MAX)
+}
+
+/// Display title: frontmatter `title:` → first `# ` heading → file stem.
+fn title_from_content(content: Option<&str>, path: &Path) -> String {
+    if let Some(c) = content {
+        if let Some(rest) = c.strip_prefix("---\n") {
+            if let Some(end) = rest.find("\n---") {
+                for line in rest[..end].lines() {
+                    if let Some(t) = line.strip_prefix("title:") {
+                        let t = t.trim();
+                        if !t.is_empty() {
+                            return t.to_string();
+                        }
+                    }
+                }
+            }
+        }
+        for line in c.lines() {
+            if let Some(h) = line.strip_prefix("# ") {
+                return h.trim().to_string();
+            }
+        }
+    }
+    path.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// Nearest `#`-prefixed heading at/above 1-based `line` in `content`.
+fn heading_above(content: &str, line: u32) -> Option<String> {
+    content
+        .lines()
+        .take(line as usize)
+        .filter(|l| l.starts_with('#'))
+        .last()
+        .map(|l| l.trim_start_matches('#').trim().to_string())
+}
+
+/// Shared diff → [`DiffSummary`] reducer. `read_new`/`read_old` fetch full
+/// file content by path (workdir/blobs), returning `None` for binary/absent.
+fn summarize_diff(
+    diff: &git2::Diff,
+    read_new: &dyn Fn(&Path) -> Option<String>,
+    read_old: &dyn Fn(&Path) -> Option<String>,
+) -> Result<DiffSummary, git2::Error> {
+    use std::cell::RefCell;
+    struct Acc {
+        path: PathBuf,
+        op: ChangeOp,
+        words_added: u32,
+        words_removed: u32,
+        first_changed_new_line: Option<u32>,
+    }
+    let files: RefCell<Vec<Acc>> = RefCell::new(Vec::new());
+    diff.foreach(
+        &mut |delta, _| {
+            let op = match delta.status() {
+                git2::Delta::Added | git2::Delta::Untracked => ChangeOp::Add,
+                git2::Delta::Deleted => ChangeOp::Delete,
+                git2::Delta::Renamed => ChangeOp::Rename {
+                    from: delta
+                        .old_file()
+                        .path()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                },
+                _ => ChangeOp::Edit,
+            };
+            let path = match op {
+                ChangeOp::Delete => delta.old_file().path(),
+                _ => delta.new_file().path(),
+            }
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+            files.borrow_mut().push(Acc {
+                path,
+                op,
+                words_added: 0,
+                words_removed: 0,
+                first_changed_new_line: None,
+            });
+            true
+        },
+        None,
+        Some(&mut |_, _| true),
+        Some(&mut |_, _, line| {
+            let mut fs = files.borrow_mut();
+            if let Some(acc) = fs.last_mut() {
+                let is_md = acc.path.extension().is_some_and(|e| e == "md");
+                match line.origin() {
+                    '+' => {
+                        if is_md {
+                            acc.words_added += word_count(&String::from_utf8_lossy(line.content()));
+                        }
+                        if acc.first_changed_new_line.is_none() {
+                            acc.first_changed_new_line = line.new_lineno();
+                        }
+                    }
+                    '-' => {
+                        if is_md {
+                            acc.words_removed +=
+                                word_count(&String::from_utf8_lossy(line.content()));
+                        }
+                        // A pure deletion still locates the change site.
+                        if acc.first_changed_new_line.is_none() {
+                            acc.first_changed_new_line = line.old_lineno();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            true
+        }),
+    )?;
+
+    let mut summary = DiffSummary::default();
+    for acc in files.into_inner() {
+        let (content_for_title, heading) = match &acc.op {
+            ChangeOp::Delete => (read_old(&acc.path), None),
+            ChangeOp::Add => (read_new(&acc.path), None),
+            _ => {
+                let new = read_new(&acc.path);
+                let heading = match (&new, acc.first_changed_new_line) {
+                    (Some(c), Some(l)) => heading_above(c, l),
+                    _ => None,
+                };
+                (new, heading)
+            }
+        };
+        let title = title_from_content(content_for_title.as_deref(), &acc.path);
+        summary.words_added += acc.words_added;
+        summary.words_removed += acc.words_removed;
+        summary.changes.push(NoteChange {
+            path: acc.path.to_string_lossy().into_owned(),
+            op: acc.op,
+            title,
+            heading,
+            words_added: acc.words_added,
+            words_removed: acc.words_removed,
+        });
+    }
+    Ok(summary)
 }
 
 /// Whether `commit` added/changed/removed the blob at `path` (vs its parents).
@@ -319,11 +469,66 @@ impl Vcs for GitVcs {
         }
         Ok(())
     }
+
+    fn pending_summary(&self) -> Result<DiffSummary, PortError> {
+        let repo = Repository::open(&self.root).map_err(adapt)?;
+        let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
+        let mut opts = git2::DiffOptions::new();
+        opts.include_untracked(true)
+            .recurse_untracked_dirs(true)
+            .show_untracked_content(true);
+        let mut diff = repo
+            .diff_tree_to_workdir_with_index(head_tree.as_ref(), Some(&mut opts))
+            .map_err(adapt)?;
+        let mut find = git2::DiffFindOptions::new();
+        find.renames(true).for_untracked(true);
+        diff.find_similar(Some(&mut find)).map_err(adapt)?;
+        let root = self.root.clone();
+        let read_new = |p: &Path| std::fs::read_to_string(root.join(p)).ok();
+        let read_old = |p: &Path| {
+            head_tree
+                .as_ref()
+                .and_then(|t| t.get_path(p).ok())
+                .and_then(|e| e.to_object(&repo).ok())
+                .and_then(|o| o.peel_to_blob().ok())
+                .map(|b| String::from_utf8_lossy(b.content()).into_owned())
+        };
+        summarize_diff(&diff, &read_new, &read_old).map_err(adapt)
+    }
+
+    fn commit_summary(&self, revision: &str) -> Result<DiffSummary, PortError> {
+        let repo = Repository::open(&self.root).map_err(adapt)?;
+        let commit = repo
+            .revparse_single(revision)
+            .and_then(|o| o.peel_to_commit())
+            .map_err(|_| PortError::NotFound(format!("revision {revision}")))?;
+        let new_tree = commit.tree().map_err(adapt)?;
+        let old_tree = match commit.parent(0) {
+            Ok(p) => Some(p.tree().map_err(adapt)?),
+            Err(_) => None, // root: diff against the empty tree
+        };
+        let mut diff = repo
+            .diff_tree_to_tree(old_tree.as_ref(), Some(&new_tree), None)
+            .map_err(adapt)?;
+        let mut find = git2::DiffFindOptions::new();
+        find.renames(true);
+        diff.find_similar(Some(&mut find)).map_err(adapt)?;
+        let blob_of = |tree: Option<&git2::Tree>, p: &Path| {
+            tree.and_then(|t| t.get_path(p).ok())
+                .and_then(|e| e.to_object(&repo).ok())
+                .and_then(|o| o.peel_to_blob().ok())
+                .map(|b| String::from_utf8_lossy(b.content()).into_owned())
+        };
+        let read_new = |p: &Path| blob_of(Some(&new_tree), p);
+        let read_old = |p: &Path| blob_of(old_tree.as_ref(), p);
+        summarize_diff(&diff, &read_new, &read_old).map_err(adapt)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cairn_ports::{ChangeOp, DiffSummary};
     use std::fs;
 
     #[test]
@@ -653,5 +858,137 @@ mod tests {
         })
         .unwrap();
         assert_eq!(visited, 1, "walk halts on the first Break");
+    }
+
+    fn word_summary(vcs: &GitVcs) -> DiffSummary {
+        vcs.pending_summary().unwrap()
+    }
+
+    #[test]
+    fn pending_summary_empty_on_clean_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut vcs = GitVcs::open_or_init(tmp.path()).unwrap();
+        assert!(word_summary(&vcs).changes.is_empty(), "fresh repo");
+        fs::write(tmp.path().join("a.md"), "one two").unwrap();
+        vcs.commit_all("c1").unwrap();
+        assert!(word_summary(&vcs).changes.is_empty(), "clean after commit");
+    }
+
+    #[test]
+    fn pending_summary_classifies_add_edit_delete_with_word_counts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut vcs = GitVcs::open_or_init(tmp.path()).unwrap();
+        fs::write(tmp.path().join("a.md"), "alpha beta\n").unwrap();
+        let s = word_summary(&vcs);
+        assert_eq!(s.changes.len(), 1);
+        assert_eq!(s.changes[0].op, ChangeOp::Add);
+        assert_eq!(s.changes[0].title, "a");
+        assert_eq!((s.words_added, s.words_removed), (2, 0));
+
+        vcs.commit_all("c1").unwrap();
+        fs::write(tmp.path().join("a.md"), "alpha gamma delta\n").unwrap();
+        let s = word_summary(&vcs);
+        assert_eq!(s.changes[0].op, ChangeOp::Edit);
+        // Line-level diff: the whole line is replaced (3 added, 2 removed words).
+        assert_eq!((s.words_added, s.words_removed), (3, 2));
+
+        vcs.commit_all("c2").unwrap();
+        fs::remove_file(tmp.path().join("a.md")).unwrap();
+        let s = word_summary(&vcs);
+        assert_eq!(s.changes[0].op, ChangeOp::Delete);
+        assert_eq!(s.changes[0].title, "a", "delete title from old blob/stem");
+    }
+
+    #[test]
+    fn pending_summary_detects_rename() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut vcs = GitVcs::open_or_init(tmp.path()).unwrap();
+        // Enough identical content for git2 similarity detection.
+        let body = "# Title\n\n".to_string() + &"stable content line here\n".repeat(20);
+        fs::write(tmp.path().join("old.md"), &body).unwrap();
+        vcs.commit_all("c1").unwrap();
+        fs::rename(tmp.path().join("old.md"), tmp.path().join("new.md")).unwrap();
+        let s = word_summary(&vcs);
+        assert_eq!(s.changes.len(), 1);
+        assert_eq!(
+            s.changes[0].op,
+            ChangeOp::Rename {
+                from: "old.md".into()
+            }
+        );
+        assert_eq!(s.changes[0].path, "new.md");
+    }
+
+    #[test]
+    fn pending_summary_title_prefers_frontmatter_then_heading() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vcs = GitVcs::open_or_init(tmp.path()).unwrap();
+        fs::write(
+            tmp.path().join("a.md"),
+            "---\ntitle: Q3 Roadmap\n---\n# Ignored\nbody\n",
+        )
+        .unwrap();
+        fs::write(tmp.path().join("b.md"), "# Budget\nbody\n").unwrap();
+        fs::write(tmp.path().join("c.md"), "no heading\n").unwrap();
+        let s = vcs.pending_summary().unwrap();
+        let title = |p: &str| {
+            s.changes
+                .iter()
+                .find(|c| c.path == p)
+                .unwrap()
+                .title
+                .clone()
+        };
+        assert_eq!(title("a.md"), "Q3 Roadmap");
+        assert_eq!(title("b.md"), "Budget");
+        assert_eq!(title("c.md"), "c");
+    }
+
+    #[test]
+    fn pending_summary_heading_is_nearest_above_first_change_on_edit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut vcs = GitVcs::open_or_init(tmp.path()).unwrap();
+        let v1 = "# Doc\n\n## Goals\n\nold goals text\n\n## Risks\n\nrisk text\n";
+        fs::write(tmp.path().join("a.md"), v1).unwrap();
+        vcs.commit_all("c1").unwrap();
+        let v2 = "# Doc\n\n## Goals\n\nnew goals text expanded a lot\n\n## Risks\n\nrisk text\n";
+        fs::write(tmp.path().join("a.md"), v2).unwrap();
+        let s = vcs.pending_summary().unwrap();
+        assert_eq!(s.changes[0].heading.as_deref(), Some("Goals"));
+        assert!(matches!(s.changes[0].op, ChangeOp::Edit));
+    }
+
+    #[test]
+    fn pending_summary_non_md_counts_zero_words() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vcs = GitVcs::open_or_init(tmp.path()).unwrap();
+        fs::write(tmp.path().join("img.png"), [0u8, 1, 2]).unwrap();
+        let s = vcs.pending_summary().unwrap();
+        assert_eq!(s.changes.len(), 1);
+        assert_eq!(s.changes[0].title, "img");
+        assert_eq!((s.words_added, s.words_removed), (0, 0));
+    }
+
+    #[test]
+    fn commit_summary_diffs_against_first_parent_and_root_against_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut vcs = GitVcs::open_or_init(tmp.path()).unwrap();
+        fs::write(tmp.path().join("a.md"), "one two three\n").unwrap();
+        let c1 = vcs.commit_all("c1").unwrap();
+        fs::write(tmp.path().join("a.md"), "one two three four five\n").unwrap();
+        let c2 = vcs.commit_all("c2").unwrap();
+
+        let root = vcs.commit_summary(&c1).unwrap();
+        assert_eq!(root.changes[0].op, ChangeOp::Add);
+        assert_eq!(root.words_added, 3);
+
+        let s2 = vcs.commit_summary(&c2).unwrap();
+        assert_eq!(s2.changes[0].op, ChangeOp::Edit);
+        assert_eq!((s2.words_added, s2.words_removed), (5, 3));
+
+        assert!(matches!(
+            vcs.commit_summary("nope"),
+            Err(PortError::NotFound(_))
+        ));
     }
 }
