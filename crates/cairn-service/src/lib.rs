@@ -188,10 +188,15 @@ pub fn dispatch_command(
             engine.rename_note(&from, &to, sink)?;
             Ok(CommandResponse::Done)
         }
-        Command::Commit { message } => {
-            let commit = engine.commit(message, sink)?;
-            Ok(CommandResponse::Committed { commit })
-        }
+        Command::Commit { message } => match engine.commit(Some(message), sink)? {
+            cairn_app::CommitOutcome::Committed(commit) => {
+                Ok(CommandResponse::Committed { commit })
+            }
+            // No wire `NothingToCommit` variant yet (arrives with the contract
+            // rewiring in a later task); `Done` is the closest existing
+            // "succeeded, no further payload" response.
+            cairn_app::CommitOutcome::NothingToCommit => Ok(CommandResponse::Done),
+        },
         Command::RestoreNote { path, revision } => {
             let p = parse_path(path)?;
             engine.restore_note(&p, revision, sink)?;
@@ -266,10 +271,10 @@ pub fn dispatch_query(engine: &Engine, query: &Query) -> Result<QueryResponse, S
                 .note_history(&p)?
                 .into_iter()
                 .map(|r| Revision {
-                    id: r.id,
-                    message: r.message,
-                    timestamp_secs: r.timestamp_secs,
-                    author: r.author,
+                    id: r.revision.id,
+                    message: r.revision.message,
+                    timestamp_secs: r.revision.timestamp_secs,
+                    author: r.revision.author,
                 })
                 .collect();
             Ok(QueryResponse::History { revisions })
@@ -279,10 +284,10 @@ pub fn dispatch_query(engine: &Engine, query: &Query) -> Result<QueryResponse, S
                 .vault_history(*limit)?
                 .into_iter()
                 .map(|r| Revision {
-                    id: r.id,
-                    message: r.message,
-                    timestamp_secs: r.timestamp_secs,
-                    author: r.author,
+                    id: r.revision.id,
+                    message: r.revision.message,
+                    timestamp_secs: r.revision.timestamp_secs,
+                    author: r.revision.author,
                 })
                 .collect();
             Ok(QueryResponse::History { revisions })
@@ -292,10 +297,10 @@ pub fn dispatch_query(engine: &Engine, query: &Query) -> Result<QueryResponse, S
                 .structural_revisions(*limit)?
                 .into_iter()
                 .map(|r| Revision {
-                    id: r.id,
-                    message: r.message,
-                    timestamp_secs: r.timestamp_secs,
-                    author: r.author,
+                    id: r.revision.id,
+                    message: r.revision.message,
+                    timestamp_secs: r.revision.timestamp_secs,
+                    author: r.revision.author,
                 })
                 .collect();
             Ok(QueryResponse::History { revisions })
@@ -1351,7 +1356,7 @@ mod tests {
         let mut ev = Vec::new();
         let a = cairn_domain::NotePath::new("a.md").unwrap();
         eng.write_note(&a, "hello", &mut ev).unwrap();
-        eng.commit("c1", &mut ev).unwrap(); // node added -> structural
+        eng.commit(Some("c1"), &mut ev).unwrap(); // node added -> structural
 
         match dispatch_query(&eng, &Query::StructuralRevisions { limit: None }).unwrap() {
             QueryResponse::History { revisions } => {
@@ -1589,7 +1594,10 @@ mod tests {
             .unwrap();
         eng.write_note(&NotePath::new("b.md").unwrap(), "x", &mut ev)
             .unwrap();
-        let c1 = eng.commit("c1", &mut ev).unwrap();
+        let cairn_app::CommitOutcome::Committed(c1) = eng.commit(Some("c1"), &mut ev).unwrap()
+        else {
+            panic!()
+        };
 
         let resp = dispatch_query(
             &eng,

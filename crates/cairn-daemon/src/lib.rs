@@ -290,7 +290,7 @@ impl AppState {
             tx: self.events.clone(),
             collected: Vec::new(),
         };
-        if let Err(e) = guard.commit(message, &mut tap) {
+        if let Err(e) = guard.commit(Some(message), &mut tap) {
             tracing::warn!("watch: auto-commit failed: {e}");
         }
     }
@@ -357,7 +357,7 @@ impl AppState {
             match guard.has_uncommitted_changes() {
                 Ok(true) => {
                     let msg = format!("cairn: collab sync {}", item.path.as_str());
-                    if let Err(e) = guard.commit(&msg, &mut tap) {
+                    if let Err(e) = guard.commit(Some(&msg), &mut tap) {
                         tracing::warn!(error = %e, "collab flush: commit failed");
                     }
                 }
@@ -1066,7 +1066,7 @@ mod collab_flush_tests {
                 collected: Vec::new(),
             };
             guard.write_note(&path, "base\n", &mut tap).unwrap();
-            guard.commit("seed", &mut tap).unwrap();
+            guard.commit(Some("seed"), &mut tap).unwrap();
         }
         std::fs::write(tmp.path().join("n.md"), "base\n\nuncommitted\n").unwrap();
 
@@ -1106,7 +1106,7 @@ mod collab_flush_tests {
                 collected: Vec::new(),
             };
             guard.write_note(&path, "keep me\n", &mut tap).unwrap();
-            guard.commit("seed", &mut tap).unwrap();
+            guard.commit(Some("seed"), &mut tap).unwrap();
         }
         collab::insert_dirty_session(&state.collab, &path, "keep me\n", vec![]);
         collab::add_participant(&state.collab, &path, 1); // active session, not abandoned
