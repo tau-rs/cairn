@@ -191,7 +191,11 @@ async fn run() -> Result<(), String> {
             idle,
             backstop
         );
-        let sealer = state.clone();
+        // `without_sealer()`, not `.clone()`: the loop must not hold its own
+        // live `seal_tx`, or the sender never fully drops and the shutdown-flush
+        // (`RecvTimeoutError::Disconnected`) branch of `run_seal_loop` can never
+        // fire. See `AppState::without_sealer` for the full rationale.
+        let sealer = state.without_sealer();
         tokio::task::spawn_blocking(move || {
             cairn_service::run_seal_loop(&seal_rx, idle, backstop, || sealer.seal_blocking());
         });

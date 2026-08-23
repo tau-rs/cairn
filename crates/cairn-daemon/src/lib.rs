@@ -174,6 +174,22 @@ impl AppState {
         self
     }
 
+    /// Clone this state without the seal-loop activity sender.
+    ///
+    /// The seal loop itself must run on a handle like this: if its own closure
+    /// held a live `seal_tx`, the sender would never fully drop while the loop
+    /// runs, so `run_seal_loop`'s `RecvTimeoutError::Disconnected` branch (the
+    /// shutdown flush) could never fire. All other clones (request handlers, the
+    /// watcher, the collab flush loop) should keep using [`Clone::clone`] so
+    /// `mark_activity` still reaches the loop.
+    #[must_use]
+    pub fn without_sealer(&self) -> Self {
+        Self {
+            seal_tx: None,
+            ..self.clone()
+        }
+    }
+
     /// Lock the engine, recovering from poisoning instead of propagating it.
     ///
     /// A panic in any engine operation poisons the `Mutex`; with `.expect(...)`
@@ -298,7 +314,9 @@ impl AppState {
     /// auto-commit is off (no sealer attached).
     pub fn mark_activity(&self) {
         if let Some(tx) = &self.seal_tx {
-            let _ = tx.send(cairn_service::SealSignal::Activity);
+            if tx.send(cairn_service::SealSignal::Activity).is_err() {
+                tracing::warn!("seal: loop gone; auto-commit inactive");
+            }
         }
     }
 
@@ -876,6 +894,28 @@ mod tests {
         // The client gets a generic 500; panic text never reaches the response body.
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert!(logs_contain("request worker panicked"));
+    }
+
+    #[test]
+    fn without_sealer_clone_does_not_keep_seal_channel_alive() {
+        // Mirrors the daemon's wiring: the seal loop must run on a handle that
+        // does not itself carry a live `seal_tx`, or the channel's sender count
+        // never reaches zero and `run_seal_loop`'s shutdown-flush branch
+        // (`RecvTimeoutError::Disconnected`) is unreachable (finding F1).
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel::<cairn_service::SealSignal>();
+        let handler_state = state(tmp.path()).with_sealer(tx);
+
+        let sealer = handler_state.without_sealer();
+        drop(handler_state); // the only clone still holding `Some(seal_tx)`
+
+        // `sealer` is still alive here; if it held its own sender, `rx` would
+        // still be connected.
+        assert!(matches!(
+            rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        ));
+        drop(sealer);
     }
 }
 

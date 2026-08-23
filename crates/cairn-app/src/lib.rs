@@ -67,6 +67,14 @@ const VAULT_EDGE_CAP: usize = 100;
 /// Newest-rows cap for per-row diff summaries in unlimited history queries.
 const SUMMARY_CAP: usize = 50;
 
+/// The number of history rows to enrich with a per-commit diff summary:
+/// `min(limit, SUMMARY_CAP)` when the caller passed a limit, else
+/// [`SUMMARY_CAP`]. Keeps a large `limit` (e.g. `vault_history(Some(10_000))`)
+/// from forcing thousands of tree-diffs under the engine lock.
+fn enrich_cap(limit: Option<u32>) -> usize {
+    limit.map_or(SUMMARY_CAP, |n| (n as usize).min(SUMMARY_CAP))
+}
+
 /// Result of a commit request: either a commit was created, or the tree was
 /// byte-identical to HEAD and nothing happened. Empty commits are never made.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -949,26 +957,35 @@ impl Engine {
 
     /// The whole repository's commit history (newest first), capped at `limit`,
     /// enriched with cairn names and per-commit change summaries (capped at
-    /// [`SUMMARY_CAP`] newest rows, or `limit` if smaller).
+    /// [`enrich_cap`]`(limit)` newest rows: `min(limit, `[`SUMMARY_CAP`]`)`, or
+    /// [`SUMMARY_CAP`] when unlimited).
     ///
     /// # Errors
     /// Returns [`PortError`] if the VCS adapter fails.
     pub fn vault_history(&self, limit: Option<u32>) -> Result<Vec<EnrichedRevision>, PortError> {
-        let cap = limit.map_or(SUMMARY_CAP, |n| n as usize);
-        self.enrich(self.vcs.vault_history(limit)?, cap)
+        self.enrich(self.vcs.vault_history(limit)?, enrich_cap(limit))
     }
 
     /// Join names and (capped) summaries onto raw history rows.
     ///
+    /// A missing summary ([`PortError::NotFound`], e.g. an ambiguous short id)
+    /// degrades that one row to `summary: None` instead of failing the whole
+    /// query; any other error still propagates.
+    ///
     /// # Errors
-    /// Returns [`PortError`] if the VCS adapter fails.
+    /// Returns [`PortError`] if the VCS adapter fails (other than a per-row
+    /// [`PortError::NotFound`] on `commit_summary`).
     fn enrich(&self, revs: Vec<Revision>, cap: usize) -> Result<Vec<EnrichedRevision>, PortError> {
         let names = self.vcs.named_versions()?;
         revs.into_iter()
             .enumerate()
             .map(|(i, revision)| {
                 let summary = if i < cap {
-                    Some(self.vcs.commit_summary(&revision.id)?)
+                    match self.vcs.commit_summary(&revision.id) {
+                        Ok(summary) => Some(summary),
+                        Err(PortError::NotFound(_)) => None,
+                        Err(err) => return Err(err),
+                    }
                 } else {
                     None
                 };
@@ -994,7 +1011,9 @@ impl Engine {
     /// The walk short-circuits: once `limit` structural revisions are collected
     /// it stops the underlying revwalk instead of scanning to the root, so the
     /// cost is `O(commits up to the nth structural rev)`, not `O(history)`.
-    /// `limit: None` still walks the whole history.
+    /// `limit: None` still walks the whole history. Per-row diff summaries are
+    /// enriched for the newest [`enrich_cap`]`(limit)` rows only: `min(limit,
+    /// `[`SUMMARY_CAP`]`)`, or [`SUMMARY_CAP`] when unlimited.
     ///
     /// # Errors
     /// Returns [`PortError`] if the VCS adapter or a tree read fails.
@@ -1022,8 +1041,7 @@ impl Engine {
                 ControlFlow::Continue(())
             })
         })?;
-        let enrich_cap = limit.map_or(SUMMARY_CAP, |n| n as usize);
-        self.enrich(out, enrich_cap)
+        self.enrich(out, enrich_cap(limit))
     }
 
     /// A note's contents at a past revision.
@@ -2564,6 +2582,173 @@ mod tests {
         fn named_versions(&self) -> Result<std::collections::HashMap<String, String>, PortError> {
             self.inner.named_versions()
         }
+    }
+
+    /// What [`FakeHistoryVcs::commit_summary`] does on every call.
+    enum SummaryMode {
+        /// Count the call and return an empty (but valid) summary.
+        CountOk,
+        /// Always fail as if the id didn't resolve (e.g. an ambiguous short id).
+        AlwaysNotFound,
+        /// Always fail with a non-`NotFound` error, to prove it still propagates.
+        AlwaysAdapterError,
+    }
+
+    /// A `Vcs` that fakes a `vault_history` result from in-memory `Revision`s
+    /// (no real commits) and tracks/controls `commit_summary` behavior, so the
+    /// enrichment cap and per-row error degradation can be tested without
+    /// materializing dozens of real commits.
+    struct FakeHistoryVcs {
+        revs: Vec<cairn_ports::Revision>,
+        summary_calls: Arc<Au>,
+        summary_mode: SummaryMode,
+    }
+    impl Vcs for FakeHistoryVcs {
+        fn commit_all(&mut self, _message: &str) -> Result<String, PortError> {
+            unreachable!("not exercised by these tests")
+        }
+        fn history(&self, _path: &str) -> Result<Vec<cairn_ports::Revision>, PortError> {
+            unreachable!("not exercised by these tests")
+        }
+        fn vault_history(
+            &self,
+            limit: Option<u32>,
+        ) -> Result<Vec<cairn_ports::Revision>, PortError> {
+            let n = limit.map_or(self.revs.len(), |l| (l as usize).min(self.revs.len()));
+            Ok(self.revs[..n].to_vec())
+        }
+        fn show(&self, _path: &str, _revision: &str) -> Result<String, PortError> {
+            unreachable!("not exercised by these tests")
+        }
+        fn is_dirty(&self) -> Result<bool, PortError> {
+            unreachable!("not exercised by these tests")
+        }
+        fn resolve(&self, _revision: &str) -> Result<String, PortError> {
+            unreachable!("not exercised by these tests")
+        }
+        fn read_tree_at(
+            &self,
+            _revision: &str,
+        ) -> Result<Vec<cairn_ports::HistoricalBlob>, PortError> {
+            unreachable!("not exercised by these tests")
+        }
+        fn walk_md_changes(
+            &self,
+            _visit: &mut dyn FnMut(
+                cairn_ports::MdCommit,
+            ) -> Result<std::ops::ControlFlow<()>, PortError>,
+        ) -> Result<(), PortError> {
+            unreachable!("not exercised by these tests")
+        }
+        fn pending_summary(&self) -> Result<cairn_ports::DiffSummary, PortError> {
+            unreachable!("not exercised by these tests")
+        }
+        fn commit_summary(&self, revision: &str) -> Result<cairn_ports::DiffSummary, PortError> {
+            self.summary_calls.fetch_add(1, Ord2::SeqCst);
+            match self.summary_mode {
+                SummaryMode::CountOk => Ok(cairn_ports::DiffSummary {
+                    changes: Vec::new(),
+                    words_added: 0,
+                    words_removed: 0,
+                }),
+                SummaryMode::AlwaysNotFound => {
+                    Err(PortError::NotFound(format!("revision {revision}")))
+                }
+                SummaryMode::AlwaysAdapterError => {
+                    Err(PortError::Adapter(AdapterError::message("boom")))
+                }
+            }
+        }
+        fn name_version(&mut self, _revision: &str, _name: &str) -> Result<(), PortError> {
+            unreachable!("not exercised by these tests")
+        }
+        fn named_versions(&self) -> Result<std::collections::HashMap<String, String>, PortError> {
+            Ok(std::collections::HashMap::new())
+        }
+    }
+
+    fn fake_revision(i: usize) -> cairn_ports::Revision {
+        cairn_ports::Revision {
+            id: format!("fake{i}"),
+            message: format!("c{i}"),
+            timestamp_secs: i as i64,
+            author: "tester".to_string(),
+        }
+    }
+
+    #[test]
+    fn vault_history_caps_summary_enrichment_at_summary_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let revs: Vec<_> = (0..60).map(fake_revision).collect();
+        let calls = Arc::new(Au::new(0));
+        let vcs = FakeHistoryVcs {
+            revs,
+            summary_calls: calls.clone(),
+            summary_mode: SummaryMode::CountOk,
+        };
+        let eng = Engine::new(
+            LocalFsStore::open(tmp.path()).unwrap(),
+            InMemoryIndex::default(),
+            vcs,
+        );
+
+        let out = eng.vault_history(Some(60)).unwrap();
+
+        assert_eq!(out.len(), 60, "all 60 rows are returned");
+        assert_eq!(
+            calls.load(Ord2::SeqCst),
+            SUMMARY_CAP,
+            "only the newest SUMMARY_CAP rows are enriched, not all 60"
+        );
+        assert!(out[SUMMARY_CAP - 1].summary.is_some());
+        assert!(out[SUMMARY_CAP].summary.is_none());
+    }
+
+    #[test]
+    fn vault_history_degrades_row_on_summary_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let revs: Vec<_> = (0..5).map(fake_revision).collect();
+        let vcs = FakeHistoryVcs {
+            revs,
+            summary_calls: Arc::new(Au::new(0)),
+            summary_mode: SummaryMode::AlwaysNotFound,
+        };
+        let eng = Engine::new(
+            LocalFsStore::open(tmp.path()).unwrap(),
+            InMemoryIndex::default(),
+            vcs,
+        );
+
+        let out = eng
+            .vault_history(None)
+            .expect("a NotFound summary degrades its row instead of failing the query");
+
+        assert_eq!(out.len(), 5);
+        assert!(
+            out.iter().all(|r| r.summary.is_none()),
+            "every row's summary is None, but all rows are still present"
+        );
+    }
+
+    #[test]
+    fn vault_history_propagates_non_not_found_summary_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let revs: Vec<_> = (0..5).map(fake_revision).collect();
+        let vcs = FakeHistoryVcs {
+            revs,
+            summary_calls: Arc::new(Au::new(0)),
+            summary_mode: SummaryMode::AlwaysAdapterError,
+        };
+        let eng = Engine::new(
+            LocalFsStore::open(tmp.path()).unwrap(),
+            InMemoryIndex::default(),
+            vcs,
+        );
+
+        assert!(matches!(
+            eng.vault_history(None),
+            Err(PortError::Adapter(_))
+        ));
     }
 
     #[test]
