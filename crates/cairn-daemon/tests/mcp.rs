@@ -86,7 +86,74 @@ async fn tools_list_gates_writes_on_mcp_write() {
 
     let rw = build_router(AppState::new(engine(tmp.path())).with_mcp_write(true));
     let (_, body) = rpc(&rw, list, None).await;
-    assert_eq!(body["result"]["tools"].as_array().unwrap().len(), 12);
+    assert_eq!(body["result"]["tools"].as_array().unwrap().len(), 13);
+}
+
+#[tokio::test]
+async fn seal_now_and_name_version_round_trip_over_mcp() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = build_router(AppState::new(engine(tmp.path())).with_mcp_write(true));
+
+    // A clean tree has nothing to seal.
+    let (_, body) = rpc(&app, call("commit", serde_json::json!({})), None).await;
+    assert_eq!(body["result"]["isError"], false);
+    assert_eq!(body["result"]["content"][0]["text"], "nothing to commit");
+
+    rpc(
+        &app,
+        call(
+            "write_note",
+            serde_json::json!({"path":"a.md","contents":"# Ownership\n\nmoves"}),
+        ),
+        None,
+    )
+    .await;
+
+    // "Seal now": no message ⇒ the engine generates one from the pending diff.
+    let (_, body) = rpc(&app, call("commit", serde_json::json!({})), None).await;
+    assert_eq!(body["result"]["isError"], false);
+    let text = body["result"]["content"][0]["text"].as_str().unwrap();
+    let commit = text.strip_prefix("committed ").expect("committed <id>");
+
+    let (_, body) = rpc(
+        &app,
+        call(
+            "name_version",
+            serde_json::json!({"commit": commit, "name": "Before the big reorg"}),
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(body["result"]["isError"], false);
+
+    // The name is joined onto the history rows the agent reads back.
+    let (_, body) = rpc(
+        &app,
+        call("note_history", serde_json::json!({"path":"a.md"})),
+        None,
+    )
+    .await;
+    assert_eq!(
+        body["result"]["structuredContent"]["revisions"][0]["name"],
+        "Before the big reorg"
+    );
+}
+
+#[tokio::test]
+async fn name_version_rejected_in_read_only_mode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = build_router(AppState::new(engine(tmp.path()))); // write disabled
+    let (status, body) = rpc(
+        &app,
+        call(
+            "name_version",
+            serde_json::json!({"commit":"HEAD","name":"v1"}),
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["error"]["code"], cairn_mcp::METHOD_NOT_FOUND);
 }
 
 #[tokio::test]

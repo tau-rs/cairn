@@ -167,8 +167,15 @@ fn no_args() -> Value {
 
 /// A JSON-Schema object requiring the named string properties.
 fn string_args(props: &[(&str, &str)]) -> Value {
-    let properties: serde_json::Map<String, Value> = props
+    string_args_opt(props, &[])
+}
+
+/// A JSON-Schema object with required and optional string properties. Optional
+/// ones are advertised but omitted from `required`, so a client may leave them out.
+fn string_args_opt(required: &[(&str, &str)], optional: &[(&str, &str)]) -> Value {
+    let properties: serde_json::Map<String, Value> = required
         .iter()
+        .chain(optional)
         .map(|(name, desc)| {
             (
                 (*name).to_string(),
@@ -176,7 +183,7 @@ fn string_args(props: &[(&str, &str)]) -> Value {
             )
         })
         .collect();
-    let required: Vec<&str> = props.iter().map(|(name, _)| *name).collect();
+    let required: Vec<&str> = required.iter().map(|(name, _)| *name).collect();
     json!({ "type": "object", "properties": properties, "required": required })
 }
 
@@ -252,8 +259,20 @@ pub fn tools_list(write_enabled: bool) -> Vec<ToolDef> {
             ),
             tool(
                 "commit",
-                "Commit all pending changes to git with a message.",
-                string_args(&[("message", "Commit message")]),
+                "Seal the current editing session into a git commit. Omit `message` \
+                 to let cairn generate one from the pending diff.",
+                string_args_opt(
+                    &[],
+                    &[("message", "Commit message; omit for a cairn-generated one")],
+                ),
+            ),
+            tool(
+                "name_version",
+                "Label a commit with a human-readable version name.",
+                string_args(&[
+                    ("commit", "Commit id to label (short or full)"),
+                    ("name", "Display name for the version"),
+                ]),
             ),
         ]);
     }
@@ -436,6 +455,18 @@ fn arg(args: &Value, key: &str) -> Result<String, RpcError> {
         .ok_or_else(|| RpcError::invalid_params(format!("missing or non-string argument: {key}")))
 }
 
+/// Extract an optional string argument: absent or `null` yields `None`; a
+/// present non-string is still an error.
+fn opt_arg(args: &Value, key: &str) -> Result<Option<String>, RpcError> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.clone())),
+        Some(_) => Err(RpcError::invalid_params(format!(
+            "non-string argument: {key}"
+        ))),
+    }
+}
+
 /// Resolve a `tools/call` (`name` + JSON `arguments`) to an engine dispatch.
 ///
 /// # Errors
@@ -476,7 +507,11 @@ pub fn parse_tool_call(name: &str, args: &Value) -> Result<ToolDispatch, RpcErro
             path: arg(args, "path")?,
         }),
         "commit" => C(Command::Commit {
-            message: Some(arg(args, "message")?),
+            message: opt_arg(args, "message")?,
+        }),
+        "name_version" => C(Command::NameVersion {
+            commit: arg(args, "commit")?,
+            name: arg(args, "name")?,
         }),
         other => return Err(RpcError::method_not_found(other)),
     })
@@ -486,7 +521,13 @@ pub fn parse_tool_call(name: &str, args: &Value) -> Result<ToolDispatch, RpcErro
 mod tests {
     use super::*;
 
-    const WRITE_TOOLS: [&str; 4] = ["write_note", "rename_note", "delete_note", "commit"];
+    const WRITE_TOOLS: [&str; 5] = [
+        "write_note",
+        "rename_note",
+        "delete_note",
+        "commit",
+        "name_version",
+    ];
 
     #[test]
     fn tools_list_gates_write_tools() {
@@ -504,7 +545,7 @@ mod tests {
         }
 
         let full = tools_list(true);
-        assert_eq!(full.len(), 12, "write mode exposes all 12 tools");
+        assert_eq!(full.len(), 13, "write mode exposes all 13 tools");
         for w in WRITE_TOOLS {
             assert!(
                 full.iter().any(|t| t.name == w),
@@ -588,6 +629,52 @@ mod tests {
             ToolDispatch::Command(Command::Commit {
                 message: Some("wip".into())
             })
+        );
+        assert_eq!(
+            parse_tool_call("name_version", &json!({ "commit": "abc123", "name": "v1" })).unwrap(),
+            ToolDispatch::Command(Command::NameVersion {
+                commit: "abc123".into(),
+                name: "v1".into()
+            })
+        );
+    }
+
+    #[test]
+    fn parse_commit_without_message_seals() {
+        // "Seal now" over MCP: no message ⇒ the engine generates one.
+        for args in [json!({}), json!({ "message": null })] {
+            assert_eq!(
+                parse_tool_call("commit", &args).unwrap(),
+                ToolDispatch::Command(Command::Commit { message: None }),
+                "{args} must parse as seal-now"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_commit_rejects_non_string_message() {
+        let err = parse_tool_call("commit", &json!({ "message": 7 })).unwrap_err();
+        assert_eq!(err.code, INVALID_PARAMS);
+    }
+
+    #[test]
+    fn commit_schema_declares_message_optional() {
+        let tools = tools_list(true);
+        let commit = tools.iter().find(|t| t.name == "commit").unwrap();
+        assert!(
+            commit.input_schema["properties"]["message"].is_object(),
+            "message stays an advertised string property"
+        );
+        assert_eq!(
+            commit.input_schema["required"],
+            json!([]),
+            "message must not be required — omitting it is the seal-now gesture"
+        );
+
+        let name_version = tools.iter().find(|t| t.name == "name_version").unwrap();
+        assert_eq!(
+            name_version.input_schema["required"],
+            json!(["commit", "name"])
         );
     }
 
