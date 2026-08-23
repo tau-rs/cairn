@@ -13,6 +13,8 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
+pub mod commit_msg;
+
 /// Schema version of `.cairn/state.json`. Tags the hash regime: bump this
 /// whenever `Note::content_hash`'s algorithm changes so stale persisted hashes
 /// are rebuilt (cold) rather than silently trusted.
@@ -62,6 +64,38 @@ const SUGGEST_TOP_K: usize = 5;
 const SUGGEST_FLOOR: f32 = 0.1;
 /// Max edges returned for a `Vault` scope.
 const VAULT_EDGE_CAP: usize = 100;
+/// Newest-rows cap for per-row diff summaries in unlimited history queries.
+const SUMMARY_CAP: usize = 50;
+
+/// The number of history rows to enrich with a per-commit diff summary:
+/// `min(limit, SUMMARY_CAP)` when the caller passed a limit, else
+/// [`SUMMARY_CAP`]. Keeps a large `limit` (e.g. `vault_history(Some(10_000))`)
+/// from forcing thousands of tree-diffs under the engine lock.
+fn enrich_cap(limit: Option<u32>) -> usize {
+    limit.map_or(SUMMARY_CAP, |n| (n as usize).min(SUMMARY_CAP))
+}
+
+/// Result of a commit request: either a commit was created, or the tree was
+/// byte-identical to HEAD and nothing happened. Empty commits are never made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommitOutcome {
+    /// A commit was created; carries the short id.
+    Committed(String),
+    /// The working tree matched HEAD.
+    NothingToCommit,
+}
+
+/// A history row plus engine-computed context: the change summary (newest
+/// [`SUMMARY_CAP`] rows only) and the commit's cairn name, if any.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnrichedRevision {
+    /// The underlying commit row.
+    pub revision: cairn_ports::Revision,
+    /// What the commit changed. `None` beyond the enrichment cap.
+    pub summary: Option<cairn_ports::DiffSummary>,
+    /// Named-version label from `refs/tags/cairn/*`.
+    pub name: Option<String>,
+}
 
 /// A domain event emitted as a side effect of a command.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -871,14 +905,36 @@ impl Engine {
         }
     }
 
-    /// Commit all changes.
+    /// Commit all changes. `message: None` ⇒ generate the subject from the
+    /// pending diff. Never creates an empty commit.
     ///
     /// # Errors
     /// Returns [`PortError`] if the VCS fails.
-    pub fn commit(&mut self, message: &str, sink: &mut dyn EventSink) -> Result<String, PortError> {
-        let id = self.vcs.commit_all(message)?;
+    pub fn commit(
+        &mut self,
+        message: Option<&str>,
+        sink: &mut dyn EventSink,
+    ) -> Result<CommitOutcome, PortError> {
+        let summary = self.vcs.pending_summary()?;
+        if summary.changes.is_empty() {
+            return Ok(CommitOutcome::NothingToCommit);
+        }
+        let msg = match message {
+            Some(m) => m.to_string(),
+            None => crate::commit_msg::commit_message(&summary),
+        };
+        let id = self.vcs.commit_all(&msg)?;
         sink.emit(Event::Committed(id.clone()));
-        Ok(id)
+        Ok(CommitOutcome::Committed(id))
+    }
+
+    /// Name (or rename) a committed version. See `Vcs::name_version`.
+    ///
+    /// # Errors
+    /// [`PortError::NotFound`] for an unknown commit; [`PortError::AlreadyExists`]
+    /// when the name labels a different commit.
+    pub fn name_version(&mut self, commit: &str, name: &str) -> Result<(), PortError> {
+        self.vcs.name_version(commit, name)
     }
 
     /// Whether the working tree has uncommitted changes. The daemon's auto-commit
@@ -890,20 +946,57 @@ impl Engine {
         self.vcs.is_dirty()
     }
 
-    /// A note's commit history (newest first).
+    /// A note's commit history (newest first), enriched with cairn names and
+    /// per-commit change summaries (capped at [`SUMMARY_CAP`] newest rows).
     ///
     /// # Errors
     /// Returns [`PortError`] if the VCS adapter fails.
-    pub fn note_history(&self, path: &NotePath) -> Result<Vec<Revision>, PortError> {
-        self.vcs.history(path.as_str())
+    pub fn note_history(&self, path: &NotePath) -> Result<Vec<EnrichedRevision>, PortError> {
+        self.enrich(self.vcs.history(path.as_str())?, SUMMARY_CAP)
     }
 
-    /// The whole repository's commit history (newest first), capped at `limit`.
+    /// The whole repository's commit history (newest first), capped at `limit`,
+    /// enriched with cairn names and per-commit change summaries (capped at
+    /// [`enrich_cap`]`(limit)` newest rows: `min(limit, `[`SUMMARY_CAP`]`)`, or
+    /// [`SUMMARY_CAP`] when unlimited).
     ///
     /// # Errors
     /// Returns [`PortError`] if the VCS adapter fails.
-    pub fn vault_history(&self, limit: Option<u32>) -> Result<Vec<Revision>, PortError> {
-        self.vcs.vault_history(limit)
+    pub fn vault_history(&self, limit: Option<u32>) -> Result<Vec<EnrichedRevision>, PortError> {
+        self.enrich(self.vcs.vault_history(limit)?, enrich_cap(limit))
+    }
+
+    /// Join names and (capped) summaries onto raw history rows.
+    ///
+    /// A missing summary ([`PortError::NotFound`], e.g. an ambiguous short id)
+    /// degrades that one row to `summary: None` instead of failing the whole
+    /// query; any other error still propagates.
+    ///
+    /// # Errors
+    /// Returns [`PortError`] if the VCS adapter fails (other than a per-row
+    /// [`PortError::NotFound`] on `commit_summary`).
+    fn enrich(&self, revs: Vec<Revision>, cap: usize) -> Result<Vec<EnrichedRevision>, PortError> {
+        let names = self.vcs.named_versions()?;
+        revs.into_iter()
+            .enumerate()
+            .map(|(i, revision)| {
+                let summary = if i < cap {
+                    match self.vcs.commit_summary(&revision.id) {
+                        Ok(summary) => Some(summary),
+                        Err(PortError::NotFound(_)) => None,
+                        Err(err) => return Err(err),
+                    }
+                } else {
+                    None
+                };
+                let name = names.get(&revision.id).cloned();
+                Ok(EnrichedRevision {
+                    revision,
+                    summary,
+                    name,
+                })
+            })
+            .collect()
     }
 
     /// Vault revisions that changed the link graph — a note node or a link edge
@@ -918,11 +1011,16 @@ impl Engine {
     /// The walk short-circuits: once `limit` structural revisions are collected
     /// it stops the underlying revwalk instead of scanning to the root, so the
     /// cost is `O(commits up to the nth structural rev)`, not `O(history)`.
-    /// `limit: None` still walks the whole history.
+    /// `limit: None` still walks the whole history. Per-row diff summaries are
+    /// enriched for the newest [`enrich_cap`]`(limit)` rows only: `min(limit,
+    /// `[`SUMMARY_CAP`]`)`, or [`SUMMARY_CAP`] when unlimited.
     ///
     /// # Errors
     /// Returns [`PortError`] if the VCS adapter or a tree read fails.
-    pub fn structural_revisions(&self, limit: Option<u32>) -> Result<Vec<Revision>, PortError> {
+    pub fn structural_revisions(
+        &self,
+        limit: Option<u32>,
+    ) -> Result<Vec<EnrichedRevision>, PortError> {
         let cap = limit.map(|n| n as usize);
         let mut out: Vec<Revision> = Vec::new();
         self.vcs.walk_md_changes(&mut |c| {
@@ -943,7 +1041,7 @@ impl Engine {
                 ControlFlow::Continue(())
             })
         })?;
-        Ok(out)
+        self.enrich(out, enrich_cap(limit))
     }
 
     /// A note's contents at a past revision.
@@ -1443,7 +1541,7 @@ mod tests {
         eng.write_note(&NotePath::new("a.md").unwrap(), "hi", &mut events)
             .unwrap();
         assert!(eng.has_uncommitted_changes().unwrap(), "dirty after write");
-        eng.commit("add a", &mut events).unwrap();
+        eng.commit(Some("add a"), &mut events).unwrap();
         assert!(
             !eng.has_uncommitted_changes().unwrap(),
             "clean after commit"
@@ -1519,8 +1617,79 @@ mod tests {
         let mut events = Vec::new();
         eng.write_note(&NotePath::new("a.md").unwrap(), "hi", &mut events)
             .unwrap();
-        let id = eng.commit("first", &mut events).unwrap();
+        let CommitOutcome::Committed(id) = eng.commit(Some("first"), &mut events).unwrap() else {
+            panic!("expected commit");
+        };
         assert!(events.contains(&Event::Committed(id)));
+    }
+
+    #[test]
+    fn commit_none_generates_message_and_skips_clean_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut ev: Vec<Event> = Vec::new();
+        // Clean tree: nothing to commit, no event.
+        assert!(matches!(
+            eng.commit(None, &mut ev).unwrap(),
+            CommitOutcome::NothingToCommit
+        ));
+        assert!(ev.is_empty(), "no Committed event on a no-op seal");
+
+        let p = cairn_domain::NotePath::new("roadmap.md").unwrap();
+        eng.write_note(&p, "# Q3 Roadmap\n\none two three\n", &mut ev)
+            .unwrap();
+        let CommitOutcome::Committed(id) = eng.commit(None, &mut ev).unwrap() else {
+            panic!("dirty tree must commit");
+        };
+        assert!(ev.contains(&Event::Committed(id.clone())));
+        // The generated subject names the note. Word counts are raw
+        // whitespace tokens, so the "#" heading marker counts: 6, not 5.
+        let hist = eng.vault_history(None).unwrap();
+        assert_eq!(hist[0].revision.message, "Add \"Q3 Roadmap\" (+6 words)");
+        assert_eq!(hist[0].revision.id, id);
+    }
+
+    #[test]
+    fn commit_some_keeps_caller_text_but_still_guards_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut ev: Vec<Event> = Vec::new();
+        assert!(matches!(
+            eng.commit(Some("explicit"), &mut ev).unwrap(),
+            CommitOutcome::NothingToCommit
+        ));
+        let p = cairn_domain::NotePath::new("a.md").unwrap();
+        eng.write_note(&p, "x", &mut ev).unwrap();
+        let CommitOutcome::Committed(_) = eng.commit(Some("explicit"), &mut ev).unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            eng.vault_history(None).unwrap()[0].revision.message,
+            "explicit"
+        );
+    }
+
+    #[test]
+    fn history_rows_carry_summary_and_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut ev: Vec<Event> = Vec::new();
+        let p = cairn_domain::NotePath::new("a.md").unwrap();
+        eng.write_note(&p, "one two\n", &mut ev).unwrap();
+        let CommitOutcome::Committed(c1) = eng.commit(None, &mut ev).unwrap() else {
+            panic!()
+        };
+        eng.name_version(&c1, "Milestone").unwrap();
+
+        let rows = eng.vault_history(None).unwrap();
+        assert_eq!(rows[0].name.as_deref(), Some("Milestone"));
+        let s = rows[0].summary.as_ref().expect("newest row enriched");
+        assert_eq!(s.changes.len(), 1);
+        assert_eq!(s.words_added, 2);
+
+        // note_history and structural_revisions share the enrichment.
+        let nh = eng.note_history(&p).unwrap();
+        assert_eq!(nh[0].name.as_deref(), Some("Milestone"));
     }
 
     #[test]
@@ -2198,13 +2367,13 @@ mod tests {
         let a = NotePath::new("a.md").unwrap();
         let mut events = Vec::new();
         eng.write_note(&a, "v1", &mut events).unwrap();
-        eng.commit("v1", &mut events).unwrap();
+        eng.commit(Some("v1"), &mut events).unwrap();
         eng.write_note(&a, "v2", &mut events).unwrap();
-        eng.commit("v2", &mut events).unwrap();
+        eng.commit(Some("v2"), &mut events).unwrap();
 
         let hist = eng.note_history(&a).unwrap();
         assert_eq!(hist.len(), 2);
-        let v1_rev = hist[1].id.clone(); // oldest = v1
+        let v1_rev = hist[1].revision.id.clone(); // oldest = v1
         assert_eq!(eng.note_at(&a, &v1_rev).unwrap(), "v1");
 
         events.clear();
@@ -2401,6 +2570,185 @@ mod tests {
                 visit(c)
             })
         }
+        fn pending_summary(&self) -> Result<cairn_ports::DiffSummary, PortError> {
+            self.inner.pending_summary()
+        }
+        fn commit_summary(&self, revision: &str) -> Result<cairn_ports::DiffSummary, PortError> {
+            self.inner.commit_summary(revision)
+        }
+        fn name_version(&mut self, revision: &str, name: &str) -> Result<(), PortError> {
+            self.inner.name_version(revision, name)
+        }
+        fn named_versions(&self) -> Result<std::collections::HashMap<String, String>, PortError> {
+            self.inner.named_versions()
+        }
+    }
+
+    /// What [`FakeHistoryVcs::commit_summary`] does on every call.
+    enum SummaryMode {
+        /// Count the call and return an empty (but valid) summary.
+        CountOk,
+        /// Always fail as if the id didn't resolve (e.g. an ambiguous short id).
+        AlwaysNotFound,
+        /// Always fail with a non-`NotFound` error, to prove it still propagates.
+        AlwaysAdapterError,
+    }
+
+    /// A `Vcs` that fakes a `vault_history` result from in-memory `Revision`s
+    /// (no real commits) and tracks/controls `commit_summary` behavior, so the
+    /// enrichment cap and per-row error degradation can be tested without
+    /// materializing dozens of real commits.
+    struct FakeHistoryVcs {
+        revs: Vec<cairn_ports::Revision>,
+        summary_calls: Arc<Au>,
+        summary_mode: SummaryMode,
+    }
+    impl Vcs for FakeHistoryVcs {
+        fn commit_all(&mut self, _message: &str) -> Result<String, PortError> {
+            unreachable!("not exercised by these tests")
+        }
+        fn history(&self, _path: &str) -> Result<Vec<cairn_ports::Revision>, PortError> {
+            unreachable!("not exercised by these tests")
+        }
+        fn vault_history(
+            &self,
+            limit: Option<u32>,
+        ) -> Result<Vec<cairn_ports::Revision>, PortError> {
+            let n = limit.map_or(self.revs.len(), |l| (l as usize).min(self.revs.len()));
+            Ok(self.revs[..n].to_vec())
+        }
+        fn show(&self, _path: &str, _revision: &str) -> Result<String, PortError> {
+            unreachable!("not exercised by these tests")
+        }
+        fn is_dirty(&self) -> Result<bool, PortError> {
+            unreachable!("not exercised by these tests")
+        }
+        fn resolve(&self, _revision: &str) -> Result<String, PortError> {
+            unreachable!("not exercised by these tests")
+        }
+        fn read_tree_at(
+            &self,
+            _revision: &str,
+        ) -> Result<Vec<cairn_ports::HistoricalBlob>, PortError> {
+            unreachable!("not exercised by these tests")
+        }
+        fn walk_md_changes(
+            &self,
+            _visit: &mut dyn FnMut(
+                cairn_ports::MdCommit,
+            ) -> Result<std::ops::ControlFlow<()>, PortError>,
+        ) -> Result<(), PortError> {
+            unreachable!("not exercised by these tests")
+        }
+        fn pending_summary(&self) -> Result<cairn_ports::DiffSummary, PortError> {
+            unreachable!("not exercised by these tests")
+        }
+        fn commit_summary(&self, revision: &str) -> Result<cairn_ports::DiffSummary, PortError> {
+            self.summary_calls.fetch_add(1, Ord2::SeqCst);
+            match self.summary_mode {
+                SummaryMode::CountOk => Ok(cairn_ports::DiffSummary {
+                    changes: Vec::new(),
+                    words_added: 0,
+                    words_removed: 0,
+                }),
+                SummaryMode::AlwaysNotFound => {
+                    Err(PortError::NotFound(format!("revision {revision}")))
+                }
+                SummaryMode::AlwaysAdapterError => {
+                    Err(PortError::Adapter(AdapterError::message("boom")))
+                }
+            }
+        }
+        fn name_version(&mut self, _revision: &str, _name: &str) -> Result<(), PortError> {
+            unreachable!("not exercised by these tests")
+        }
+        fn named_versions(&self) -> Result<std::collections::HashMap<String, String>, PortError> {
+            Ok(std::collections::HashMap::new())
+        }
+    }
+
+    fn fake_revision(i: usize) -> cairn_ports::Revision {
+        cairn_ports::Revision {
+            id: format!("fake{i}"),
+            message: format!("c{i}"),
+            timestamp_secs: i as i64,
+            author: "tester".to_string(),
+        }
+    }
+
+    #[test]
+    fn vault_history_caps_summary_enrichment_at_summary_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let revs: Vec<_> = (0..60).map(fake_revision).collect();
+        let calls = Arc::new(Au::new(0));
+        let vcs = FakeHistoryVcs {
+            revs,
+            summary_calls: calls.clone(),
+            summary_mode: SummaryMode::CountOk,
+        };
+        let eng = Engine::new(
+            LocalFsStore::open(tmp.path()).unwrap(),
+            InMemoryIndex::default(),
+            vcs,
+        );
+
+        let out = eng.vault_history(Some(60)).unwrap();
+
+        assert_eq!(out.len(), 60, "all 60 rows are returned");
+        assert_eq!(
+            calls.load(Ord2::SeqCst),
+            SUMMARY_CAP,
+            "only the newest SUMMARY_CAP rows are enriched, not all 60"
+        );
+        assert!(out[SUMMARY_CAP - 1].summary.is_some());
+        assert!(out[SUMMARY_CAP].summary.is_none());
+    }
+
+    #[test]
+    fn vault_history_degrades_row_on_summary_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let revs: Vec<_> = (0..5).map(fake_revision).collect();
+        let vcs = FakeHistoryVcs {
+            revs,
+            summary_calls: Arc::new(Au::new(0)),
+            summary_mode: SummaryMode::AlwaysNotFound,
+        };
+        let eng = Engine::new(
+            LocalFsStore::open(tmp.path()).unwrap(),
+            InMemoryIndex::default(),
+            vcs,
+        );
+
+        let out = eng
+            .vault_history(None)
+            .expect("a NotFound summary degrades its row instead of failing the query");
+
+        assert_eq!(out.len(), 5);
+        assert!(
+            out.iter().all(|r| r.summary.is_none()),
+            "every row's summary is None, but all rows are still present"
+        );
+    }
+
+    #[test]
+    fn vault_history_propagates_non_not_found_summary_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let revs: Vec<_> = (0..5).map(fake_revision).collect();
+        let vcs = FakeHistoryVcs {
+            revs,
+            summary_calls: Arc::new(Au::new(0)),
+            summary_mode: SummaryMode::AlwaysAdapterError,
+        };
+        let eng = Engine::new(
+            LocalFsStore::open(tmp.path()).unwrap(),
+            InMemoryIndex::default(),
+            vcs,
+        );
+
+        assert!(matches!(
+            eng.vault_history(None),
+            Err(PortError::Adapter(_))
+        ));
     }
 
     #[test]
@@ -2412,9 +2760,11 @@ mod tests {
         let b = NotePath::new("b.md").unwrap();
         eng.write_note(&a, "[[b]]", &mut ev).unwrap();
         eng.write_note(&b, "x", &mut ev).unwrap();
-        let c1 = eng.commit("c1", &mut ev).unwrap();
+        let CommitOutcome::Committed(c1) = eng.commit(Some("c1"), &mut ev).unwrap() else {
+            panic!()
+        };
         eng.write_note(&a, "no link now", &mut ev).unwrap();
-        eng.commit("c2", &mut ev).unwrap();
+        eng.commit(Some("c2"), &mut ev).unwrap();
 
         // As of c1: a -> b present.
         let at = eng.graph_at(&c1, &GraphScope::Full).unwrap();
@@ -2457,7 +2807,9 @@ mod tests {
         let mut ev = Vec::new();
         eng.write_note(&NotePath::new("a.md").unwrap(), "[[b]]", &mut ev)
             .unwrap();
-        let c1 = eng.commit("c1", &mut ev).unwrap();
+        let CommitOutcome::Committed(c1) = eng.commit(Some("c1"), &mut ev).unwrap() else {
+            panic!()
+        };
 
         let _ = eng.graph_at(&c1, &GraphScope::Full).unwrap();
         let _ = eng.graph_at(&c1, &GraphScope::Full).unwrap(); // same oid
@@ -2483,9 +2835,13 @@ mod tests {
         let c = NotePath::new("c.md").unwrap();
         eng.write_note(&a, "[[b]]", &mut ev).unwrap();
         eng.write_note(&b, "x", &mut ev).unwrap();
-        let c1 = eng.commit("c1", &mut ev).unwrap();
+        let CommitOutcome::Committed(c1) = eng.commit(Some("c1"), &mut ev).unwrap() else {
+            panic!()
+        };
         eng.write_note(&c, "[[b]]", &mut ev).unwrap();
-        let c2 = eng.commit("c2", &mut ev).unwrap();
+        let CommitOutcome::Committed(c2) = eng.commit(Some("c2"), &mut ev).unwrap() else {
+            panic!()
+        };
 
         let d = eng.graph_diff(&c1, &c2, &GraphScope::Full).unwrap();
         assert!(d.nodes_added.iter().any(|n| n.path.as_str() == "c.md"));
@@ -2508,13 +2864,17 @@ mod tests {
         eng.write_note(&b, "anchor", &mut ev).unwrap();
         eng.write_note(&x, "# Old\n[[b]]", &mut ev).unwrap();
         eng.write_note(&gone, "temp", &mut ev).unwrap();
-        let c1 = eng.commit("c1", &mut ev).unwrap();
+        let CommitOutcome::Committed(c1) = eng.commit(Some("c1"), &mut ev).unwrap() else {
+            panic!()
+        };
         // c2: x retitled "New" (same path, same links), a genuine add, gone removed.
         eng.write_note(&x, "# New\n[[b]]", &mut ev).unwrap();
         eng.write_note(&NotePath::new("added.md").unwrap(), "fresh", &mut ev)
             .unwrap();
         eng.delete_note(&gone, &mut ev).unwrap();
-        let c2 = eng.commit("c2", &mut ev).unwrap();
+        let CommitOutcome::Committed(c2) = eng.commit(Some("c2"), &mut ev).unwrap() else {
+            panic!()
+        };
 
         let d = eng.graph_diff(&c1, &c2, &GraphScope::Full).unwrap();
 
@@ -2676,14 +3036,14 @@ mod tests {
         let b = NotePath::new("b.md").unwrap();
         eng.write_note(&a, "hello", &mut ev).unwrap();
         eng.write_note(&b, "world", &mut ev).unwrap();
-        eng.commit("c1 create a,b", &mut ev).unwrap(); // nodes added -> structural
+        eng.commit(Some("c1 create a,b"), &mut ev).unwrap(); // nodes added -> structural
         eng.write_note(&a, "hello, more prose but no links", &mut ev)
             .unwrap();
-        eng.commit("c2 text edit", &mut ev).unwrap(); // text only -> NOT structural
+        eng.commit(Some("c2 text edit"), &mut ev).unwrap(); // text only -> NOT structural
 
         let revs = eng.structural_revisions(None).unwrap();
         assert_eq!(revs.len(), 1);
-        assert_eq!(revs[0].message, "c1 create a,b");
+        assert_eq!(revs[0].revision.message, "c1 create a,b");
     }
 
     #[test]
@@ -2694,14 +3054,14 @@ mod tests {
         let a = NotePath::new("a.md").unwrap();
         eng.write_note(&a, "---\ntags: [x]\n---\nbody", &mut ev)
             .unwrap();
-        eng.commit("c1 create", &mut ev).unwrap(); // node added -> structural
+        eng.commit(Some("c1 create"), &mut ev).unwrap(); // node added -> structural
         eng.write_note(&a, "---\ntags: [x, y]\n---\nbody", &mut ev)
             .unwrap();
-        eng.commit("c2 tag edit", &mut ev).unwrap(); // metadata only -> NOT structural
+        eng.commit(Some("c2 tag edit"), &mut ev).unwrap(); // metadata only -> NOT structural
 
         let revs = eng.structural_revisions(None).unwrap();
         assert_eq!(revs.len(), 1);
-        assert_eq!(revs[0].message, "c1 create");
+        assert_eq!(revs[0].revision.message, "c1 create");
     }
 
     #[test]
@@ -2713,14 +3073,14 @@ mod tests {
         let b = NotePath::new("b.md").unwrap();
         eng.write_note(&a, "x", &mut ev).unwrap();
         eng.write_note(&b, "y", &mut ev).unwrap();
-        eng.commit("c1 create", &mut ev).unwrap(); // nodes added
+        eng.commit(Some("c1 create"), &mut ev).unwrap(); // nodes added
         eng.write_note(&a, "[[b]]", &mut ev).unwrap();
-        eng.commit("c2 add link", &mut ev).unwrap(); // edge a->b added
+        eng.commit(Some("c2 add link"), &mut ev).unwrap(); // edge a->b added
         eng.delete_note(&b, &mut ev).unwrap();
-        eng.commit("c3 remove b", &mut ev).unwrap(); // node b + edge removed
+        eng.commit(Some("c3 remove b"), &mut ev).unwrap(); // node b + edge removed
 
         let revs = eng.structural_revisions(None).unwrap();
-        let msgs: Vec<&str> = revs.iter().map(|r| r.message.as_str()).collect();
+        let msgs: Vec<&str> = revs.iter().map(|r| r.revision.message.as_str()).collect();
         assert_eq!(msgs, vec!["c3 remove b", "c2 add link", "c1 create"]); // newest-first
     }
 
@@ -2731,13 +3091,13 @@ mod tests {
         let mut ev = Vec::new();
         let a = NotePath::new("a.md").unwrap();
         eng.write_note(&a, "x", &mut ev).unwrap();
-        eng.commit("c1 create a", &mut ev).unwrap(); // structural
+        eng.commit(Some("c1 create a"), &mut ev).unwrap(); // structural
         std::fs::write(tmp.path().join("assets.bin"), b"blob").unwrap();
-        eng.commit("c2 add asset", &mut ev).unwrap(); // no .md touched -> skipped
+        eng.commit(Some("c2 add asset"), &mut ev).unwrap(); // no .md touched -> skipped
 
         let revs = eng.structural_revisions(None).unwrap();
         assert_eq!(revs.len(), 1);
-        assert_eq!(revs[0].message, "c1 create a");
+        assert_eq!(revs[0].revision.message, "c1 create a");
     }
 
     #[test]
@@ -2747,20 +3107,20 @@ mod tests {
         let mut ev = Vec::new();
         let n0 = NotePath::new("n0.md").unwrap();
         eng.write_note(&n0, "x", &mut ev).unwrap();
-        eng.commit("c0", &mut ev).unwrap(); // node added -> structural
+        eng.commit(Some("c0"), &mut ev).unwrap(); // node added -> structural
         let n1 = NotePath::new("n1.md").unwrap();
         eng.write_note(&n1, "x", &mut ev).unwrap();
-        eng.commit("c1", &mut ev).unwrap(); // node added -> structural
+        eng.commit(Some("c1"), &mut ev).unwrap(); // node added -> structural
 
         // Interleave a non-structural (text-only) commit: a naive "cap the
         // first N commits walked" implementation would stop before reaching
         // c1, since this one consumes a walk slot without being structural.
         eng.write_note(&n0, "x, more prose but no links", &mut ev)
             .unwrap();
-        eng.commit("c_text", &mut ev).unwrap(); // text only -> NOT structural
+        eng.commit(Some("c_text"), &mut ev).unwrap(); // text only -> NOT structural
         let n2 = NotePath::new("n2.md").unwrap();
         eng.write_note(&n2, "x", &mut ev).unwrap();
-        eng.commit("c2", &mut ev).unwrap(); // node added -> structural
+        eng.commit(Some("c2"), &mut ev).unwrap(); // node added -> structural
 
         let revs = eng.structural_revisions(Some(2)).unwrap();
         assert_eq!(
@@ -2768,8 +3128,8 @@ mod tests {
             2,
             "limit caps STRUCTURAL revisions, not raw commits walked"
         );
-        assert_eq!(revs[0].message, "c2"); // newest two structural, skipping c_text
-        assert_eq!(revs[1].message, "c1");
+        assert_eq!(revs[0].revision.message, "c2"); // newest two structural, skipping c_text
+        assert_eq!(revs[1].revision.message, "c1");
     }
 
     #[test]
@@ -2799,14 +3159,14 @@ mod tests {
         for i in 0..30 {
             let p = NotePath::new(&format!("n{i}.md")).unwrap();
             eng.write_note(&p, "x", &mut ev).unwrap();
-            eng.commit(&format!("c{i}"), &mut ev).unwrap();
+            eng.commit(Some(&format!("c{i}")), &mut ev).unwrap();
         }
 
         let revs = eng.structural_revisions(Some(3)).unwrap();
         assert_eq!(revs.len(), 3);
-        assert_eq!(revs[0].message, "c29"); // newest-first
-        assert_eq!(revs[1].message, "c28");
-        assert_eq!(revs[2].message, "c27");
+        assert_eq!(revs[0].revision.message, "c29"); // newest-first
+        assert_eq!(revs[1].revision.message, "c28");
+        assert_eq!(revs[2].revision.message, "c27");
         // The walk short-circuited at the limit: only the 3 newest commits were
         // visited, not all 30 down to the root.
         assert_eq!(

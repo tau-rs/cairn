@@ -64,6 +64,10 @@ pub struct AppState {
     /// Live CRDT collaboration sessions, one per open note. Independent of the
     /// engine mutex so a relay fault cannot stall `/command`.
     collab: collab::Collab,
+    /// Channel to the seal loop's activity signal. `None` when auto-commit is
+    /// disabled (or in tests that don't attach a sealer), in which case
+    /// [`AppState::mark_activity`] is a no-op.
+    seal_tx: Option<std::sync::mpsc::Sender<cairn_service::SealSignal>>,
 }
 
 /// An `EventSink` that republishes engine events as wire events.
@@ -128,6 +132,7 @@ impl AppState {
             runtime: Arc::new(cairn_infra::NullRuntime),
             mcp_write: false,
             collab: collab::registry(),
+            seal_tx: None,
         }
     }
 
@@ -159,6 +164,30 @@ impl AppState {
     pub fn with_mcp_write(mut self, enabled: bool) -> Self {
         self.mcp_write = enabled;
         self
+    }
+
+    /// Attach the seal loop's activity channel. Without this, [`Self::mark_activity`]
+    /// is a no-op (auto-commit disabled).
+    #[must_use]
+    pub fn with_sealer(mut self, tx: std::sync::mpsc::Sender<cairn_service::SealSignal>) -> Self {
+        self.seal_tx = Some(tx);
+        self
+    }
+
+    /// Clone this state without the seal-loop activity sender.
+    ///
+    /// The seal loop itself must run on a handle like this: if its own closure
+    /// held a live `seal_tx`, the sender would never fully drop while the loop
+    /// runs, so `run_seal_loop`'s `RecvTimeoutError::Disconnected` branch (the
+    /// shutdown flush) could never fire. All other clones (request handlers, the
+    /// watcher, the collab flush loop) should keep using [`Clone::clone`] so
+    /// `mark_activity` still reaches the loop.
+    #[must_use]
+    pub fn without_sealer(&self) -> Self {
+        Self {
+            seal_tx: None,
+            ..self.clone()
+        }
     }
 
     /// Lock the engine, recovering from poisoning instead of propagating it.
@@ -197,6 +226,15 @@ impl AppState {
                 let mut fwd = BroadcastSink(self.events.clone());
                 guard.dispatch_plugin_event(&pe, &mut fwd);
             }
+        }
+        drop(guard);
+        if result.is_ok()
+            && !matches!(
+                command,
+                Command::Commit { .. } | Command::NameVersion { .. }
+            )
+        {
+            self.mark_activity();
         }
         result
     }
@@ -272,26 +310,28 @@ impl AppState {
         self.apply_change_blocking(change);
     }
 
-    /// Commit externally-detected edits, coalesced by the watch loop's quiet
-    /// period. No-ops when the working tree is clean (avoids an empty commit when
-    /// the changes were already committed, or the watcher event was spurious).
-    /// Best-effort: a failure is logged, not propagated.
-    pub fn commit_external_blocking(&self, message: &str) {
-        let mut guard = self.engine();
-        match guard.has_uncommitted_changes() {
-            Ok(false) => return,
-            Ok(true) => {}
-            Err(e) => {
-                tracing::warn!("watch: auto-commit dirty-check failed: {e}");
-                return;
+    /// Signal the seal loop that an editing session saw activity. No-op when
+    /// auto-commit is off (no sealer attached).
+    pub fn mark_activity(&self) {
+        if let Some(tx) = &self.seal_tx {
+            if tx.send(cairn_service::SealSignal::Activity).is_err() {
+                tracing::warn!("seal: loop gone; auto-commit inactive");
             }
         }
+    }
+
+    /// Seal the pending editing session: commit everything uncommitted with an
+    /// engine-generated message. No-ops on a clean tree. Best-effort: a failure
+    /// is logged, not propagated. Blocking — call from a blocking context.
+    pub fn seal_blocking(&self) {
+        let mut guard = self.engine();
         let mut tap = EventTap {
             tx: self.events.clone(),
             collected: Vec::new(),
         };
-        if let Err(e) = guard.commit(message, &mut tap) {
-            tracing::warn!("watch: auto-commit failed: {e}");
+        match guard.commit(None, &mut tap) {
+            Ok(_) => {}
+            Err(e) => tracing::warn!("seal: auto-commit failed: {e}"),
         }
     }
 
@@ -351,20 +391,10 @@ impl AppState {
                 collab::settle_flush(&self.collab, &item.path, collab::FlushOutcome::WriteError);
                 continue;
             }
-            // The bytes are on disk now; commit is best-effort. On commit failure
-            // the note stays dirty-on-disk and re-commits on the next op (the
-            // baseline still advances, so the retry is not a false conflict).
-            match guard.has_uncommitted_changes() {
-                Ok(true) => {
-                    let msg = format!("cairn: collab sync {}", item.path.as_str());
-                    if let Err(e) = guard.commit(&msg, &mut tap) {
-                        tracing::warn!(error = %e, "collab flush: commit failed");
-                    }
-                }
-                Ok(false) => {} // materialize matched disk; nothing to commit
-                Err(e) => tracing::warn!(error = %e, "collab flush: dirty-check failed"),
-            }
+            // The bytes are on disk now; the seal loop commits the flushed write
+            // with a generated message (source-agnostic sealing).
             drop(guard);
+            self.mark_activity();
             // Write landed ⇒ baseline advances (even if the commit failed) and an
             // abandoned, settled session is reaped — only now, post-write.
             collab::settle_flush(
@@ -417,6 +447,7 @@ fn command_kind(command: &Command) -> &'static str {
         Command::DeleteNote { .. } => "delete_note",
         Command::RenameNote { .. } => "rename_note",
         Command::Commit { .. } => "commit",
+        Command::NameVersion { .. } => "name_version",
         Command::RestoreNote { .. } => "restore_note",
         Command::InvokePluginCommand { .. } => "invoke_plugin_command",
     }
@@ -864,6 +895,28 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert!(logs_contain("request worker panicked"));
     }
+
+    #[test]
+    fn without_sealer_clone_does_not_keep_seal_channel_alive() {
+        // Mirrors the daemon's wiring: the seal loop must run on a handle that
+        // does not itself carry a live `seal_tx`, or the channel's sender count
+        // never reaches zero and `run_seal_loop`'s shutdown-flush branch
+        // (`RecvTimeoutError::Disconnected`) is unreachable (finding F1).
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel::<cairn_service::SealSignal>();
+        let handler_state = state(tmp.path()).with_sealer(tx);
+
+        let sealer = handler_state.without_sealer();
+        drop(handler_state); // the only clone still holding `Some(seal_tx)`
+
+        // `sealer` is still alive here; if it held its own sender, `rx` would
+        // still be connected.
+        assert!(matches!(
+            rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        ));
+        drop(sealer);
+    }
 }
 
 #[cfg(test)]
@@ -918,6 +971,10 @@ mod collab_flush_tests {
             "materialized markdown on disk"
         );
 
+        // The flush pass only marks activity now; the seal loop (here, a direct
+        // call) commits the flushed write with a generated message.
+        state.seal_blocking();
+
         // (2) Committed: the note is readable at git HEAD.
         {
             let guard = state.engine();
@@ -955,6 +1012,7 @@ mod collab_flush_tests {
         collab::add_participant(&state.collab, &path, 1); // keep it open across flushes
 
         state.run_collab_flush_pass(std::time::Duration::ZERO);
+        state.seal_blocking();
         // Session survived the first flush (active, not abandoned).
         {
             let guard = state.engine();
@@ -964,6 +1022,7 @@ mod collab_flush_tests {
         // A second live edit into the same open session, then flush again.
         collab::merge_op(&state.collab, &path, ins_at(1, "second"));
         state.run_collab_flush_pass(std::time::Duration::ZERO);
+        state.seal_blocking();
 
         let at_head = {
             let guard = state.engine();
@@ -1011,8 +1070,10 @@ mod collab_flush_tests {
         }
         assert!(saw_insert, "foreign block fanned out as an Insert");
 
-        // Flush pass 2: now disk == baseline ⇒ the merged result is written+committed.
+        // Flush pass 2: now disk == baseline ⇒ the merged result is written, and
+        // the seal (here, a direct call) commits it.
         state.run_collab_flush_pass(std::time::Duration::ZERO);
+        state.seal_blocking();
         let guard = state.engine();
         assert!(guard
             .note_at(&path, "HEAD")
@@ -1045,9 +1106,11 @@ mod collab_flush_tests {
         std::fs::write(tmp.path().join("n.md"), "base\n\nforeign\n").unwrap();
         state.apply_change_blocking(&FsChange::Changed(path.clone()));
 
-        // The flush now folds it (disk != baseline), then writes+commits on pass 2.
+        // The flush now folds it (disk != baseline), then writes on pass 2; the
+        // seal (here, a direct call) commits the merged result.
         state.run_collab_flush_pass(std::time::Duration::ZERO); // fold
         state.run_collab_flush_pass(std::time::Duration::ZERO); // write merged
+        state.seal_blocking();
         let guard = state.engine();
         assert!(guard.note_at(&path, "HEAD").unwrap().contains("foreign"));
     }
@@ -1066,7 +1129,7 @@ mod collab_flush_tests {
                 collected: Vec::new(),
             };
             guard.write_note(&path, "base\n", &mut tap).unwrap();
-            guard.commit("seed", &mut tap).unwrap();
+            guard.commit(Some("seed"), &mut tap).unwrap();
         }
         std::fs::write(tmp.path().join("n.md"), "base\n\nuncommitted\n").unwrap();
 
@@ -1076,9 +1139,11 @@ mod collab_flush_tests {
         collab::insert_seeded_session(&state.collab, &path, &head, worktree != head);
         collab::add_participant(&state.collab, &path, 1);
 
-        // First flush folds the uncommitted edit; second writes the merged result.
+        // First flush folds the uncommitted edit; second writes the merged
+        // result; the seal (here, a direct call) commits it.
         state.run_collab_flush_pass(std::time::Duration::ZERO);
         state.run_collab_flush_pass(std::time::Duration::ZERO);
+        state.seal_blocking();
         assert!(state
             .engine()
             .note_at(&path, "HEAD")
@@ -1106,7 +1171,7 @@ mod collab_flush_tests {
                 collected: Vec::new(),
             };
             guard.write_note(&path, "keep me\n", &mut tap).unwrap();
-            guard.commit("seed", &mut tap).unwrap();
+            guard.commit(Some("seed"), &mut tap).unwrap();
         }
         collab::insert_dirty_session(&state.collab, &path, "keep me\n", vec![]);
         collab::add_participant(&state.collab, &path, 1); // active session, not abandoned

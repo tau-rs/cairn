@@ -81,17 +81,17 @@ fn auto_commit_commits_dirty_tree_and_skips_clean() {
     std::fs::write(tmp.path().join("a.md"), "hi").unwrap();
     state.apply_change_blocking(&changed("a.md"));
 
-    state.commit_external_blocking("cairn: sync external edits");
+    state.seal_blocking();
 
     let vcs = GitVcs::open_or_init(tmp.path()).unwrap();
-    assert_eq!(vcs.history("a.md").unwrap().len(), 1, "one sync commit");
+    assert_eq!(vcs.history("a.md").unwrap().len(), 1, "one seal commit");
     assert!(
         !vcs.is_dirty().unwrap(),
         "working tree clean after auto-commit"
     );
 
     // A second call on a clean tree must not create an empty commit.
-    state.commit_external_blocking("cairn: sync external edits");
+    state.seal_blocking();
     assert_eq!(
         vcs.history("a.md").unwrap().len(),
         1,

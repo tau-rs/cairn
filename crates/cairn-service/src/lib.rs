@@ -23,55 +23,100 @@ pub fn run_watch_loop(handle: &WatchHandle, mut on_change: impl FnMut(&FsChange)
     }
 }
 
-/// Tracks whether external changes have been seen since the last commit, so a
-/// burst of changes coalesces into a single commit. Decision logic only — the
-/// timing lives in [`run_watch_loop_timeout`].
-#[derive(Debug, Default)]
-struct Coalescer {
-    dirty: bool,
+/// A signal that an editing session saw activity, from any edit source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SealSignal {
+    /// A note changed (client write, external edit, collab flush…).
+    Activity,
 }
 
-impl Coalescer {
-    /// Record that an external change was applied.
-    fn mark_dirty(&mut self) {
-        self.dirty = true;
+/// What the seal loop should do now. See [`SealTimer::poll`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SealPoll {
+    /// No open session; wait for activity indefinitely.
+    Idle,
+    /// Session open; re-poll at this deadline unless activity arrives first.
+    WaitUntil(std::time::Instant),
+    /// Seal the session now (idle window or backstop elapsed).
+    SealNow,
+}
+
+/// Decides when a burst of edits ("session") seals into one commit: after
+/// `idle` with no activity, or `backstop` after the session opened even if it
+/// never goes idle. Pure decision logic — the timing lives in [`run_seal_loop`].
+#[derive(Debug)]
+pub struct SealTimer {
+    idle: std::time::Duration,
+    backstop: std::time::Duration,
+    session_start: Option<std::time::Instant>,
+    last_activity: Option<std::time::Instant>,
+}
+
+impl SealTimer {
+    /// A timer with the given idle window and never-idle backstop.
+    #[must_use]
+    pub fn new(idle: std::time::Duration, backstop: std::time::Duration) -> Self {
+        Self {
+            idle,
+            backstop,
+            session_start: None,
+            last_activity: None,
+        }
     }
 
-    /// On a quiet tick: returns whether a commit is due (changes were seen since
-    /// the last commit), clearing the dirty flag.
-    fn take_if_dirty(&mut self) -> bool {
-        std::mem::take(&mut self.dirty)
+    /// Record activity at `now`, opening a session if none is open.
+    pub fn on_activity(&mut self, now: std::time::Instant) {
+        self.session_start.get_or_insert(now);
+        self.last_activity = Some(now);
+    }
+
+    /// The action due at `now`. `SealNow` closes the session (state resets).
+    pub fn poll(&mut self, now: std::time::Instant) -> SealPoll {
+        let (Some(start), Some(last)) = (self.session_start, self.last_activity) else {
+            return SealPoll::Idle;
+        };
+        let deadline = std::cmp::min(last + self.idle, start + self.backstop);
+        if now >= deadline {
+            self.session_start = None;
+            self.last_activity = None;
+            SealPoll::SealNow
+        } else {
+            SealPoll::WaitUntil(deadline)
+        }
     }
 }
 
-/// Like [`run_watch_loop`], but coalesces bursts: after `quiet` elapses with no
-/// new change, `on_quiet` fires once (used to auto-commit externally-detected
-/// edits). `on_quiet` also fires on shutdown if changes are pending. Blocking —
-/// run on a dedicated thread.
-pub fn run_watch_loop_timeout(
-    handle: &WatchHandle,
-    quiet: std::time::Duration,
-    mut on_change: impl FnMut(&FsChange),
-    mut on_quiet: impl FnMut(),
+/// Drive a [`SealTimer`] from a channel of activity signals, invoking `on_seal`
+/// once per sealed session (and once on shutdown if a session is open).
+/// Blocking — run on a dedicated thread.
+pub fn run_seal_loop(
+    rx: &std::sync::mpsc::Receiver<SealSignal>,
+    idle: std::time::Duration,
+    backstop: std::time::Duration,
+    mut on_seal: impl FnMut(),
 ) {
     use std::sync::mpsc::RecvTimeoutError;
-    let mut coalescer = Coalescer::default();
+    use std::time::Instant;
+    let mut timer = SealTimer::new(idle, backstop);
     loop {
-        match handle.changes.recv_timeout(quiet) {
-            Ok(change) => {
-                on_change(&change);
-                coalescer.mark_dirty();
+        let action = timer.poll(Instant::now());
+        let received = match action {
+            SealPoll::SealNow => {
+                on_seal();
+                continue;
             }
-            // A full `quiet` window passed with no new change: flush if pending.
-            Err(RecvTimeoutError::Timeout) => {
-                if coalescer.take_if_dirty() {
-                    on_quiet();
-                }
+            SealPoll::Idle => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+            SealPoll::WaitUntil(deadline) => {
+                let wait = deadline.saturating_duration_since(Instant::now());
+                rx.recv_timeout(wait)
             }
-            // Shutdown: flush any pending changes, then stop.
+        };
+        match received {
+            Ok(SealSignal::Activity) => timer.on_activity(Instant::now()),
+            Err(RecvTimeoutError::Timeout) => {} // next poll() decides
             Err(RecvTimeoutError::Disconnected) => {
-                if coalescer.take_if_dirty() {
-                    on_quiet();
+                if !matches!(timer.poll(Instant::now()), SealPoll::Idle) {
+                    on_seal();
                 }
                 break;
             }
@@ -151,6 +196,23 @@ fn map_scope(scope: &cairn_contract::SuggestionScope) -> Result<cairn_app::Scope
     })
 }
 
+/// Map an engine [`cairn_app::EnrichedRevision`] to the wire [`Revision`],
+/// folding its diff summary (if any) into a [`cairn_contract::ChangeSummary`].
+fn revision_to_wire(r: cairn_app::EnrichedRevision) -> Revision {
+    Revision {
+        id: r.revision.id,
+        message: r.revision.message,
+        timestamp_secs: r.revision.timestamp_secs,
+        author: r.revision.author,
+        summary: r.summary.map(|s| cairn_contract::ChangeSummary {
+            files_changed: u32::try_from(s.changes.len()).unwrap_or(u32::MAX),
+            words_added: s.words_added,
+            words_removed: s.words_removed,
+        }),
+        name: r.name,
+    }
+}
+
 fn map_suggested_edge(e: cairn_app::SuggestedEdgeData) -> SuggestedEdge {
     SuggestedEdge {
         from: e.from.as_str().to_string(),
@@ -188,9 +250,15 @@ pub fn dispatch_command(
             engine.rename_note(&from, &to, sink)?;
             Ok(CommandResponse::Done)
         }
-        Command::Commit { message } => {
-            let commit = engine.commit(message, sink)?;
-            Ok(CommandResponse::Committed { commit })
+        Command::Commit { message } => match engine.commit(message.as_deref(), sink)? {
+            cairn_app::CommitOutcome::Committed(commit) => {
+                Ok(CommandResponse::Committed { commit })
+            }
+            cairn_app::CommitOutcome::NothingToCommit => Ok(CommandResponse::NothingToCommit),
+        },
+        Command::NameVersion { commit, name } => {
+            engine.name_version(commit, name)?;
+            Ok(CommandResponse::Done)
         }
         Command::RestoreNote { path, revision } => {
             let p = parse_path(path)?;
@@ -265,12 +333,7 @@ pub fn dispatch_query(engine: &Engine, query: &Query) -> Result<QueryResponse, S
             let revisions = engine
                 .note_history(&p)?
                 .into_iter()
-                .map(|r| Revision {
-                    id: r.id,
-                    message: r.message,
-                    timestamp_secs: r.timestamp_secs,
-                    author: r.author,
-                })
+                .map(revision_to_wire)
                 .collect();
             Ok(QueryResponse::History { revisions })
         }
@@ -278,12 +341,7 @@ pub fn dispatch_query(engine: &Engine, query: &Query) -> Result<QueryResponse, S
             let revisions = engine
                 .vault_history(*limit)?
                 .into_iter()
-                .map(|r| Revision {
-                    id: r.id,
-                    message: r.message,
-                    timestamp_secs: r.timestamp_secs,
-                    author: r.author,
-                })
+                .map(revision_to_wire)
                 .collect();
             Ok(QueryResponse::History { revisions })
         }
@@ -291,12 +349,7 @@ pub fn dispatch_query(engine: &Engine, query: &Query) -> Result<QueryResponse, S
             let revisions = engine
                 .structural_revisions(*limit)?
                 .into_iter()
-                .map(|r| Revision {
-                    id: r.id,
-                    message: r.message,
-                    timestamp_secs: r.timestamp_secs,
-                    author: r.author,
-                })
+                .map(revision_to_wire)
                 .collect();
             Ok(QueryResponse::History { revisions })
         }
@@ -822,12 +875,105 @@ mod tests {
         let commit = dispatch_command(
             &mut eng,
             &Command::Commit {
-                message: "first".into(),
+                message: Some("first".into()),
             },
             &mut sink,
         )
         .unwrap();
         assert!(matches!(commit, CommandResponse::Committed { .. }));
+    }
+
+    #[test]
+    fn commit_none_seals_and_clean_tree_is_nothing_to_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut sink: Vec<AppEvent> = Vec::new();
+        assert_eq!(
+            dispatch_command(&mut eng, &Command::Commit { message: None }, &mut sink).unwrap(),
+            CommandResponse::NothingToCommit
+        );
+        dispatch_command(
+            &mut eng,
+            &Command::WriteNote {
+                path: "a.md".into(),
+                contents: "# A\n\nhi there\n".into(),
+            },
+            &mut sink,
+        )
+        .unwrap();
+        let resp =
+            dispatch_command(&mut eng, &Command::Commit { message: None }, &mut sink).unwrap();
+        assert!(matches!(resp, CommandResponse::Committed { .. }));
+    }
+
+    #[test]
+    fn name_version_dispatch_and_history_carries_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut eng = engine(tmp.path());
+        let mut sink: Vec<AppEvent> = Vec::new();
+        dispatch_command(
+            &mut eng,
+            &Command::WriteNote {
+                path: "a.md".into(),
+                contents: "one two".into(),
+            },
+            &mut sink,
+        )
+        .unwrap();
+        let CommandResponse::Committed { commit } =
+            dispatch_command(&mut eng, &Command::Commit { message: None }, &mut sink).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            dispatch_command(
+                &mut eng,
+                &Command::NameVersion {
+                    commit: commit.clone(),
+                    name: "Milestone".into()
+                },
+                &mut sink,
+            )
+            .unwrap(),
+            CommandResponse::Done
+        );
+        // Reuse on a different commit → InvalidRequest.
+        dispatch_command(
+            &mut eng,
+            &Command::WriteNote {
+                path: "a.md".into(),
+                contents: "three".into(),
+            },
+            &mut sink,
+        )
+        .unwrap();
+        let CommandResponse::Committed { commit: c2 } =
+            dispatch_command(&mut eng, &Command::Commit { message: None }, &mut sink).unwrap()
+        else {
+            panic!()
+        };
+        let err = dispatch_command(
+            &mut eng,
+            &Command::NameVersion {
+                commit: c2,
+                name: "Milestone".into(),
+            },
+            &mut sink,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ServiceError::InvalidRequest(_)));
+
+        // History rows carry name + summary on the wire.
+        let QueryResponse::History { revisions } =
+            dispatch_query(&eng, &Query::VaultHistory { limit: None }).unwrap()
+        else {
+            panic!()
+        };
+        let named = revisions.iter().find(|r| r.id == commit).unwrap();
+        assert_eq!(named.name.as_deref(), Some("Milestone"));
+        let s = named.summary.as_ref().unwrap();
+        assert_eq!(s.files_changed, 1);
+        assert_eq!(s.words_added, 2);
     }
 
     #[test]
@@ -1151,62 +1297,68 @@ mod tests {
     }
 
     #[test]
-    fn coalescer_fires_once_per_dirty_burst() {
-        let mut c = Coalescer::default();
-        assert!(!c.take_if_dirty(), "clean: nothing to commit");
-        c.mark_dirty();
-        c.mark_dirty();
-        assert!(c.take_if_dirty(), "a dirty burst commits once");
-        assert!(!c.take_if_dirty(), "already committed: clean again");
-    }
-
-    #[test]
-    fn timeout_loop_flushes_pending_changes_on_disconnect() {
-        use cairn_ports::{FsChange, WatchHandle};
-        use std::time::Duration;
-        let (tx, rx) = std::sync::mpsc::channel();
-        let handle = WatchHandle::new(rx, Box::new(()));
-        tx.send(FsChange::Changed(NotePath::new("a.md").unwrap()))
-            .unwrap();
-        tx.send(FsChange::Changed(NotePath::new("b.md").unwrap()))
-            .unwrap();
-        drop(tx); // disconnect → drain both, then flush once
-
-        let mut seen = Vec::new();
-        let mut quiets = 0;
-        run_watch_loop_timeout(
-            &handle,
-            Duration::from_millis(50),
-            |c| seen.push(c.clone()),
-            || quiets += 1,
-        );
-        assert_eq!(seen.len(), 2, "both changes applied");
+    fn seal_timer_idle_and_backstop_decisions() {
+        use std::time::{Duration, Instant};
+        let idle = Duration::from_secs(2);
+        let backstop = Duration::from_secs(60);
+        let t0 = Instant::now();
+        let mut t = SealTimer::new(idle, backstop);
         assert_eq!(
-            quiets, 1,
-            "pending changes flushed exactly once on shutdown"
+            t.poll(t0),
+            SealPoll::Idle,
+            "no session, nothing to wait for"
+        );
+
+        t.on_activity(t0);
+        // Mid-session: next deadline is idle expiry.
+        assert_eq!(
+            t.poll(t0 + Duration::from_secs(1)),
+            SealPoll::WaitUntil(t0 + idle)
+        );
+        // Idle expiry seals and resets.
+        assert_eq!(t.poll(t0 + idle), SealPoll::SealNow);
+        assert_eq!(
+            t.poll(t0 + idle),
+            SealPoll::Idle,
+            "sealing resets the session"
+        );
+
+        // Never-idle session: activity every second until the backstop hits.
+        // After 60 activities the last poll lands at t0+60s = start + backstop.
+        let mut t = SealTimer::new(idle, backstop);
+        let mut now = t0;
+        for _ in 0..60 {
+            t.on_activity(now);
+            now += Duration::from_secs(1);
+        }
+        assert_eq!(
+            t.poll(now),
+            SealPoll::SealNow,
+            "backstop seals a marathon session"
         );
     }
 
     #[test]
-    fn timeout_loop_commits_after_quiet_period() {
-        use cairn_ports::{FsChange, WatchHandle};
+    fn seal_loop_seals_after_quiet_and_flushes_on_disconnect() {
         use std::time::Duration;
         let (tx, rx) = std::sync::mpsc::channel();
-        let handle = WatchHandle::new(rx, Box::new(()));
-        // One change, then a long pause before disconnect: the quiet timeout must
-        // fire a commit before the channel closes.
         let sender = std::thread::spawn(move || {
-            tx.send(FsChange::Changed(NotePath::new("a.md").unwrap()))
-                .unwrap();
+            tx.send(SealSignal::Activity).unwrap();
+            tx.send(SealSignal::Activity).unwrap();
             std::thread::sleep(Duration::from_millis(250));
+            // Second burst, then disconnect before it goes idle.
+            tx.send(SealSignal::Activity).unwrap();
             drop(tx);
         });
-        let mut quiets = 0;
-        run_watch_loop_timeout(&handle, Duration::from_millis(60), |_| {}, || quiets += 1);
+        let mut seals = 0;
+        run_seal_loop(
+            &rx,
+            Duration::from_millis(60),
+            Duration::from_secs(3600),
+            || seals += 1,
+        );
         sender.join().unwrap();
-        // One commit from the quiet timeout; the disconnect flush finds nothing
-        // pending (already committed), so exactly one.
-        assert_eq!(quiets, 1, "quiet period triggers exactly one commit");
+        assert_eq!(seals, 2, "one idle seal + one disconnect flush");
     }
 
     #[test]
@@ -1226,7 +1378,7 @@ mod tests {
         dispatch_command(
             &mut eng,
             &Command::Commit {
-                message: "v1".into(),
+                message: Some("v1".into()),
             },
             &mut sink,
         )
@@ -1243,7 +1395,7 @@ mod tests {
         dispatch_command(
             &mut eng,
             &Command::Commit {
-                message: "v2".into(),
+                message: Some("v2".into()),
             },
             &mut sink,
         )
@@ -1319,7 +1471,7 @@ mod tests {
             dispatch_command(
                 &mut eng,
                 &Command::Commit {
-                    message: msg.into(),
+                    message: Some(msg.into()),
                 },
                 &mut sink,
             )
@@ -1351,7 +1503,7 @@ mod tests {
         let mut ev = Vec::new();
         let a = cairn_domain::NotePath::new("a.md").unwrap();
         eng.write_note(&a, "hello", &mut ev).unwrap();
-        eng.commit("c1", &mut ev).unwrap(); // node added -> structural
+        eng.commit(Some("c1"), &mut ev).unwrap(); // node added -> structural
 
         match dispatch_query(&eng, &Query::StructuralRevisions { limit: None }).unwrap() {
             QueryResponse::History { revisions } => {
@@ -1589,7 +1741,10 @@ mod tests {
             .unwrap();
         eng.write_note(&NotePath::new("b.md").unwrap(), "x", &mut ev)
             .unwrap();
-        let c1 = eng.commit("c1", &mut ev).unwrap();
+        let cairn_app::CommitOutcome::Committed(c1) = eng.commit(Some("c1"), &mut ev).unwrap()
+        else {
+            panic!()
+        };
 
         let resp = dispatch_query(
             &eng,

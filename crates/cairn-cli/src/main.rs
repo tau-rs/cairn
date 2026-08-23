@@ -129,8 +129,8 @@ enum Command {
     },
     /// Commit all changes.
     Commit {
-        /// Commit message.
-        message: String,
+        /// Commit message (omit to let the engine generate one).
+        message: Option<String>,
     },
     /// List all notes with their titles.
     List,
@@ -437,8 +437,10 @@ fn run() -> Result<(), String> {
         Command::Commit { message } => {
             let resp = dispatch_command(&mut engine, &WireCommand::Commit { message }, &mut events)
                 .map_err(|e| e.to_string())?;
-            if let CommandResponse::Committed { commit } = resp {
-                println!("committed {commit}");
+            match resp {
+                CommandResponse::Committed { commit } => println!("committed {commit}"),
+                CommandResponse::NothingToCommit => println!("nothing to commit"),
+                _ => {}
             }
         }
         Command::List => {
@@ -756,7 +758,7 @@ mod tests {
             path: "a.md".into()
         }));
         assert!(!needs_startup_reindex(&Command::Commit {
-            message: "m".into()
+            message: Some("m".into())
         }));
         assert!(!needs_startup_reindex(&Command::Backlinks {
             path: "a.md".into()

@@ -53,6 +53,10 @@ async fn run() -> Result<(), String> {
         None => Config::load_default(&cli.cairn)?,
     };
 
+    if config.sync.quiet_period_ms.is_some() {
+        tracing::warn!("sync.quiet_period_ms is deprecated; use idle_seconds");
+    }
+
     let mut startup: Vec<Event> = Vec::new();
     let persist = config.index.persist && !cli.no_persist;
     let mut engine = if persist {
@@ -164,43 +168,50 @@ async fn run() -> Result<(), String> {
     // Back the plugin `host/agent` callback with the same runtime as `/ask`.
     engine.set_runtime(runtime.clone());
 
-    let state = AppState::new(engine)
+    // The seal loop's activity channel: attached to `AppState` only when
+    // auto-commit is on, so `mark_activity` is a no-op otherwise and the loop
+    // (never spawned) has no dangling sender.
+    let (seal_tx, seal_rx) = std::sync::mpsc::channel();
+    let mut state = AppState::new(engine)
         .with_allowed_origins(cors_origins.clone())
         .with_token(token)
         .with_runtime(runtime)
         .with_mcp_write(cli.mcp_write);
+    if config.sync.auto_commit {
+        state = state.with_sealer(seal_tx);
+    }
+    let state = state;
     let app = build_router(state.clone()).layer(cors_layer(&cors_origins));
+
+    if config.sync.auto_commit {
+        let idle = config.sync.idle();
+        let backstop = config.sync.backstop();
+        tracing::info!(
+            "seal: auto-committing sessions after {:?} idle ({:?} backstop)",
+            idle,
+            backstop
+        );
+        // `without_sealer()`, not `.clone()`: the loop must not hold its own
+        // live `seal_tx`, or the sender never fully drops and the shutdown-flush
+        // (`RecvTimeoutError::Disconnected`) branch of `run_seal_loop` can never
+        // fire. See `AppState::without_sealer` for the full rationale.
+        let sealer = state.without_sealer();
+        tokio::task::spawn_blocking(move || {
+            cairn_service::run_seal_loop(&seal_rx, idle, backstop, || sealer.seal_blocking());
+        });
+    }
 
     if !cli.no_watch {
         match NotifyWatcher.watch(&cli.cairn) {
             Ok(handle) => {
                 let grace = Duration::from_millis(config.sync.confirm_grace_ms);
-                if config.sync.auto_commit {
-                    let quiet = Duration::from_millis(config.sync.quiet_period_ms);
-                    tracing::info!(
-                        "sync: auto-committing external edits after {}ms quiet",
-                        config.sync.quiet_period_ms
-                    );
-                    let ws_change = state.clone();
-                    let ws_commit = state.clone();
-                    tokio::task::spawn_blocking(move || {
-                        cairn_service::run_watch_loop_timeout(
-                            &handle,
-                            quiet,
-                            move |change| ws_change.apply_change_confirmed_blocking(change, grace),
-                            move || {
-                                ws_commit.commit_external_blocking("cairn: sync external edits")
-                            },
-                        );
+                let watch_state = state.clone();
+                tokio::task::spawn_blocking(move || {
+                    cairn_service::run_watch_loop(&handle, |change| {
+                        watch_state.apply_change_confirmed_blocking(change, grace);
+                        watch_state.mark_activity();
                     });
-                } else {
-                    let watch_state = state.clone();
-                    tokio::task::spawn_blocking(move || {
-                        cairn_service::run_watch_loop(&handle, |change| {
-                            watch_state.apply_change_confirmed_blocking(change, grace)
-                        });
-                    });
-                }
+                });
                 tracing::info!("watching {} for changes", cli.cairn.display());
             }
             Err(e) => tracing::warn!("file watcher disabled: {e}"),
@@ -210,10 +221,10 @@ async fn run() -> Result<(), String> {
     // Collab commit-agent: debounce-materialize + commit sessioned notes. Runs
     // independently of the file watcher — the daemon is the sole disk writer for
     // a live session (design spec §12). Ticks every 250ms; a session commits
-    // after `quiet_period_ms` of no ops (or immediately once abandoned).
+    // after `idle()` of no ops (or immediately once abandoned).
     {
         let flush_state = state.clone();
-        let quiet = Duration::from_millis(config.sync.quiet_period_ms);
+        let quiet = config.sync.idle();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_millis(250));
             // A slow pass (many notes / slow git) must not fire back-to-back
