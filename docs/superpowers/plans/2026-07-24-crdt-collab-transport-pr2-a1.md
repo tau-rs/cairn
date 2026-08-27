@@ -1,5 +1,15 @@
 # CRDT Collaboration Transport — PR-2 / A1 (Daemon Commit-Agent) Implementation Plan
 
+> **Historical record — 2026-08-27.** This plan shipped as written; it is kept
+> as the record of what was built, not as a description of current behavior.
+> PR #179 moved commit policy into the engine, so the flush described below no
+> longer commits: it writes, calls `mark_activity()`, and a seal loop commits
+> once per idle session. `config.sync.quiet_period_ms` is now
+> `config.sync.idle_seconds` (deprecated alias retained), `auto_commit` defaults
+> **true**, and `FlushOutcome::Committed` is `FlushOutcome::Written`. See
+> `docs/superpowers/specs/2026-07-19-crdt-collaboration-transport-design.md` §14
+> and ADR-0012 §Update.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make the daemon the git commit-agent for a live collab session — debounce-materialize its `BlockDoc` replica to `N.md` and git-commit it, with the file-watcher ignoring the self-write and no silent clobber of foreign on-disk edits.

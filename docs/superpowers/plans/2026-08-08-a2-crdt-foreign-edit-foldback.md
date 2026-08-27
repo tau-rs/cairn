@@ -1,5 +1,15 @@
 # A2 — CRDT Foreign-Edit Fold-Back Implementation Plan
 
+> **Historical record — 2026-08-27.** This plan shipped as written; it is kept
+> as the record of what was built, not as a description of current behavior.
+> The fold-back, the HEAD seed, and the watcher's defer-to-flush are all still
+> in force, but PR #179 moved commit policy into the engine: the flush no longer
+> commits, so the "removes the double-commit under `auto_commit=true`" rationale
+> below is moot — neither the watcher nor the flush commits, and one seal loop
+> commits once per idle session. `auto_commit` now defaults **true**. See
+> `docs/superpowers/specs/2026-07-19-crdt-collaboration-transport-design.md` §14
+> and ADR-0012 §Update.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace A1's "warn-and-skip on a foreign on-disk edit" with a block-diff fold-back that merges the foreign edit into the live `BlockDoc`, fans it out to peers, and re-materializes — so no work is lost when someone edits `N.md` directly while a session is open.

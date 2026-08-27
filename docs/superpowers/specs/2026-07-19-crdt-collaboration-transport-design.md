@@ -415,6 +415,11 @@ call it with `debounce = 0`, no sleeps).
 - **Debounce interval:** reuse `config.sync.quiet_period_ms` (default 2000ms) —
   one coalescing knob shared with the watcher; 250ms tick granularity.
 - **Commit message:** `format!("cairn: collab sync {note}")`.
+
+> **Superseded 2026-08-27 (§14):** the knob is now `config.sync.idle_seconds`
+> (default 2 s), read via `SyncConfig::idle()`; `quiet_period_ms` survives only
+> as a deprecated alias. The flush no longer commits at all — it writes, marks
+> activity, and the engine-owned seal loop commits with a generated message.
 - **Lock order (single global order, no nesting):** phase 1 materializes the due
   sessions *under the collab lock only* (no engine call); the lock is released;
   phase 2 takes the *engine lock* per note to write+commit. The collab lock is
@@ -460,6 +465,11 @@ persists (best-effort — a mid-flush process exit may lose it, as with the
 watcher).
 
 ### 12.6 Watcher vs session commit
+
+> **Superseded 2026-08-27 (§14):** `auto_commit` now defaults **true**, so the
+> "no conflict by default" branch below no longer holds — and the double-commit
+> it worries about is gone anyway, because neither the watcher nor the flush
+> commits: both mark activity and a single seal loop commits once per session.
 
 Under `auto_commit = false` (the default) the watcher never commits, so there is
 no conflict. Under `auto_commit = true` both the watcher quiet-loop and the
@@ -691,3 +701,31 @@ Ambiguous reorder-vs-replace cases are asserted by construction to preserve text
 | l | Outcome | Fold is its own collab-lock critical section (merge+fanout+baseline atomically); `Conflict` removed; never reap a just-folded session |
 | m | Seed | git HEAD (`note_at(_, "HEAD")`) + immediate reconcile-fold of pre-existing worktree edits |
 | n | Arbitration | Watcher defers sessioned `Changed(N)` to the flush; sole committer under `auto_commit=true` |
+
+---
+
+## 14. Update — 2026-08-27: commit ownership moved into the engine
+
+**Date:** 2026-08-27. Landed as PR #179; design:
+`2026-08-22-engine-auto-commit-versioning-design.md`, ADR-0012 §Update.
+
+A1 (§12) and A2 (§13) both assume the collab flush is *a committer* — one of two
+or three parties racing to commit the working tree, arbitrated so a sessioned
+note is committed once. That model is gone. Commit policy now lives in the
+engine, and the flush is purely a writer.
+
+**What changed for this spec:**
+
+| Assumed here | Now |
+|---|---|
+| `config.sync.quiet_period_ms` (2000ms) | `config.sync.idle_seconds` (2 s) via `SyncConfig::idle()`; `quiet_period_ms` is a deprecated alias |
+| `auto_commit` defaults `false` | defaults `true`, and covers every edit source, not just external edits |
+| Flush writes **and commits** (`cairn: collab sync {note}`) | Flush writes and calls `mark_activity()`; a single seal loop commits once per idle session with an engine-generated message |
+| `has_uncommitted_changes()` empty-commit guard | `Vcs::pending_summary().changes` non-empty — the same diff walk that generates the message |
+| Watcher/session arbitration (decision `n`, §13.5) | Moot: neither party commits, so there is nothing to arbitrate. The watcher's defer-to-flush behavior is still correct and still in force, for fold-back reasons (§13.5), not commit reasons |
+| Long sessions coalesce on quiet only | A `backstop_minutes` (default 20) timer also seals a session that never goes idle |
+
+The §12.3 non-clobber baseline handoff, the §13 fold-back, and every locked
+decision other than `n`'s commit clause are unaffected: they are about *bytes on
+disk*, and the flush still owns those. `FlushOutcome::Committed` was renamed
+`FlushOutcome::Written` to match.
