@@ -268,7 +268,61 @@ when it is set.
 - **Multi-source coherence** (integration, daemon level): engine write +
   external file write in separate sessions → two commits with correct
   generated messages; interleaved within one quiet window → one commit.
-- Manual DoD check: web app + CLI + external editor against one vault.
+- Manual DoD check: DONE 2026-08-27 against `ad97b05` — all three edit
+  surfaces plus the backstop verified end-to-end on a scratch vault. See the
+  run notes below.
+
+### Manual verification — 2026-08-27
+
+Scratch vault (`cairn init` + baseline commit), daemon on
+`cairn-daemon --cairn <vault> --port <port>`. Startup log confirmed the
+defaults: `seal: auto-committing sessions after 2s idle (1200s backstop)`.
+Scratch vaults are gone; these notes are the record.
+
+**Run 1** — surfaces 1–7, one vault, in order:
+
+```
+0e8635d  Edit "Beta Note" § Beta Note (+9 words)                            [7] push-decoupling probe
+c5bb56b  Edit "Alpha Note" § Intro (+20/−9 words)                           [4] web app (Playwright/Chromium)
+56f9b08  (tag: cairn/deuxième-étape-v2) Edit "Gamma Note" § Gamma Note (+9 words)  [3] CLI
+c908004  Edit "Beta Note" § Beta Note (+9 words)
+7076a8b  Update 3 notes: "Alpha Note", "Beta Note", "Gamma Note"            [2] 3-note burst → ONE commit
+703aa95  Edit "Alpha Note" § Details (+16 words)                            [1] vim
+62ab7be  baseline: three scratch notes
+```
+
+1. **External editor (vim)**: one commit, correct `§ heading`, exact word
+   count.
+2. **Burst of 3 notes <2s apart**: ONE rollup commit, not three.
+3. **CLI**: `commit` with no message → `committed 56f9b08` + generated
+   message; immediately again on the clean tree → `nothing to commit`, exit 0,
+   commit count unchanged. No empty commit.
+4. **Web app** (cairn-web-ui `origin/main@7c4a8f9`, daemon backend): one
+   commit; Versions panel rendered `Edit "Alpha Note" § Intro (+20/−9 words)`
+   with the delta; status bar `Last version: just now · +20 words`.
+5. **Named versions**: annotated tag `cairn/première-étape-v1` whose message
+   is exactly `Première étape v1`; re-naming the same commit replaced it with
+   `cairn/deuxième-étape-v2` (old tag gone); reusing that name on a different
+   commit → HTTP 400 `invalid_request`, "already labels commit 56f9b08".
+   `vault_history` joins `name` + nested `summary` onto the rows correctly.
+6. **No-op safety**: `touch` plus a byte-identical rewrite → no commit.
+7. **Push decoupled**: a real bare remote added mid-run; after another seal the
+   remote's `for-each-ref` was still empty (0 refs, no branches, no tags).
+
+**Run 2** — the 20-minute backstop (E3 trigger 2), second vault with
+`[sync] backstop_minutes = 1` (daemon logged `2s idle (60s backstop)`). A
+never-idle burst: one append every 0.7s (inside the 2s idle window) for 100s.
+
+```
+t=0     burst starts
+t=61s   *** NEW COMMIT while burst still running: e2a444e Edit "Marathon Note" § Log (+405 words)
+t=100s  burst ends after 132 edits
+t=106s  idle seal after burst: 49d5e58 Edit "Marathon Note" § Log (+255 words)
+```
+
+Backstop sealed mid-session at the 60s deadline while edits kept flowing; the
+idle seal closed the remainder 2s after the last edit. Word counts reconcile
+exactly: 405/5 = 81 lines + 255/5 = 51 lines = 132 = edits made.
 
 ## Out of scope
 
