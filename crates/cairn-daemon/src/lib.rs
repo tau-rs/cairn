@@ -395,12 +395,13 @@ impl AppState {
             // with a generated message (source-agnostic sealing).
             drop(guard);
             self.mark_activity();
-            // Write landed ⇒ baseline advances (even if the commit failed) and an
-            // abandoned, settled session is reaped — only now, post-write.
+            // Write landed ⇒ baseline advances (whether or not the seal loop later
+            // commits) and an abandoned, settled session is reaped — only now,
+            // post-write.
             collab::settle_flush(
                 &self.collab,
                 &item.path,
-                collab::FlushOutcome::Committed(item.markdown),
+                collab::FlushOutcome::Written(item.markdown),
             );
         }
     }

@@ -1,6 +1,6 @@
 # ADR-0012: External-edit sync hardening
 
-**Status:** Accepted
+**Status:** Accepted (Gap 1 superseded 2026-08-27 — see Update below)
 **Date:** 2026-06-16
 
 ## Context
@@ -31,6 +31,10 @@ that keep the engine pure and synchronous. The `Watcher` port is unchanged.
 ## Decision
 
 ### Gap 1 — coalesced auto-commit of external edits (fix)
+
+> **Superseded 2026-08-27** by the Update below — auto-commit is now on by
+> default, covers every edit source, and the config keys have changed. The
+> paragraph is kept verbatim as the record of the original decision.
 
 Opt-in, **off by default**. After a quiet period with no further external change,
 the daemon commits externally-detected changes with a generic message. Cairn's own
@@ -92,3 +96,46 @@ Filesystem locking is rejected as over-engineering for a window the memo heals.
 - Native rename does not rewrite links; rename detection / `NoteRenamed` deferred.
 - Partial-read transient content (self-healing) not retried.
 - Concurrent file-write lost-update is inherent and not locked against.
+
+## Update — 2026-08-27: engine-owned sealing, auto-commit on by default
+
+Gap 1 is superseded. Commit policy moved into the engine (PR #179, design:
+`docs/superpowers/specs/2026-08-22-engine-auto-commit-versioning-design.md`),
+which changes three things about the decision above.
+
+**1. Auto-commit is ON by default and no longer external-edit-specific.** The
+daemon marks a dirty flag after *any* successful mutating dispatch — the
+watcher's external edits as before, plus `WriteNote`/`DeleteNote`/`RenameNote`/
+`RestoreNote` and collab flushes. One quiet period seals one *editing session*
+into one commit, whatever wrote the bytes. The original asymmetry — external
+edits coalesce, command-path writes stay dirty until an explicit `Commit` — is
+gone: it produced a history that was part noise, part missing, and the engine is
+the only party that sees every change source. An explicit
+`Command::Commit { message: None }` ("seal now") seals immediately, and a
+long-running session that never goes idle is sealed by a backstop timer.
+
+**2. Config keys changed.** The surface is now:
+
+```toml
+[sync]
+auto_commit = true        # was false
+idle_seconds = 2          # replaces quiet_period_ms
+backstop_minutes = 20     # new: seal a never-idle session anyway
+confirm_grace_ms = 50     # unchanged (Gap 3)
+```
+
+`quiet_period_ms` is still accepted as a deprecated alias (an explicit
+`idle_seconds` wins; setting it logs a deprecation warning), so existing
+`cairn.toml` files keep working.
+
+**3. The empty-commit guard moved and got sharper.** `Engine::has_uncommitted_changes`
+(over `Vcs::is_dirty`) is gone; the seal path guards on
+`Vcs::pending_summary().changes` being non-empty, which is the same diff walk
+that generates the commit message. Commit messages are engine-generated from
+that diff, replacing the generic `"cairn: sync external edits"` — so the
+"generic message" limitation recorded above no longer applies.
+
+Gaps 2, 3 and 4 are unaffected and remain accurate: confirm-before-delete still
+guards `Removed` events, native renames still do not rewrite wikilinks, and the
+write race is still unlocked. Push/sync policy stays decoupled — sealing never
+pushes.

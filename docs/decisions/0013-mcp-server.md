@@ -46,10 +46,12 @@ an SDK and re-imposing the engine-lock invariants on top.
 
 ### Complete, hand-authored tool surface
 
-Twelve tools — read (`read_note`, `search_notes`, `backlinks`, `list_notes`),
+Thirteen tools — read (`read_note`, `search_notes`, `backlinks`, `list_notes`),
 facilitator (`graph`, `list_tags`, `notes_by_tag`, `note_history`), and
-engine-smart mutations (`write_note`, `rename_note`, `delete_note`, `commit`) —
-each mapping to one existing contract variant. Schemas are hand-authored thin
+engine-smart mutations (`write_note`, `rename_note`, `delete_note`, `commit`,
+`name_version`) — each mapping to one existing contract variant. `commit` takes
+an optional `message`; omitting it is the "seal now" gesture (the engine
+generates the message from the pending diff). Schemas are hand-authored thin
 defs, not derived from the contract enums (which carry an internal `type` tag and
 include out-of-surface variants). The surface is complete so any standard MCP
 client works standalone; tau's future native fs is an optimisation, not a

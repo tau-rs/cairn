@@ -19,7 +19,7 @@ pub struct Config {
     /// Plugin host settings.
     #[serde(default)]
     pub plugins: PluginsConfig,
-    /// External-edit sync settings.
+    /// Session-sealing settings, covering every edit source.
     #[serde(default)]
     pub sync: SyncConfig,
 }
