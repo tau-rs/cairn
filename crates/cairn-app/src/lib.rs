@@ -937,15 +937,6 @@ impl Engine {
         self.vcs.name_version(commit, name)
     }
 
-    /// Whether the working tree has uncommitted changes. The daemon's auto-commit
-    /// of external edits checks this to avoid creating an empty commit.
-    ///
-    /// # Errors
-    /// Returns [`PortError`] if the VCS adapter fails.
-    pub fn has_uncommitted_changes(&self) -> Result<bool, PortError> {
-        self.vcs.is_dirty()
-    }
-
     /// A note's commit history (newest first), enriched with cairn names and
     /// per-commit change summaries (capped at [`SUMMARY_CAP`] newest rows).
     ///
@@ -1530,22 +1521,6 @@ mod tests {
             InMemoryIndex::default(),
             GitVcs::open_or_init(dir).unwrap(),
         )
-    }
-
-    #[test]
-    fn has_uncommitted_changes_reflects_working_tree() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut eng = engine(tmp.path());
-        let mut events = Vec::new();
-        assert!(!eng.has_uncommitted_changes().unwrap(), "fresh repo clean");
-        eng.write_note(&NotePath::new("a.md").unwrap(), "hi", &mut events)
-            .unwrap();
-        assert!(eng.has_uncommitted_changes().unwrap(), "dirty after write");
-        eng.commit(Some("add a"), &mut events).unwrap();
-        assert!(
-            !eng.has_uncommitted_changes().unwrap(),
-            "clean after commit"
-        );
     }
 
     #[test]
