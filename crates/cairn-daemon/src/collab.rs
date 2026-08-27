@@ -305,9 +305,11 @@ pub(crate) struct FlushItem {
 /// The result of the engine-side (phase 2) write for one `FlushItem`, fed back
 /// to `settle_flush` so it can update the baseline and decide reaping.
 pub(crate) enum FlushOutcome {
-    /// `write_note` landed these bytes on disk (commit may have failed — the
-    /// bytes are still the on-disk truth, so they become the new baseline).
-    Committed(String),
+    /// `write_note` landed these bytes on disk. The flush does not commit —
+    /// it marks activity and the seal loop commits later (or never, with
+    /// auto-commit off) — but the bytes are the on-disk truth either way, so
+    /// they become the new baseline.
+    Written(String),
     /// `write_note` itself failed; nothing landed.
     WriteError,
 }
@@ -357,10 +359,10 @@ pub(crate) fn settle_flush(collab: &Collab, path: &NotePath, outcome: FlushOutco
         return;
     };
     let reap = match outcome {
-        // The write landed: these bytes are the new on-disk baseline (even if the
-        // commit failed — the next op re-flushes and re-commits without a false
-        // foreign-edit conflict). Reap only a still-abandoned, settled session.
-        FlushOutcome::Committed(written) => {
+        // The write landed: these bytes are the new on-disk baseline, whether or
+        // not the seal loop ever commits them (the next op re-flushes without a
+        // false foreign-edit conflict). Reap only a still-abandoned, settled session.
+        FlushOutcome::Written(written) => {
             sess.last_written = written;
             sess.participants.is_empty() && !sess.dirty
         }
@@ -615,7 +617,7 @@ mod flush_tests {
         assert!(lock(&reg).contains_key(&p));
         assert!(!lock(&reg).get(&p).unwrap().dirty);
         // A confirmed write reaps the now-settled abandoned session.
-        settle_flush(&reg, &p, FlushOutcome::Committed("hello\n".into()));
+        settle_flush(&reg, &p, FlushOutcome::Written("hello\n".into()));
         assert!(lock(&reg).is_empty());
     }
 
@@ -645,7 +647,7 @@ mod flush_tests {
     }
 
     #[test]
-    fn settle_committed_updates_baseline_and_keeps_active_session() {
+    fn settle_written_updates_baseline_and_keeps_active_session() {
         let reg = registry();
         let p = NotePath::new("n.md").unwrap();
         insert_dirty_session(&reg, &p, "", vec![ins("x")]);
@@ -653,7 +655,7 @@ mod flush_tests {
         // debounce 0 ⇒ due ⇒ drain clears dirty (session kept, has a participant).
         let _ = drain_due(&reg, Duration::ZERO);
         assert!(!lock(&reg).get(&p).unwrap().dirty);
-        settle_flush(&reg, &p, FlushOutcome::Committed("written".into()));
+        settle_flush(&reg, &p, FlushOutcome::Written("written".into()));
         // Active session: baseline updated, NOT reaped.
         assert!(lock(&reg).contains_key(&p));
         assert_eq!(lock(&reg).get(&p).unwrap().last_written, "written");
