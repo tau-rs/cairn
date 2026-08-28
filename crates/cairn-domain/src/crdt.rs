@@ -928,6 +928,31 @@ mod tests {
     }
 
     #[test]
+    fn fold_foreign_multi_block_insert_keeps_disk_order() {
+        // Regression guard for the fold-back insert-chaining rule. Three foreign
+        // blocks land in ONE gap, so pass 1 plans three inserts sharing the anchor
+        // "a". `block_ids_in_order` sorts same-anchor siblings DESC by ins_lamport,
+        // so emitting all three against that shared anchor would materialize them
+        // reversed ("d", "c", "b"). Pass 2 must chain each insert onto the previous
+        // inserted id instead.
+        let mut doc = BlockDoc::from_markdown(1, "a\n\nz\n");
+        let base = doc.materialize();
+        doc.fold_foreign(&base, "a\n\nb\n\nc\n\nd\n\nz\n");
+        assert_eq!(doc.materialize(), "a\n\nb\n\nc\n\nd\n\nz\n");
+    }
+
+    #[test]
+    fn fold_foreign_multi_block_insert_at_head_keeps_disk_order() {
+        // Same chaining rule with a `None` anchor (insert before the first block):
+        // the "same gap" test compares `Option<BlockId>`, so the head case must not
+        // fall through to the unchained branch.
+        let mut doc = BlockDoc::from_markdown(1, "z\n");
+        let base = doc.materialize();
+        doc.fold_foreign(&base, "b\n\nc\n\nd\n\nz\n");
+        assert_eq!(doc.materialize(), "b\n\nc\n\nd\n\nz\n");
+    }
+
+    #[test]
     fn fold_foreign_substitutes_content_in_place_keeping_the_id() {
         let mut doc = BlockDoc::from_markdown(1, "keep\n\nold\n");
         let id_before = doc.block_ids_in_order();
@@ -988,6 +1013,31 @@ mod tests {
         doc.fold_foreign(&base, "a\n\nb\n\nc from disk\n");
         let out = doc.materialize();
         assert!(out.contains("c from disk"), "foreign addition preserved");
+        assert!(out.contains("a"), "untouched block preserved");
+    }
+
+    #[test]
+    fn fold_foreign_skips_a_delete_whose_base_block_no_longer_matches() {
+        // The base→live id mapping must never fall back to positions: when the
+        // live doc diverged, a base block is resolved by exact text match only, and
+        // an unmatched Delete is DROPPED (losing a delete never loses content,
+        // whereas a mis-targeted one does). Here a peer rewrote "b" while the
+        // external editor deleted it; the fold must keep the peer's text rather
+        // than remove whatever sits at that base position.
+        let mut doc = BlockDoc::from_markdown(1, "a\n\nb\n");
+        let base = doc.materialize();
+        let id_b = doc.block_ids_in_order()[1];
+        doc.apply_local(Edit::UpdateText {
+            id: id_b,
+            text: "b (peer)".into(),
+            author: Author::Human,
+        });
+        doc.fold_foreign(&base, "a\n");
+        let out = doc.materialize();
+        assert!(
+            out.contains("b (peer)"),
+            "peer rewrite not silently removed"
+        );
         assert!(out.contains("a"), "untouched block preserved");
     }
 
