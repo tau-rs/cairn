@@ -7,6 +7,12 @@ use serde::Deserialize;
 
 use cairn_infra::TrustedEntry;
 
+/// Session-sealing settings. Owned by `cairn-infra` so every transport — the
+/// daemon here, the Tauri desktop shell in `cairn-web-ui` — reads one `[sync]`
+/// schema from one `cairn.toml`. Re-exported so daemon call sites keep
+/// referring to `config::SyncConfig`.
+pub use cairn_infra::SyncConfig;
+
 /// Daemon configuration.
 #[derive(Debug, Default, Deserialize)]
 pub struct Config {
@@ -22,72 +28,6 @@ pub struct Config {
     /// Session-sealing settings, covering every edit source.
     #[serde(default)]
     pub sync: SyncConfig,
-}
-
-/// Settings for sealing editing sessions into commits (any edit source).
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SyncConfig {
-    /// Auto-commit sealed editing sessions. Default `true`.
-    #[serde(default = "default_true_sync")]
-    pub auto_commit: bool,
-    /// Idle seconds with no further change before a session seals. Default 2.
-    #[serde(default)]
-    pub idle_seconds: Option<u64>,
-    /// Deprecated alias for the idle window, in ms. `idle_seconds` wins.
-    #[serde(default)]
-    pub quiet_period_ms: Option<u64>,
-    /// Backstop: a never-idle session seals after this many minutes. Default 20.
-    #[serde(default = "default_backstop_minutes")]
-    pub backstop_minutes: u64,
-    /// Grace (ms) to wait and re-check before honoring a watcher `Removed`,
-    /// absorbing the transient gap of a non-atomic / tmp-rename write. Default 50.
-    #[serde(default = "default_confirm_grace_ms")]
-    pub confirm_grace_ms: u64,
-}
-
-impl SyncConfig {
-    /// The idle window: `idle_seconds` → `quiet_period_ms` (deprecated) → 2 s.
-    #[must_use]
-    pub fn idle(&self) -> std::time::Duration {
-        if let Some(s) = self.idle_seconds {
-            return std::time::Duration::from_secs(s);
-        }
-        if let Some(ms) = self.quiet_period_ms {
-            return std::time::Duration::from_millis(ms);
-        }
-        std::time::Duration::from_secs(2)
-    }
-
-    /// The long-session backstop.
-    #[must_use]
-    pub fn backstop(&self) -> std::time::Duration {
-        std::time::Duration::from_secs(self.backstop_minutes * 60)
-    }
-}
-
-impl Default for SyncConfig {
-    fn default() -> Self {
-        Self {
-            auto_commit: true,
-            idle_seconds: None,
-            quiet_period_ms: None,
-            backstop_minutes: 20,
-            confirm_grace_ms: 50,
-        }
-    }
-}
-
-fn default_true_sync() -> bool {
-    true
-}
-
-fn default_backstop_minutes() -> u64 {
-    20
-}
-
-fn default_confirm_grace_ms() -> u64 {
-    50
 }
 
 /// Plugin host settings.
@@ -168,38 +108,18 @@ impl Config {
 mod tests {
     use super::*;
 
+    // The `[sync]` schema itself is owned and tested by `cairn_infra::sync`.
+    // What is still this crate's to guarantee is that `Config` routes the
+    // section into that type at all — a `#[serde(default)]` field that silently
+    // never reads the file would look identical from inside `cairn-infra`.
     #[test]
-    fn sync_defaults_on_with_idle_and_backstop() {
-        let c: Config = toml::from_str("").unwrap();
-        assert!(c.sync.auto_commit, "auto-commit ON by default");
-        assert_eq!(c.sync.idle(), std::time::Duration::from_secs(2));
-        assert_eq!(c.sync.backstop(), std::time::Duration::from_secs(20 * 60));
-        assert_eq!(c.sync.confirm_grace_ms, 50);
-    }
-
-    #[test]
-    fn sync_idle_seconds_overrides_and_wins_over_alias() {
-        let c: Config = toml::from_str("[sync]\nidle_seconds = 5\nquiet_period_ms = 900").unwrap();
+    fn config_routes_the_sync_section_into_the_shared_type() {
+        let c: Config = toml::from_str("[sync]\nidle_seconds = 5\nauto_commit = false").unwrap();
         assert_eq!(c.sync.idle(), std::time::Duration::from_secs(5));
-        assert!(
-            c.sync.quiet_period_ms.is_some(),
-            "alias surfaced for the deprecation warning"
-        );
-    }
-
-    #[test]
-    fn sync_quiet_period_ms_alias_still_honored() {
-        let c: Config = toml::from_str("[sync]\nquiet_period_ms = 900").unwrap();
-        assert_eq!(c.sync.idle(), std::time::Duration::from_millis(900));
-        let c: Config =
-            toml::from_str("[sync]\nauto_commit = false\nbackstop_minutes = 45").unwrap();
         assert!(!c.sync.auto_commit);
-        assert_eq!(c.sync.backstop(), std::time::Duration::from_secs(45 * 60));
-    }
-
-    #[test]
-    fn sync_rejects_unknown_key() {
-        assert!(toml::from_str::<Config>("[sync]\nauto_comit = true").is_err());
+        let d: Config = toml::from_str("").unwrap();
+        assert!(d.sync.auto_commit, "defaults survive the move");
+        assert_eq!(d.sync.backstop(), std::time::Duration::from_secs(20 * 60));
     }
 
     #[test]

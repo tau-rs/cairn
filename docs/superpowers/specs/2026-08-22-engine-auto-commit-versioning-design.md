@@ -236,7 +236,11 @@ trait Vcs {
 
 ## E5 — config
 
-`crates/cairn-daemon/src/config.rs`, `SyncConfig`:
+`crates/cairn-infra/src/sync.rs`, `SyncConfig`, re-exported from
+`crates/cairn-daemon/src/config.rs` (moved there 2026-08-29, #191: the
+schema is shared with the Tauri desktop shell, which cannot depend on the
+daemon binary crate — `SyncConfig::load(<cairn>)` reads `[sync]` alone and
+ignores sections it does not own):
 
 ```toml
 [sync]
