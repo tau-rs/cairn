@@ -734,6 +734,63 @@ mod flush_tests {
     }
 
     #[test]
+    fn second_fold_before_a_flush_loses_neither_peer_nor_foreign_content() {
+        // `run_collab_flush_pass` folds and then `continue`s — it does NOT write
+        // this pass. So a second foreign edit can arrive while the live replica is
+        // still the unwritten merge of peer + foreign work. The baseline must stay
+        // pinned to the bytes actually on disk (decision (i), `last_written = disk`
+        // at fold time) so the second diff describes only what the external editor
+        // did between the two disk revisions — never a stale or synthetic base.
+        let reg = registry();
+        let p = NotePath::new("n.md").unwrap();
+        insert_seeded_session(&reg, &p, "a\n\nb\n", false);
+        add_participant(&reg, &p, 7);
+        // A peer inserts at the head; this edit exists ONLY in the live replica.
+        merge_op(
+            &reg,
+            &p,
+            BlockOp::Insert {
+                id: BlockId {
+                    replica: 7,
+                    counter: 1,
+                },
+                after: None,
+                lamport: 99,
+                kind: BlockKind::Paragraph,
+                text: "peer".into(),
+            },
+        );
+
+        // Fold #1: disk gained "X". No write follows, so the baseline is now the
+        // foreign bytes while the live doc is the merged replica.
+        fold_foreign(&reg, &p, "a\n\nb\n\nX\n");
+        // Fold #2, still before any flush write: disk dropped "b".
+        fold_foreign(&reg, &p, "a\n\nX\n");
+
+        let (markdown, baseline) = test_session_markdown_and_baseline(&reg, &p).unwrap();
+        assert!(
+            markdown.contains("peer"),
+            "unflushed peer edit survived: {markdown:?}"
+        );
+        assert!(
+            markdown.contains('X'),
+            "first foreign edit survived: {markdown:?}"
+        );
+        assert!(
+            markdown.contains('a'),
+            "untouched block survived: {markdown:?}"
+        );
+        assert!(
+            !markdown.contains('b'),
+            "the foreign delete landed on b: {markdown:?}"
+        );
+        assert_eq!(
+            baseline, "a\n\nX\n",
+            "baseline tracks the bytes actually on disk"
+        );
+    }
+
+    #[test]
     fn note_foreign_edit_marks_dirty_only_on_real_divergence() {
         let reg = registry();
         let p = NotePath::new("n.md").unwrap();
