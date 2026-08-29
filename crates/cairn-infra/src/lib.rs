@@ -12,6 +12,7 @@ pub mod sandbox;
 pub mod seams;
 mod semantic;
 mod semantic_neural;
+mod sync;
 mod tantivy_index;
 pub mod tau;
 
@@ -34,5 +35,6 @@ pub use semantic::LexicalSemanticIndex;
 pub use semantic_neural::NeuralSemanticIndex;
 #[cfg(feature = "neural")]
 pub use semantic_neural::{minilm_weights_path, CandleMiniLm};
+pub use sync::SyncConfig;
 pub use tantivy_index::{TantivyIndex, MIN_QUERY_CHARS};
 pub use tau::{TauConfig, TauServeRuntime, TauSidecar};
