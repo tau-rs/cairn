@@ -417,8 +417,14 @@ impl BlockDoc {
             match *step {
                 DiffStep::Keep { bi, .. } => {
                     plan.flush_gap(self);
-                    // Advance the anchor to this kept block's live id.
-                    plan.anchor = plan.resolve_base(bi, self);
+                    // Advance the anchor to this kept block's live id. An
+                    // unresolvable kept block must NOT reset the anchor to `None`
+                    // (the head): `parse_blocks` splits on blank lines, so a live
+                    // block whose text contains one re-parses into several base
+                    // blocks that match nothing, and resetting would teleport the
+                    // gap's inserts to the top of the note. Hold the last block we
+                    // did locate instead — the best available position.
+                    plan.anchor = plan.resolve_base(bi, self).or(plan.anchor);
                 }
                 DiffStep::Delete { bi } => plan.gap_del.push(bi),
                 DiffStep::Insert { fi } => plan.gap_ins.push(fi),
@@ -1039,6 +1045,42 @@ mod tests {
             "peer rewrite not silently removed"
         );
         assert!(out.contains("a"), "untouched block preserved");
+    }
+
+    #[test]
+    fn fold_foreign_insert_does_not_teleport_to_the_head_on_a_split_block() {
+        // `parse_blocks` splits on blank lines, and `BlockDoc::merge` applies wire
+        // text verbatim, so a peer can create a live block whose text contains a
+        // blank line. `materialize()` then re-parses into MORE blocks than the doc
+        // holds, and those extra base blocks match no live block. The fold must
+        // still place a foreign append after the content it follows, not at the
+        // top of the note — an unresolvable kept block holds the previous anchor
+        // rather than resetting it to the head.
+        let mut doc = BlockDoc::from_markdown(1, "a\n\nb\n");
+        let id_b = doc.block_ids_in_order()[1];
+        doc.merge(BlockOp::SetContent {
+            id: id_b,
+            text: "b1\n\nb2".into(),
+            lamport: 50,
+            author: Author::Human,
+        });
+        let base = doc.materialize();
+        assert_eq!(base, "a\n\nb1\n\nb2\n");
+        // 2 live blocks, but the baseline re-parses into 3 — the misalignment.
+        assert_eq!(doc.block_ids_in_order().len(), 2);
+        assert_eq!(crate::block::parse_blocks(&base).len(), 3);
+
+        doc.fold_foreign(&base, "a\n\nb1\n\nb2\n\nX\n");
+        let out = doc.materialize();
+        // The floor: nothing is lost.
+        for kept in ["a", "b1", "b2", "X"] {
+            assert!(out.contains(kept), "{kept} lost: {out:?}");
+        }
+        // The fix: the append does not jump ahead of "a".
+        assert!(
+            out.find('X') > out.find('a'),
+            "foreign append teleported to the head: {out:?}"
+        );
     }
 
     fn sorted(mut v: Vec<String>) -> Vec<String> {
