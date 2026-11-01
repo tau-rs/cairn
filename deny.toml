@@ -14,7 +14,15 @@ yanked = "deny"
 unmaintained = "workspace"
 # Add specific RUSTSEC-IDs or `{ crate = "...", reason = "..." }` entries
 # here only with an explicit accept rationale.
-ignore = []
+ignore = [
+    # zstd 0.13 / zstd-safe 7.x are pinned by tantivy-sstable 0.7 (tantivy 0.26);
+    # the patched lines (zstd >=0.14.3, zstd-safe >=8.2.0) need a tantivy
+    # release that moves to them. Tracked in #229, #230, #231 — drop each entry
+    # once tantivy bumps zstd and the advisory stops matching.
+    { id = "RUSTSEC-2026-0391", reason = "zstd 0.14 blocked on tantivy-sstable; see #229" },
+    { id = "RUSTSEC-2026-0398", reason = "zstd-safe 8 blocked on tantivy-sstable; see #230" },
+    { id = "RUSTSEC-2026-0403", reason = "zstd-safe 8 blocked on tantivy-sstable; see #231" },
+]
 
 [licenses]
 version = 2
