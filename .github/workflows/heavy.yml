@@ -4,6 +4,11 @@ name: heavy
 # Runs on v* tag pushes (the "heavy lifting on feature release") and on
 # manual workflow_dispatch (which exercises every job EXCEPT publishing a
 # release). The fast PR gate lives in ci.yml and is untouched by this file.
+#
+# ONE release train (monorepo spec D11): the same v* tag also builds the
+# desktop app under apps/web-ui and ships its bundles + web SBOM in the same
+# GitHub Release. The tag must equal the desktop app's version
+# (tag-matches-desktop-version), so bump tauri.conf.json in the release PR.
 on:
   push:
     tags: ['v*']
@@ -191,7 +196,11 @@ jobs:
         # --all = full transitive dependency tree (not just top-level).
         # cargo-cyclonedx 0.5.x writes a <crate>.cdx.json next to every
         # package Cargo.toml in the workspace.
-        run: cargo cyclonedx --all --format json
+        run: |
+          cargo cyclonedx --all --format json
+          # The Tauri shell is its own workspace (excluded from the engine's);
+          # cover it too so the release SBOM set is complete.
+          cargo cyclonedx --all --format json --manifest-path apps/web-ui/src-tauri/Cargo.toml
       - name: Aggregate SBOMs into one artifact dir
         shell: bash
         run: |
@@ -208,6 +217,119 @@ jobs:
         with:
           name: sbom-${{ github.sha }}
           path: sbom/
+          if-no-files-found: error
+          retention-days: 90
+
+  tag-matches-desktop-version:
+    # One release train: refuse to publish a v* tag whose version differs from
+    # apps/web-ui/src-tauri/tauri.conf.json. Tag-only; dispatch runs skip it.
+    name: tag-matches-desktop-version
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - env:
+          REF_NAME: ${{ github.ref_name }}
+        run: bash .github/scripts/check-desktop-version.sh "$REF_NAME"
+
+  tauri-bundle:
+    # Cross-OS build + bundle (+ sign) of the desktop app (apps/web-ui).
+    # Signing is wired but inert until the app adds the updater plugin and the
+    # TAURI_SIGNING_* secrets exist (see apps/web-ui/docs/ci.md).
+    name: tauri-bundle / ${{ matrix.os == 'ubuntu-latest' && 'linux' || matrix.os == 'macos-latest' && 'macos' || 'windows' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install WebKitGTK + bundler deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev build-essential cmake
+      - uses: ./.github/actions/setup-rust
+        with:
+          shared-key: tauri-${{ matrix.os }}
+      - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
+        with:
+          version: 10.14.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/web-ui/web/pnpm-lock.yaml
+      - name: Build frontend (produces web/dist embedded by the Rust shell)
+        run: |
+          pnpm --dir apps/web-ui/web install --frozen-lockfile
+          pnpm --dir apps/web-ui/web build
+      - name: Build + bundle (+ sign) the Tauri app
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # action-v0.6.2
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          # Frontend is pre-built above; tauri.ci.conf.json nulls
+          # beforeBuildCommand so tauri build does not re-run it.
+          projectPath: apps/web-ui/src-tauri
+          args: --config tauri.ci.conf.json
+      - name: Upload installers + updater archives + signatures
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tauri-bundle-${{ matrix.os }}
+          # Only the distributables, never the bundle staging trees.
+          path: |
+            target/release/bundle/**/*.deb
+            target/release/bundle/**/*.rpm
+            target/release/bundle/**/*.AppImage
+            target/release/bundle/**/*.dmg
+            target/release/bundle/**/*.msi
+            target/release/bundle/**/*.exe
+            target/release/bundle/**/*.AppImage.tar.gz
+            target/release/bundle/**/*.app.tar.gz
+            target/release/bundle/**/*.nsis.zip
+            target/release/bundle/**/*.msi.zip
+            target/release/bundle/**/*.sig
+          if-no-files-found: error
+          retention-days: 7
+
+  web-sbom:
+    # CycloneDX SBOM for the web app's pnpm graph; the cargo side of
+    # apps/web-ui is covered by the `sbom` job above.
+    name: web-sbom (cyclonedx pnpm)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
+        with:
+          version: 10.14.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/web-ui/web/pnpm-lock.yaml
+      - name: Install web deps (for an accurate dependency graph)
+        run: pnpm --dir apps/web-ui/web install --frozen-lockfile
+      - name: Generate CycloneDX SBOM (pnpm / web)
+        working-directory: apps/web-ui/web
+        env:
+          FETCH_LICENSE: "false"
+        run: npx -y @cyclonedx/cdxgen@11 -t pnpm -o sbom-web.cdx.json .
+      - name: Verify the SBOM is valid CycloneDX
+        working-directory: apps/web-ui/web
+        run: |
+          node -e "const b=require('./sbom-web.cdx.json'); if(b.bomFormat!=='CycloneDX'){console.error('::error::not CycloneDX');process.exit(1)} console.log(b.bomFormat,b.specVersion,(b.components||[]).length,'components')"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom-web-${{ github.sha }}
+          path: apps/web-ui/web/sbom-web.cdx.json
           if-no-files-found: error
           retention-days: 90
 
@@ -270,7 +392,7 @@ jobs:
     # on workflow_dispatch (no tag) so manual runs never publish.
     name: release-publish
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [os-matrix, msrv, feature-powerset, sbom, release-build]
+    needs: [os-matrix, msrv, feature-powerset, sbom, release-build, tag-matches-desktop-version, tauri-bundle, web-sbom]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -288,7 +410,12 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
         run: |
           mkdir -p release
-          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec cp {} release/ \;
+          # Engine binaries (dist-*): tarballs/zips. Desktop bundles
+          # (tauri-bundle-*): every distributable the bundle job uploaded.
+          find artifacts -path 'artifacts/dist-*' -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec cp {} release/ \;
+          find artifacts -path 'artifacts/tauri-bundle-*' -type f -exec cp {} release/ \;
+          # Web SBOM ships alongside the engine SBOM archive.
+          find artifacts -path 'artifacts/sbom-web-*' -type f -name '*.cdx.json' -exec cp {} release/ \;
           # Bundle the SBOM set into a single archive for the release.
           if [ -d "$SBOM_DIR" ]; then
             tar -C "$SBOM_DIR" -czf "release/cairn-sbom-${REF_NAME}.tar.gz" .
