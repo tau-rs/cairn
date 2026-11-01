@@ -1,0 +1,316 @@
+name: Heavy (release)
+
+# T2 HEAVY tier (canonical model, Diagram 2 of audit/devops.md).
+#
+# Triggered on a v* tag push (a feature release) and on demand. Folds the
+# release-time heavy lifting into ONE self-contained file (B-pillar: no
+# workflow_call indirection): cross-OS Tauri build + bundle + sign, CycloneDX
+# SBOMs for BOTH the pnpm and cargo stacks, 3-browser e2e, Stryker mutation,
+# and coverage. On a v* tag it publishes the bundles + SBOMs to a GitHub
+# Release; a workflow_dispatch run has NO tag, so the release job is skipped —
+# dispatch is therefore an inherent no-publish dry run.
+#
+# This tier is NEVER a PR/merge gate. nightly.yml and mutation-weekly.yml keep
+# their schedules as T3 drift-catchers; a red HEAVY run is a signal, not a gate.
+#
+# --- OIDC / secrets posture (G14) -------------------------------------------
+# * GitHub Release publish uses the ephemeral, job-scoped GITHUB_TOKEN — no
+#   long-lived secret, no OIDC wiring needed.
+# * The ONLY long-lived secrets are the Tauri updater signing key
+#   (TAURI_SIGNING_PRIVATE_KEY) and its password. Tauri's minisign signing has
+#   no OIDC/keyless path today, so a stored secret is currently unavoidable.
+#   Migration path: keyless signing (cosign / Sigstore — phase-2, G15) or an
+#   OIDC-federated KMS signer once available. No cloud-registry auth exists
+#   yet, so no other OIDC (id-token: write) wiring is added here.
+# All actions are pinned by commit SHA (consistent with session 91).
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: {}
+
+concurrency:
+  group: heavy-${{ github.ref }}
+  cancel-in-progress: false
+
+# Least-privilege default; only the tag-gated release job is granted write.
+permissions:
+  contents: read
+
+jobs:
+  build-bundle:
+    name: build-bundle (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Install WebKitGTK + bundler deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev build-essential cmake
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: src-tauri
+      - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
+        with:
+          version: 10.14.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Build frontend (produces web/dist embedded by the Rust shell)
+        run: |
+          pnpm --dir web install --frozen-lockfile
+          pnpm --dir web build
+      - name: Build + bundle (+ sign) the Tauri app
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # action-v0.6.2
+        env:
+          # Signing key plumbing — REFERENCED from secrets, never embedded.
+          # tauri signs the UPDATER artifacts (.sig) when this key is set AND
+          # the app configures the updater. This app has no `plugins.updater`
+          # yet, so no updater artifact is emitted and signing is currently a
+          # no-op (wired but inert). Once the app adds `tauri-plugin-updater` +
+          # a `plugins.updater.pubkey` (a deferred app-side follow-up), signing
+          # activates with zero CI change. See docs/ci.md "Signing & OIDC".
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          # Frontend is pre-built above; the CI config patch nulls
+          # beforeBuildCommand so tauri build does not re-run it.
+          projectPath: src-tauri
+          args: --config tauri.ci.conf.json
+      - name: Upload installers + updater archives + signatures
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tauri-bundle-${{ matrix.os }}
+          # ONLY the distributables — the installers, the updater archives, and
+          # their signatures. Deliberately NOT `**/*.tar.gz` (that catches the
+          # .deb's internal control.tar.gz/data.tar.gz) nor the AppImage/.app
+          # staging trees (thousands of intermediate .so/icon files). The
+          # updater archives/.sig only appear once the app wires the updater.
+          path: |
+            src-tauri/target/release/bundle/**/*.deb
+            src-tauri/target/release/bundle/**/*.rpm
+            src-tauri/target/release/bundle/**/*.AppImage
+            src-tauri/target/release/bundle/**/*.dmg
+            src-tauri/target/release/bundle/**/*.msi
+            src-tauri/target/release/bundle/**/*.exe
+            src-tauri/target/release/bundle/**/*.AppImage.tar.gz
+            src-tauri/target/release/bundle/**/*.app.tar.gz
+            src-tauri/target/release/bundle/**/*.nsis.zip
+            src-tauri/target/release/bundle/**/*.msi.zip
+            src-tauri/target/release/bundle/**/*.sig
+          if-no-files-found: error
+          retention-days: 7
+
+  sbom:
+    name: sbom (cyclonedx npm + cargo)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
+        with:
+          version: 10.14.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Install web deps (for an accurate dependency graph)
+        run: pnpm --dir web install --frozen-lockfile
+      - name: Generate CycloneDX SBOM (pnpm / web)
+        working-directory: web
+        env:
+          FETCH_LICENSE: "false"
+        run: npx -y @cyclonedx/cdxgen@11 -t pnpm -o sbom-web.cdx.json .
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          tool: cargo-cyclonedx
+      - name: Generate CycloneDX SBOM (cargo / src-tauri)
+        # cargo-cyclonedx writes <name>.json next to the manifest; normalise the
+        # extension to .cdx.json so both SBOMs share one naming convention.
+        run: |
+          cargo cyclonedx \
+            --manifest-path src-tauri/Cargo.toml \
+            --format json \
+            --override-filename sbom-cargo
+          mv src-tauri/sbom-cargo.json src-tauri/sbom-cargo.cdx.json
+      - name: Verify both SBOMs are valid CycloneDX
+        run: |
+          for f in web/sbom-web.cdx.json src-tauri/sbom-cargo.cdx.json; do
+            test -f "$f" || { echo "::error::missing SBOM $f"; exit 1; }
+            node -e "const b=require('./$f'); if(b.bomFormat!=='CycloneDX'){console.error('::error::$f is not CycloneDX');process.exit(1)} console.log('$f ->',b.bomFormat,b.specVersion,(b.components||[]).length,'components')"
+          done
+      - name: Upload SBOMs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom
+          path: |
+            web/sbom-web.cdx.json
+            src-tauri/sbom-cargo.cdx.json
+          if-no-files-found: error
+          retention-days: 7
+
+  e2e:
+    name: e2e (${{ matrix.browser }})
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
+        with:
+          version: 10.14.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps ${{ matrix.browser }}
+      - run: pnpm exec playwright test --browser=${{ matrix.browser }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: playwright-report-${{ matrix.browser }}
+          path: |
+            web/playwright-report/
+            web/test-results/
+          retention-days: 7
+
+  mutation:
+    name: mutation (stryker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
+        with:
+          version: 10.14.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - name: Run Stryker
+        run: pnpm exec stryker run
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: mutation-report
+          path: web/reports/mutation/
+          retention-days: 14
+
+  coverage:
+    name: coverage (vitest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
+        with:
+          version: 10.14.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - name: Run vitest with coverage
+        run: pnpm test:coverage
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: coverage-lcov
+          path: web/coverage/lcov.info
+          retention-days: 14
+
+  release:
+    name: release (GitHub Release)
+    # Tag-only: a workflow_dispatch run has no v* tag, so this is skipped and
+    # nothing is published — the dispatch path is an inherent dry run.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-bundle, sbom]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # The ONLY job granted write — it creates the GitHub Release.
+    permissions:
+      contents: write
+    steps:
+      - name: Download bundle + SBOM artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          # Only the release inputs — NOT coverage-lcov / mutation-report.
+          pattern: "{tauri-bundle-*,sbom}"
+      - name: List collected artifacts
+        run: find dist -type f | sort
+      - name: Publish GitHub Release (draft) with installers + signatures + SBOMs
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          draft: true
+          name: ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          fail_on_unmatched_files: true
+          files: |
+            dist/tauri-bundle-*/**/*
+            dist/sbom/**/*
+
+  heavy-summary:
+    name: heavy-summary
+    # Non-gating aggregator: a red HEAVY tier is a SIGNAL, never a merge gate,
+    # so this surfaces a warning and always succeeds (cf. nightly-summary which
+    # fails on purpose — this tier must not be requireable).
+    if: always()
+    needs: [build-bundle, sbom, e2e, mutation, coverage]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Summarise (signal, not gate)
+        run: |
+          results='${{ join(needs.*.result, ' ') }}'
+          {
+            echo "## Heavy (release) results"
+            echo ""
+            echo "Job results: $results"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for r in $results; do
+            case "$r" in
+              success|skipped) ;;
+              *) echo "::warning::a heavy job did not succeed ($r) — investigate, but this tier is non-gating" ;;
+            esac
+          done

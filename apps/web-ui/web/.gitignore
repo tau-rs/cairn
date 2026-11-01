@@ -1,0 +1,24 @@
+# build output
+dist/
+*.tsbuildinfo
+
+# vite composite build artifacts
+vite.config.d.ts
+vite.config.js
+
+# deps
+node_modules/
+
+# local env
+.env
+.env.local
+
+# playwright
+test-results/
+playwright-report/
+
+# coverage
+coverage/
+
+.stryker-tmp
+reports

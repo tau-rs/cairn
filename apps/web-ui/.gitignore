@@ -1,0 +1,21 @@
+# Node / web
+node_modules/
+dist/
+*.tsbuildinfo
+.vite/
+test-results/
+playwright-report/
+# pnpm repo — keep stray npm/yarn lockfiles out
+package-lock.json
+yarn.lock
+
+# Rust (gateway crate, if/when added)
+target/
+
+# Brainstorming companion
+.superpowers/
+
+# Env / local
+.env
+.env.local
+.DS_Store
