@@ -57,8 +57,19 @@ locked-check:
 
 # The same set the CI fast tier (ci.yml) runs, so "passes `just ci`" ⇒ "passes CI".
 
+# The committed ts-rs bindings are what apps/web-ui compiles against (no vendored
+# copy), so a stale commit of crates/cairn-contract/bindings/ is the one remaining
+# way the UI could drift from the engine. `cargo test -p cairn-contract` regenerates
+# them; any resulting diff (or a new untracked file) fails the gate.
+
+# Committed ts-rs bindings must match the Rust source — mirrors the `bindings-current` CI job.
+bindings-check:
+    cargo test -p cairn-contract
+    git diff --exit-code -- crates/cairn-contract/bindings
+    test -z "$(git status --porcelain -- crates/cairn-contract/bindings)"
+
 # Full local gate — everything a PR must pass.
-ci: fmt lint test doc-test deny locked-check
+ci: fmt lint test doc-test deny locked-check bindings-check
 
 # Auto-fix: apply rustfmt + machine-applicable clippy suggestions in place.
 fix:
