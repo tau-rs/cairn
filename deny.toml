@@ -14,7 +14,22 @@ yanked = "deny"
 unmaintained = "workspace"
 # Add specific RUSTSEC-IDs or `{ crate = "...", reason = "..." }` entries
 # here only with an explicit accept rationale.
-ignore = []
+ignore = [
+    # zstd 0.13 / zstd-safe 7.x are pinned by tantivy-sstable 0.7 (tantivy 0.26);
+    # the patched lines (zstd >=0.14.3, zstd-safe >=8.2.0) need a tantivy
+    # release that moves to them. Tracked in #229, #230, #231 — drop each entry
+    # once tantivy bumps zstd and the advisory stops matching.
+    { id = "RUSTSEC-2026-0391", reason = "zstd 0.14 blocked on tantivy-sstable; see #229" },
+    { id = "RUSTSEC-2026-0398", reason = "zstd-safe 8 blocked on tantivy-sstable; see #230" },
+    { id = "RUSTSEC-2026-0403", reason = "zstd-safe 8 blocked on tantivy-sstable; see #231" },
+    # zip 7.x is pinned by candle-core 0.9 (the `neural` feature); zip >=9 needs
+    # the candle 0.11 line, which Dependabot holds back until candle stops
+    # requiring nightly (see .github/dependabot.yml). cairn never calls the
+    # affected extract() paths itself. Tracked in #225, #226, #227.
+    { id = "RUSTSEC-2026-0367", reason = "zip 9 blocked on candle 0.11 (nightly-only); see #226" },
+    { id = "RUSTSEC-2026-0368", reason = "zip 9 blocked on candle 0.11 (nightly-only); see #227" },
+    { id = "RUSTSEC-2026-0369", reason = "zip 9 blocked on candle 0.11 (nightly-only); see #225" },
+]
 
 [licenses]
 version = 2
