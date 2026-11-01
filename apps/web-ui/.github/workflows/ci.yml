@@ -1,0 +1,205 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  merge_group:
+    types: [checks_requested]
+
+# Cancel superseded runs on the same ref EXCEPT on main, mirroring the
+# engine repo's policy (keeps the main-branch run that warms the
+# setup-node/pnpm cache from being cancelled mid-write).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    # Detect which stack a PR touches so single-stack PRs skip the other
+    # stack and keep the gate under budget. paths-filter runs ONLY on
+    # pull_request: it has no reliable diff base on push, and historically
+    # errors on merge_group (dorny/paths-filter#280). For push/merge_group
+    # the decide step forces BOTH stacks on, so the merge queue always runs
+    # the full gate. This job ALWAYS runs and succeeds, so it never breaks
+    # the merge queue — and a real failure here (e.g. checkout) surfaces as
+    # a `changes` failure that ci-summary catches, never a silent green skip.
+    name: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      web: ${{ steps.decide.outputs.web }}
+      rust: ${{ steps.decide.outputs.rust }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3.0.3
+        id: filter
+        if: github.event_name == 'pull_request'
+        with:
+          filters: |
+            web:
+              - 'web/**'
+              - 'scripts/**'
+              - '.github/workflows/ci.yml'
+              - 'justfile'
+            rust:
+              - 'src-tauri/**'
+              - '.github/workflows/ci.yml'
+              - 'justfile'
+              - 'deny.toml'
+      - id: decide
+        # On pull_request use the filter result; on push/merge_group force
+        # both stacks on (full gate). Never depends on skipped-needs
+        # semantics — this job always runs.
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "web=${{ steps.filter.outputs.web }}" >> "$GITHUB_OUTPUT"
+            echo "rust=${{ steps.filter.outputs.rust }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "web=true" >> "$GITHUB_OUTPUT"
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  web:
+    name: web
+    needs: changes
+    if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.web == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          tool: just
+      - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
+        with:
+          version: 10.14.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      # Single source of truth: `just web-ci` reproduces the web gate verbatim
+      # (lint, format:check, typecheck, test, build). See justfile / docs/ci.md.
+      - run: just web-ci
+        working-directory: ${{ github.workspace }}
+      # Supply-chain audit (pnpm) on the gate; --audit-level=high keeps it from
+      # flapping on low/moderate advisories. Routed through `just web-deny`.
+      - run: just web-deny
+        working-directory: ${{ github.workspace }}
+
+  contract-drift:
+    # DX3: the TS contract under web/src/contract is vendored from the engine by
+    # scripts/sync-contract.sh. Re-sync against the commit pinned in source.ts and
+    # fail on any diff, so a hand-edit / partial sync is caught at PR time instead
+    # of silently at runtime (which S5's validator would surface only on use).
+    name: contract-drift
+    needs: changes
+    if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.web == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
+        with:
+          version: 10.14.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      # prettier (invoked by sync-contract.sh to match the committed form) comes
+      # from the web workspace dev deps.
+      - run: pnpm install --frozen-lockfile
+        working-directory: web
+      - run: bash scripts/check-contract-drift.sh
+
+  e2e:
+    name: e2e
+    needs: changes
+    if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.web == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
+        with:
+          version: 10.14.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm e2e
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: playwright-report
+          path: |
+            web/playwright-report/
+            web/test-results/
+          retention-days: 7
+
+  tauri:
+    name: tauri
+    needs: changes
+    if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Install WebKitGTK + build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev build-essential cmake
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable channel
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: src-tauri
+      - uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          tool: just,cargo-deny
+      # Single source of truth: `just rust-ci` reproduces the tauri gate
+      # (cargo fmt --check, clippy -D warnings, test --locked, build --locked).
+      # See justfile / docs/ci.md.
+      - run: just rust-ci
+      # Supply-chain audit (cargo-deny advisories/licenses/bans/sources).
+      - run: just rust-deny
+
+  ci-summary:
+    # Single aggregated status for branch protection: require this one
+    # check. It is green only when every real job succeeded (or skipped).
+    name: ci-summary
+    if: always()
+    needs: [changes, web, contract-drift, e2e, tauri]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require all jobs to have succeeded
+        run: |
+          results='${{ join(needs.*.result, ' ') }}'
+          echo "job results: $results"
+          for r in $results; do
+            case "$r" in
+              success|skipped) ;;
+              *) echo "::error::a required CI job did not succeed ($r)"; exit 1 ;;
+            esac
+          done

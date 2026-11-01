@@ -1,0 +1,24 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests",
+    ":semanticCommits",
+    ":semanticCommitScope(deps)"
+  ],
+  "timezone": "Europe/Paris",
+  "schedule": ["before 06:00 on monday"],
+  "labels": ["dependencies"],
+  "enabledManagers": ["github-actions"],
+  "github-actions": {
+    "pinDigests": true
+  },
+  "packageRules": [
+    {
+      "description": "Group all GitHub Actions digest bumps into one PR.",
+      "matchManagers": ["github-actions"],
+      "groupName": "github-actions digests",
+      "commitMessagePrefix": "ci:"
+    }
+  ]
+}

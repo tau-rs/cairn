@@ -1,0 +1,371 @@
+/* --- UI-3 document look --- */
+.cm-doc-livepreview .cm-content {
+  max-width: 34em;
+  margin: 0 auto;
+}
+.cm-doc-source .cm-content {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  max-width: none;
+}
+.cm-doc-livepreview .cm-line {
+  padding-top: 0.15em;
+  padding-bottom: 0.15em;
+}
+
+.cm-lp-h1 {
+  font-size: 1.6em;
+  font-weight: 700;
+}
+.cm-lp-h2 {
+  font-size: 1.4em;
+  font-weight: 700;
+}
+.cm-lp-h3 {
+  font-size: 1.2em;
+  font-weight: 600;
+}
+.cm-lp-h4 {
+  font-size: 1.1em;
+  font-weight: 600;
+}
+.cm-lp-h5 {
+  font-size: 1em;
+  font-weight: 600;
+}
+.cm-lp-h6 {
+  font-size: 0.9em;
+  font-weight: 600;
+  color: #6b6c77;
+}
+.cm-lp-strong {
+  font-weight: 700;
+}
+.cm-lp-em {
+  font-style: italic;
+}
+.cm-lp-strike {
+  text-decoration: line-through;
+}
+.cm-lp-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: #1d1d23;
+  border-radius: 3px;
+  padding: 0 3px;
+}
+.cm-lp-link {
+  color: #6366f1;
+}
+.cm-lp-wikilink.resolved {
+  color: #6366f1;
+  cursor: pointer;
+}
+.cm-lp-wikilink.resolved:hover {
+  text-decoration: underline;
+}
+.cm-lp-wikilink.unresolved {
+  color: #9a9ba6;
+  text-decoration: underline dotted;
+}
+.cm-lp-li {
+  padding-left: 1.4em;
+}
+.cm-lp-bullet {
+  color: #6b6c77;
+  display: inline-block;
+  width: 1.2em;
+  margin-left: -1.2em;
+  text-align: center;
+}
+.cm-lp-quote {
+  border-left: 3px solid #2f2f3a;
+  padding-left: 12px;
+  color: #9a9ba6;
+}
+.cm-lp-hr {
+  border-top: 1px solid #26262e;
+  margin: 0.4em 0;
+}
+.cm-lp-codeblock {
+  background: #16161c;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.88em;
+}
+.cm-doc-livepreview .cm-line.cm-lp-codeblock {
+  padding-left: 13px;
+  padding-right: 13px;
+}
+.cm-lp-task {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 1.5px solid #6b6c77;
+  border-radius: 3px;
+  vertical-align: -2px;
+  margin-right: 8px;
+  cursor: pointer;
+}
+.cm-lp-task.checked {
+  background: #6366f1;
+  border-color: #6366f1;
+}
+.cm-lp-img {
+  max-width: 100%;
+  vertical-align: middle;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.cm-lp-img.block {
+  display: block;
+  margin: 0.6em 0;
+}
+/* An image whose asset failed to load (U5). The browser paints the `alt`
+   inside the broken <img>; this turns it into a clearly-bounded "unavailable"
+   placeholder instead of a bare broken-image glyph. */
+.cm-lp-img-error {
+  min-width: 8em;
+  min-height: 2.5em;
+  padding: 0.25em 0.5em;
+  border: 1px dashed #3a3a45;
+  border-radius: 6px;
+  color: #9a9ba6;
+  font-size: 0.85em;
+  object-fit: contain;
+}
+.cm-lp-img-blocked {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5em;
+  padding: 0.25em 0.5em;
+  border: 1px dashed #3a3a45;
+  border-radius: 6px;
+  color: #9a9ba6;
+  font-size: 0.85em;
+  cursor: pointer;
+  vertical-align: middle;
+}
+.cm-lp-img-blocked.block {
+  display: flex;
+  margin: 0.6em 0;
+}
+.cm-lp-img-blocked-load {
+  border: 1px solid #3a3a45;
+  border-radius: 4px;
+  padding: 0 0.5em;
+  background: transparent;
+  color: #c7c8d1;
+  cursor: pointer;
+  font: inherit;
+}
+.cm-lp-img-blocked-load:hover {
+  background: #1d1d23;
+  color: #f1f1f4;
+}
+.cm-lp-table {
+  border-collapse: separate;
+  border-spacing: 0;
+  margin: 0.5em 0;
+  font-size: 0.92em;
+  border: 1px solid #2c2c36;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.cm-lp-table th,
+.cm-lp-table td {
+  border-right: 1px solid #26262e;
+  border-bottom: 1px solid #26262e;
+  padding: 6px 12px;
+  text-align: left;
+}
+.cm-lp-table th:last-child,
+.cm-lp-table td:last-child {
+  border-right: none;
+}
+.cm-lp-table tr:last-child td {
+  border-bottom: none;
+}
+.cm-lp-table th {
+  background: #16161c;
+  font-weight: 600;
+  color: #c9cad6;
+}
+.cm-lp-table tbody tr:hover td {
+  background: #1f1f29;
+}
+
+/* edit mode: the table sits inside a padded wrapper that hosts grips (top/left)
+ * and the edge "+" add buttons (right/bottom). */
+.cm-lp-table-edit {
+  position: relative;
+  display: inline-block;
+  padding: 18px;
+}
+.cm-lp-table.editing th,
+.cm-lp-table.editing td {
+  min-width: 48px;
+  outline: none;
+}
+.cm-lp-table.editing th:focus,
+.cm-lp-table.editing td:focus {
+  outline: 2px solid #6366f1;
+  outline-offset: -2px;
+  background: #1a1a26;
+  color: #f1f1f4;
+}
+
+/* row / column grips — JS sets the cross-axis offset (left+width for columns,
+ * top+height for rows) so each grip aligns with its row/column. */
+.cm-lp-row-grip,
+.cm-lp-col-grip {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: #26262e;
+  border: 1px solid #34343f;
+  border-radius: 4px;
+  color: #7d7e8c;
+  font-size: 9px;
+  line-height: 1;
+  cursor: grab;
+  opacity: 0;
+  transition:
+    opacity 0.12s,
+    background 0.12s,
+    color 0.12s;
+}
+.cm-lp-col-grip {
+  top: 3px;
+  height: 12px;
+}
+.cm-lp-row-grip {
+  left: 3px;
+  width: 12px;
+}
+.cm-lp-table-edit:hover .cm-lp-row-grip,
+.cm-lp-table-edit:hover .cm-lp-col-grip {
+  opacity: 1;
+}
+.cm-lp-row-grip:hover,
+.cm-lp-col-grip:hover {
+  background: #6366f1;
+  border-color: #6366f1;
+  color: #fff;
+}
+@media (pointer: coarse) {
+  .cm-lp-row-grip,
+  .cm-lp-col-grip {
+    opacity: 1;
+  }
+}
+
+/* edge "+" add buttons */
+.cm-lp-add-col,
+.cm-lp-add-row {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed #6366f188;
+  background: #6366f120;
+  color: #818cf8;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.cm-lp-table-edit:hover .cm-lp-add-col,
+.cm-lp-table-edit:hover .cm-lp-add-row {
+  opacity: 1;
+}
+.cm-lp-add-col {
+  top: 18px;
+  right: 2px;
+  bottom: 18px;
+  width: 15px;
+}
+.cm-lp-add-row {
+  left: 18px;
+  right: 18px;
+  bottom: 2px;
+  height: 15px;
+}
+
+/* action menu (popover) + bottom sheet */
+.cm-lp-table-menu {
+  position: absolute;
+  background: #23232c;
+  border: 1px solid #3a3a48;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px #000a;
+  padding: 5px;
+  min-width: 168px;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+}
+.cm-lp-table-menu-item {
+  text-align: left;
+  background: none;
+  border: none;
+  color: #d6d7e0;
+  padding: 6px 9px;
+  border-radius: 5px;
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.cm-lp-table-menu-item:hover {
+  background: #6366f1;
+  color: #fff;
+}
+.cm-lp-table-menu-item.danger {
+  color: #f4a3a3;
+}
+.cm-lp-table-menu-item.danger:hover {
+  background: #b4434333;
+  color: #f4a3a3;
+}
+.cm-lp-table-sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: #1c1c23;
+  border-top: 3px solid #6366f1;
+  border-radius: 14px 14px 0 0;
+  box-shadow: 0 -8px 30px #000a;
+  padding: 12px 10px calc(12px + env(safe-area-inset-bottom));
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.cm-lp-table-sheet .cm-lp-table-menu-item {
+  padding: 13px 14px;
+  font-size: 14px;
+}
+.cm-lp-frontmatter {
+  background: #16161c;
+  border-left: 1px solid #26262e;
+  border-right: 1px solid #26262e;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85em;
+  color: #9a9ba6;
+}
+.cm-doc-livepreview .cm-line.cm-lp-frontmatter {
+  padding-left: 13px;
+  padding-right: 13px;
+}
+.cm-lp-frontmatter-first {
+  border-top: 1px solid #26262e;
+  border-top-left-radius: 6px;
+  border-top-right-radius: 6px;
+}
+.cm-lp-frontmatter-last {
+  border-bottom: 1px solid #26262e;
+  border-bottom-left-radius: 6px;
+  border-bottom-right-radius: 6px;
+}

@@ -1,0 +1,25 @@
+@import "tailwindcss";
+/* Keep the existing JS theme/plugins (Tailwind v4 loads a v3-style config). */
+@config "../tailwind.config.ts";
+
+@layer base {
+  body {
+    @apply bg-bg text-text font-sans;
+  }
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+/* Stop iOS Safari from auto-zooming when focusing an input on small screens. */
+@media (max-width: 767px) {
+  input,
+  textarea,
+  select {
+    font-size: 16px;
+  }
+}

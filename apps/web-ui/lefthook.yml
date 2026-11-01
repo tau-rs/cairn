@@ -1,0 +1,20 @@
+# lefthook.yml — fast pre-commit gate.
+#
+# Runs the SAME `just` verbs CI runs, so a commit that passes here is already
+# green on the fast checks CI enforces. Fast verbs ONLY — fmt, lint, and unit
+# tests for both stacks. Heavy work (e2e, mutation, OS matrix, native bundle)
+# stays out of git hooks; it belongs to the scheduled / release CI tiers.
+#
+# One-time setup per clone:  lefthook install   (see README "Local development")
+
+pre-commit:
+  parallel: false
+  commands:
+    fmt:
+      run: just fmt
+      # Re-stage anything prettier/cargo-fmt rewrote so the commit is formatted.
+      stage_fixed: true
+    lint:
+      run: just lint
+    test:
+      run: just test
