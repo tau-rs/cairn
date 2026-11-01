@@ -10,6 +10,10 @@ Runs on every push to `main`, every PR, and `merge_group`. Jobs:
 - **web** — `just web-ci`: ESLint, Prettier check, `tsc --noEmit`, Vitest, `vite build`.
 - **e2e** — Playwright (Chromium), report artifact on failure.
 - **tauri** — `just rust-ci`: `cargo fmt --check`, `clippy -D warnings`, `cargo test` (Linux).
+- **contract** — nothing to check: the web app imports the engine's committed
+  ts-rs bindings through the `@cairn-contract` alias, and the engine's
+  `bindings-current` job keeps `crates/cairn-contract/bindings/` in step with
+  the Rust source. Drift is impossible by construction.
 - **ci-summary** — aggregates the above; green only when every job
   succeeded or skipped. **This is the single check to require on `main`.**
 

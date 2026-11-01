@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
-import type { PluginWidget } from "../../contract/PluginWidget";
+import type { PluginWidget } from "@cairn-contract/PluginWidget";
 import { WidgetView } from "./WidgetView";
 
 const invokePlugin = vi.fn();

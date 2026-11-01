@@ -18,7 +18,7 @@ import {
   type PluginSummary,
   type PluginWidget,
 } from "../contract";
-import type { JsonValue } from "../contract/serde_json/JsonValue";
+import type { JsonValue } from "@cairn-contract/serde_json/JsonValue";
 import {
   MAX_ENTRY,
   MAX_IFRAME_HEIGHT,

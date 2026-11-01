@@ -2,7 +2,7 @@
 // keeps it unit-testable against a fake host (hexagonal boundary).
 import type { StoreApi } from "zustand";
 import type { CairnState } from "../store/store";
-import type { JsonValue } from "../contract/serde_json/JsonValue";
+import type { JsonValue } from "@cairn-contract/serde_json/JsonValue";
 import type { CairnClient } from "./types";
 
 export interface BrokerHost {

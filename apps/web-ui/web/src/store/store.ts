@@ -10,7 +10,7 @@ import type {
   SuggestionScope,
 } from "../contract";
 import type { PluginSummary } from "../contract";
-import type { JsonValue } from "../contract/serde_json/JsonValue";
+import type { JsonValue } from "@cairn-contract/serde_json/JsonValue";
 import {
   groupBySlot,
   type SlotEntry,

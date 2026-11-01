@@ -1,5 +1,5 @@
 import type { PluginSummary } from "../../contract";
-import type { JsonValue } from "../../contract/serde_json/JsonValue";
+import type { JsonValue } from "@cairn-contract/serde_json/JsonValue";
 import type { PaletteCommand } from "../command-palette/CommandPalette";
 
 const PREFIX = "plugin:";

@@ -136,6 +136,23 @@ jobs:
           with-just: true
       - run: just locked-check
 
+  bindings-current:
+    # apps/web-ui compiles against the committed ts-rs bindings (no vendored
+    # copy, monorepo spec D5). Regenerate them and fail on any diff so a Rust
+    # contract change can never ship without its TypeScript twin.
+    name: bindings-current
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-rust
+        with:
+          shared-key: linux
+          with-sccache: true
+          with-mold: true
+          with-just: true
+      - run: just bindings-check
+
   changes:
     # Which UI stacks does this run touch? Engine jobs above always run; the
     # web / e2e / tauri jobs below gate on these outputs so a Rust-only PR
@@ -290,7 +307,7 @@ jobs:
     # check. It is green only when every real job succeeded (or skipped).
     name: ci-summary
     if: always()
-    needs: [fmt, clippy, cargo-deny, test, doc-tests, locked-check, neural, changes, web, e2e, tauri]
+    needs: [fmt, clippy, cargo-deny, test, doc-tests, locked-check, neural, bindings-current, changes, web, e2e, tauri]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

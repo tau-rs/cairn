@@ -6,7 +6,7 @@ import {
   useActions,
   useCairn,
 } from "../../app/cairnStore";
-import type { PluginWidget } from "../../contract/PluginWidget";
+import type { PluginWidget } from "@cairn-contract/PluginWidget";
 import { needsConsent } from "../../store/pluginGrantsSlice";
 import type { PluginCapability } from "../../client/pluginTier3";
 import { sanitizeCapabilities } from "../../client/pluginContributions";
