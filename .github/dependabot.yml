@@ -1,6 +1,8 @@
 # Dependabot configuration.
 #
-# Manages dependency updates for GitHub Actions and the Cargo workspace.
+# Manages dependency updates for GitHub Actions, the engine Cargo workspace,
+# the web app (apps/web-ui/web, npm) and the Tauri shell
+# (apps/web-ui/src-tauri, its own Cargo workspace).
 # Each ecosystem opens PRs against `main` on the schedule below; PRs run
 # through the standard CI gate (incl. cargo-deny + the locked MSRV check)
 # before merge.
@@ -69,3 +71,122 @@ updates:
         update-types: ["version-update:semver-major"]
       - dependency-name: "candle-transformers"
         update-types: ["version-update:semver-major"]
+
+  # The npm web app. Weekly to cap PR noise; groups bundle the families
+  # whose packages move in lockstep into one PR each (a single React or
+  # CodeMirror bump fans out across several packages otherwise). Major
+  # bumps outside these families still open one PR each.
+  - package-ecosystem: npm
+    directory: /apps/web-ui/web
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Paris
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "chore(deps)"
+      include: scope
+    labels:
+      - dependencies
+      - javascript
+    groups:
+      # React core + its type packages release together.
+      react:
+        patterns:
+          - "react"
+          - "react-dom"
+          - "@types/react"
+          - "@types/react-dom"
+      # CodeMirror 6 ships as many @codemirror/* + @lezer/* packages that
+      # pin to each other's minors — bump them together or get a broken
+      # editor build.
+      codemirror:
+        patterns:
+          - "@codemirror/*"
+          - "@lezer/*"
+          - "@uiw/react-codemirror"
+      radix:
+        patterns:
+          - "@radix-ui/*"
+      tauri:
+        patterns:
+          - "@tauri-apps/*"
+      # Test + e2e toolchain (vitest, testing-library, playwright, jsdom).
+      testing:
+        patterns:
+          - "vitest"
+          - "@vitest/*"
+          - "@testing-library/*"
+          - "@playwright/test"
+          - "jsdom"
+      # Lint + format toolchain.
+      lint:
+        patterns:
+          - "eslint"
+          - "eslint-*"
+          - "@typescript-eslint/*"
+          - "prettier"
+      # Tailwind + the PostCSS pipeline it drives.
+      tailwind:
+        patterns:
+          - "tailwindcss"
+          - "@tailwindcss/*"
+          - "autoprefixer"
+          - "postcss"
+      # Catch-all so every remaining dev-dependency minor/patch bump lands
+      # in ONE weekly PR instead of one-per-package (each npm PR touches
+      # pnpm-lock.yaml, so N separate PRs serialize on lockfile conflicts).
+      # This group is auto-merged by dependabot-automerge.yml. Named groups
+      # above take precedence; majors fall out to their own PRs (reviewable).
+      dev-minor:
+        dependency-type: development
+        update-types:
+          - minor
+          - patch
+        patterns:
+          - "*"
+      # Remaining production-dependency minor/patch bumps in one PR. NOT
+      # auto-merged — production surface stays manually reviewed.
+      prod-minor:
+        dependency-type: production
+        update-types:
+          - minor
+          - patch
+        patterns:
+          - "*"
+
+  # The Tauri shell (apps/web-ui/src-tauri, its own Cargo workspace).
+  # cairn-* crates are path deps and never bumped here; this covers tauri,
+  # its plugins, serde, and log. Group the tauri crates so the framework +
+  # its plugins move together.
+  - package-ecosystem: cargo
+    directory: /apps/web-ui/src-tauri
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Paris
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+      include: scope
+    labels:
+      - dependencies
+      - rust
+    groups:
+      tauri:
+        patterns:
+          - "tauri"
+          - "tauri-*"
+      serde:
+        patterns:
+          - "serde*"
+      # Bundle remaining crate minor/patch bumps into one PR. NOT
+      # auto-merged — these are the app's Rust production deps (manual).
+      crates-minor:
+        update-types:
+          - minor
+          - patch
+        patterns:
+          - "*"
