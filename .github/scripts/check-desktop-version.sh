@@ -7,6 +7,17 @@ set -euo pipefail
 ref="$1"
 conf="${2:-apps/web-ui/src-tauri/tauri.conf.json}"
 ver="$(jq -r .version "$conf")"
+# Tauri's Windows (MSI) bundler accepts only a numeric pre-release identifier
+# (v0.2.0-1 ok, v0.2.0-rc1 not); refuse the latter here rather than 40 minutes
+# into tauri-bundle/windows.
+case "$ver" in
+  *-*)
+    pre="${ver#*-}"
+    if ! [[ "$pre" =~ ^[0-9]+$ ]]; then
+      echo "::error::desktop version $ver has a non-numeric pre-release identifier '$pre'; Tauri's MSI bundler requires e.g. 0.2.0-1"
+      exit 1
+    fi ;;
+esac
 if [ "$ref" != "v$ver" ]; then
   echo "::error::tag $ref != desktop version v$ver ($conf) — bump tauri.conf.json in the release PR"
   exit 1

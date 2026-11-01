@@ -60,10 +60,13 @@ locked-check:
 # The committed ts-rs bindings are what apps/web-ui compiles against (no vendored
 # copy), so a stale commit of crates/cairn-contract/bindings/ is the one remaining
 # way the UI could drift from the engine. `cargo test -p cairn-contract` regenerates
-# them; any resulting diff (or a new untracked file) fails the gate.
+# them; any resulting diff, new untracked file, or ghost file left behind by a
+# deleted Rust type (ts-rs only ever writes, so the generated set is wiped first;
+# pluginValues.ts is hand-authored and kept) fails the gate.
 
 # Committed ts-rs bindings must match the Rust source — mirrors the `bindings-current` CI job.
 bindings-check:
+    find crates/cairn-contract/bindings -name '*.ts' ! -name 'pluginValues.ts' -delete
     cargo test -p cairn-contract
     git diff --exit-code -- crates/cairn-contract/bindings
     test -z "$(git status --porcelain -- crates/cairn-contract/bindings)"

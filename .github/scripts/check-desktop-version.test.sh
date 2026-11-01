@@ -14,4 +14,10 @@ case_ matching-tag  v0.2.0  0
 case_ other-version v0.3.0  1
 case_ missing-v     0.2.0   1
 case_ prerelease    v0.2.0-rc1 1
+# Tauri's MSI bundler only accepts a numeric pre-release identifier, so a
+# matching but alphanumeric pre-release must be refused up front.
+printf '{ "version": "0.2.0-1" }\n' > "$CONF"
+case_ numeric-pre    v0.2.0-1   0
+printf '{ "version": "0.2.0-rc1" }\n' > "$CONF"
+case_ alpha-pre      v0.2.0-rc1 1
 exit $fail
