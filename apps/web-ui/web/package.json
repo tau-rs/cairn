@@ -28,7 +28,7 @@
     "@lezer/highlight": "^1.2.3",
     "@radix-ui/react-dialog": "^1.1.23",
     "@radix-ui/react-popover": "^1.1.23",
-    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/api": "^2.12.4",
     "@uiw/react-codemirror": "^4",
     "lucide-react": "^1.30.0",
     "react": "^19.2.8",
