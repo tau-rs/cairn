@@ -11,7 +11,7 @@ import {
   type PluginCapability,
 } from "./pluginTier3";
 import type { BrokerHost } from "./pluginBrokerHost";
-import type { JsonValue } from "../contract/serde_json/JsonValue";
+import type { JsonValue } from "@cairn-contract/serde_json/JsonValue";
 
 export type BrokerOptions = {
   frame: Window;

@@ -1,4 +1,4 @@
-import type { Revision } from "../../contract/Revision";
+import type { Revision } from "@cairn-contract/Revision";
 
 /** Two seals within this gap belong to the same editing session (spec: the
  *  browser tames the flat auto-stream by grouping, not deletion). */

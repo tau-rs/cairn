@@ -1,4 +1,4 @@
-import type { Revision } from "../contract/Revision";
+import type { Revision } from "@cairn-contract/Revision";
 import { relativeTime } from "./history/formatRevision";
 import { versionWordDelta } from "./history/versionSummary";
 

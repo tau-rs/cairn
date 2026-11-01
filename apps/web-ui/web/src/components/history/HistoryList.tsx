@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { Revision } from "../../contract/Revision";
+import type { Revision } from "@cairn-contract/Revision";
 import { groupRevisions } from "./groupRevisions";
 import { versionWordDelta } from "./versionSummary";
 import { relativeTime, absoluteTime } from "./formatRevision";

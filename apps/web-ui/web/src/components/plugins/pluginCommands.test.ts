@@ -5,7 +5,7 @@ import {
   pluginCommandArgs,
 } from "./pluginCommands";
 import type { PluginSummary, PluginContribution } from "../../contract";
-import type { JsonValue } from "../../contract/serde_json/JsonValue";
+import type { JsonValue } from "@cairn-contract/serde_json/JsonValue";
 
 const demo: PluginSummary = {
   id: "demo",

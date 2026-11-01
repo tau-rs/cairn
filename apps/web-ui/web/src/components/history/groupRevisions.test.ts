@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { groupRevisions, dayLabel, SESSION_GAP_SECS } from "./groupRevisions";
-import type { Revision } from "../../contract/Revision";
+import type { Revision } from "@cairn-contract/Revision";
 
 // Fixed "now": 2026-08-21 12:00 local — tests build timestamps relative to it.
 const NOW = new Date(2026, 7, 21, 12, 0, 0).getTime() / 1000;

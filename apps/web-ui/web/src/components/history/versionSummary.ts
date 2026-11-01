@@ -1,4 +1,4 @@
-import type { Revision } from "../../contract/Revision";
+import type { Revision } from "@cairn-contract/Revision";
 
 // Fallback for revisions the engine committed without a `summary`: parse the
 // deterministic label template, which elides zero sides —
