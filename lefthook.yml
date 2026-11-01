@@ -29,6 +29,14 @@ pre-commit:
       # the host repo; isolate nextest's own output via the forwarded
       # --target-dir (`just test` passes extra args straight to nextest).
       run: bash -c 'unset CARGO_TARGET_DIR GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_NAMESPACE && env CARGO_INCREMENTAL=0 just test --target-dir target/lefthook/test'
+    web:
+      # apps/web-ui web stack: prettier --write, eslint + tsc, vitest — the
+      # same fast verbs the `web` CI job runs, via the UI's own justfile.
+      # One command (not three) so fmt never races lint under parallel: true.
+      # Rust-only commits skip it (glob); web-only commits skip the cargo ones.
+      glob: "apps/web-ui/web/**"
+      run: just -f apps/web-ui/justfile web-fmt && just -f apps/web-ui/justfile web-lint && just -f apps/web-ui/justfile web-test
+      stage_fixed: true
 
 pre-push:
   parallel: true
