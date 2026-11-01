@@ -24,12 +24,12 @@ log = "0.4"
 tauri = { version = "2.11.2", features = ["protocol-asset"] }
 tauri-plugin-log = "2"
 tauri-plugin-dialog = "2"
-cairn-domain   = { git = "https://github.com/tau-rs/cairn", rev = "9490ec44602bdd4a1c179863777a7023ee0765eb" }
-cairn-app      = { git = "https://github.com/tau-rs/cairn", rev = "9490ec44602bdd4a1c179863777a7023ee0765eb" }
-cairn-infra    = { git = "https://github.com/tau-rs/cairn", rev = "9490ec44602bdd4a1c179863777a7023ee0765eb" }
-cairn-contract = { git = "https://github.com/tau-rs/cairn", rev = "9490ec44602bdd4a1c179863777a7023ee0765eb" }
-cairn-service  = { git = "https://github.com/tau-rs/cairn", rev = "9490ec44602bdd4a1c179863777a7023ee0765eb" }
-cairn-ports    = { git = "https://github.com/tau-rs/cairn", rev = "9490ec44602bdd4a1c179863777a7023ee0765eb" }
+cairn-domain   = { path = "../../../crates/cairn-domain" }
+cairn-app      = { path = "../../../crates/cairn-app" }
+cairn-infra    = { path = "../../../crates/cairn-infra" }
+cairn-contract = { path = "../../../crates/cairn-contract" }
+cairn-service  = { path = "../../../crates/cairn-service" }
+cairn-ports    = { path = "../../../crates/cairn-ports" }
 
 [dev-dependencies]
 tempfile = "3"

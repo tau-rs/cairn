@@ -22,6 +22,12 @@ unmaintained = "workspace"
 # the fix must land upstream first, then flow here via a version bump. Re-check
 # and drop each id once its upstream gate clears.
 ignore = [
+    # zstd 0.13 / zstd-safe 7.x are pinned by tantivy-sstable 0.7 (via the
+    # engine's tantivy 0.26); mirrors the root deny.toml. Drop each entry once
+    # tantivy bumps zstd. Tracked in tau-rs/cairn #229, #230, #231.
+    { id = "RUSTSEC-2026-0391", reason = "zstd 0.14 blocked on tantivy-sstable; see #229" },
+    { id = "RUSTSEC-2026-0398", reason = "zstd-safe 8 blocked on tantivy-sstable; see #230" },
+    { id = "RUSTSEC-2026-0403", reason = "zstd-safe 8 blocked on tantivy-sstable; see #231" },
     # glib <0.20 unsoundness in VariantStrIter Iterator impls (RUSTSEC-2024-0429).
     # Pinned by gtk 0.18.2 -> tauri 2.11.2; Linux-only (gtk-rs GTK3 stack, not in
     # the macOS build tree). Clears when Tauri moves to the gtk-rs 0.20 ecosystem.
@@ -68,5 +74,5 @@ wildcards = "allow"
 
 [sources]
 unknown-registry = "deny"
-# cairn-* workspace deps are git-pinned by rev; allow git sources.
-unknown-git = "allow"
+# All cairn-* deps are path deps inside the monorepo; no git sources remain.
+unknown-git = "deny"

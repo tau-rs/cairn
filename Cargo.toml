@@ -16,7 +16,7 @@ members = [
     "crates/cairn-plugin-example",
     "crates/cairn-sandbox-win",
 ]
-exclude = ["fuzz"]
+exclude = ["fuzz", "apps/web-ui/src-tauri"]
 
 [workspace.package]
 edition = "2021"
