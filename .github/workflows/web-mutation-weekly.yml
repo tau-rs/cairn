@@ -1,8 +1,8 @@
-name: Mutation (weekly)
+name: web-mutation-weekly
 
-# Stryker mutation testing — measures test-suite STRENGTH (does it catch
+# apps/web-ui: Stryker mutation testing — measures test-suite STRENGTH (does it catch
 # injected faults?), not just coverage. Heavy, so it runs weekly and is
-# non-gating: the analog of tau's mutants-scheduled.
+# non-gating: the web analog of mutants-scheduled.yml (engine).
 
 on:
   schedule:
@@ -10,7 +10,7 @@ on:
   workflow_dispatch: {}
 
 concurrency:
-  group: mutation-weekly
+  group: web-mutation-weekly
   cancel-in-progress: false
 
 permissions:
@@ -23,9 +23,9 @@ jobs:
     timeout-minutes: 60
     defaults:
       run:
-        working-directory: web
+        working-directory: apps/web-ui/web
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
         with:
           version: 10.14.0
@@ -33,7 +33,7 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          cache-dependency-path: web/pnpm-lock.yaml
+          cache-dependency-path: apps/web-ui/web/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - name: Run Stryker
         run: pnpm exec stryker run
@@ -46,5 +46,5 @@ jobs:
         if: always()
         with:
           name: mutation-report
-          path: web/reports/mutation/
+          path: apps/web-ui/web/reports/mutation/
           retention-days: 14

@@ -1,6 +1,6 @@
-name: Nightly
+name: web-nightly
 
-# Comprehensive checks kept OFF the per-PR critical path so feature PRs
+# apps/web-ui (web + Tauri shell). Comprehensive checks kept OFF the per-PR critical path so feature PRs
 # stay fast. Runs nightly + on demand. Nothing here is a required check;
 # a red nightly is a signal, never a merge gate.
 
@@ -10,7 +10,7 @@ on:
   workflow_dispatch: {}
 
 concurrency:
-  group: nightly
+  group: web-nightly
   cancel-in-progress: false
 
 permissions:
@@ -26,17 +26,16 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install WebKitGTK + build deps (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
             libayatana-appindicator3-dev librsvg2-dev build-essential cmake
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable channel
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: ./.github/actions/setup-rust
         with:
-          workspaces: src-tauri
+          shared-key: tauri-${{ matrix.os }}
       - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
         with:
           version: 10.14.0
@@ -44,14 +43,16 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          cache-dependency-path: web/pnpm-lock.yaml
+          cache-dependency-path: apps/web-ui/web/pnpm-lock.yaml
       - name: Build frontend (produces web/dist embedded by the Rust shell)
-        working-directory: web
+        working-directory: apps/web-ui/web
         run: |
           pnpm install --frozen-lockfile
           pnpm build
       - name: Compile the Tauri shell
-        run: cargo build --manifest-path src-tauri/Cargo.toml
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: cargo build --manifest-path apps/web-ui/src-tauri/Cargo.toml
 
   e2e-full-browser:
     name: e2e (${{ matrix.browser }})
@@ -63,9 +64,9 @@ jobs:
     timeout-minutes: 30
     defaults:
       run:
-        working-directory: web
+        working-directory: apps/web-ui/web
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
         with:
           version: 10.14.0
@@ -73,7 +74,7 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          cache-dependency-path: web/pnpm-lock.yaml
+          cache-dependency-path: apps/web-ui/web/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright install --with-deps ${{ matrix.browser }}
       - run: pnpm exec playwright test --browser=${{ matrix.browser }}
@@ -82,8 +83,8 @@ jobs:
         with:
           name: playwright-report-${{ matrix.browser }}
           path: |
-            web/playwright-report/
-            web/test-results/
+            apps/web-ui/web/playwright-report/
+            apps/web-ui/web/test-results/
           retention-days: 7
 
   audit:
@@ -91,7 +92,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
         with:
           version: 10.14.0
@@ -99,16 +100,18 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          cache-dependency-path: web/pnpm-lock.yaml
+          cache-dependency-path: apps/web-ui/web/pnpm-lock.yaml
       - name: pnpm audit (web)
-        working-directory: web
+        working-directory: apps/web-ui/web
         run: pnpm audit --audit-level=high
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable channel
-      - uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+      - uses: ./.github/actions/setup-rust
+        with:
+          shared-key: linux
+      - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
         with:
           tool: cargo-audit
       - name: cargo audit (src-tauri)
-        run: cargo audit --file src-tauri/Cargo.lock
+        run: cargo audit --file apps/web-ui/src-tauri/Cargo.lock
 
   nightly-summary:
     name: nightly-summary
@@ -120,9 +123,11 @@ jobs:
       - name: Aggregate results
         run: |
           results='${{ join(needs.*.result, ' ') }}'
-          echo "## Nightly results" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Job results: $results" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Nightly results (web)"
+            echo ""
+            echo "Job results: $results"
+          } >> "$GITHUB_STEP_SUMMARY"
           for r in $results; do
             case "$r" in
               success|skipped) ;;

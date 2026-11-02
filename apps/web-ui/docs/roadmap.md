@@ -1,7 +1,7 @@
 # Cairn Web UI — Roadmap
 
-**Date:** 2026-06-01 · **Last status refresh:** 2026-08-10
-**Status:** living document — see [Live status](#live-status--2026-08-10) for the
+**Date:** 2026-06-01 · **Last status refresh:** 2026-08-27
+**Status:** living document — see [Live status](#live-status--2026-08-27) for the
 current board; the phase narrative below is kept as design history.
 
 This is the decomposition and ordering plan for `tau-rs/cairn-web-ui`, the
@@ -81,10 +81,19 @@ Implementations:
 **Critical path:** 0 → 1 → 2. Phases 3–8 fan out from the skeleton and can
 reorder freely.
 
-## Live status — 2026-08-10
+## Live status — 2026-08-27
 
-Engine `tau-rs/cairn` @ `main` #163 · UI `tau-rs/cairn-web-ui` @ `main` #137
-(pins engine `ed037d9`). Combined `Lane | Deps | Status | Unblocks` board.
+Reconciled against live repo state (merged PRs + open issues), not carried
+forward from the previous snapshot.
+Engine `tau-rs/cairn` @ `main` #184 (`c147547`) · UI `tau-rs/cairn-web-ui` @
+`main` #166 (`b2d68e8`).
+
+**Two engine pins, and they disagree** — `web/src/contract/source.ts` is at
+`ad97b05` (engine #179, C0), while all six `cairn-*` revs in
+`src-tauri/Cargo.toml` are still `96a4ac5` (engine #168). Tracked as issue #172;
+see the Tauri re-pin lane below. Nothing currently enforces that these two agree.
+
+Combined `Lane | Deps | Status | Unblocks` board.
 Legend: ⬜ blocked · 🟡 ready · 🔵 in progress · 🟣 in review · ✅ done.
 
 **Engine (`tau-rs/cairn`)**
@@ -95,6 +104,7 @@ Legend: ⬜ blocked · 🟡 ready · 🔵 in progress · 🟣 in review · ✅ d
 | B — Graph visualization (temporal contract + standalone viz) | — | ✅ | folded into UI-4 |
 | C — Plugin trust & reach (capability vocab, net/agent cap enforcement, integration test) | — | ✅ | — |
 | C· #40 plugin-trust hardening follow-ups | C ✅ | 🟡 open | — |
+| D — Engine-owned auto-commit + versioning (C0 contract, diff summaries, message generator, `cairn/*` tags, idle/backstop sealing, `auto_commit` on) | — | ✅ engine #179 (`ad97b05`) | UI Phase 8 versions |
 | E — Maintenance | — | ✅ dependabot backlog cleared 2026-08-10 (6 PRs enqueued, dirs-major #124 closed); RUSTSEC #131/#100 were already closed 2026-07-24 | — |
 
 **UI (`tau-rs/cairn-web-ui`)**
@@ -103,12 +113,16 @@ Legend: ⬜ blocked · 🟡 ready · 🔵 in progress · 🟣 in review · ✅ d
 |---|---|---|---|
 | Phases 0–6 (scaffold → Tauri transport → editor → graph → shell polish → plugin host) | — | ✅ | — |
 | pin-resync: bump engine `8abc0ef` → `ed037d9` (`main` #163; pull recovery/restore/collab DTOs) | engine A ✅ | ✅ done | UI-8 |
-| Phase 8 — Live-collab + recovery UI | pin-resync ✅ | 🔵 in progress | — |
+| Phase 8 — Live-collab + recovery UI | pin-resync ✅ | ✅ recovery #146/#149; live-collab presence #153/#156/#157/#158; presence + Versions #159; C0 reconcile #160 | — |
+| Tauri re-pin to C0 — `src-tauri` still links engine `96a4ac5`, which cannot produce `Revision.summary`/`.name`, `Command::name_version` or `CommandResponse::nothing_to_commit` | engine D ✅ | 🔵 in progress — issue #172, branch `repin-tauri-engine-c0` | desktop Versions |
 | Phase 7 — Tau actions | tau firms up (external) | ⬜ gated | — |
 | Phase 3 polish — `[[wikilink]]` autocomplete, frontmatter rendering | — | ✅ #50 | — |
-| Maintenance (8 dependabot PRs) | — | 🟡 ongoing | — |
+| Maintenance — dependency flywheel | — | 🟡 ongoing; was **deadlocked** 08-24→08-27 (five green PRs never merged, three independent causes) — fixed in #166 + #171 | — |
 
-**The only real dependency edge left is pin-resync → Phase 8.** Everything else
+**The Versions feature is done on the daemon transport and NOT on Tauri** until
+#172 lands: the TypeScript types promise C0 shapes the desktop-linked engine
+never sends, so named milestones and word deltas degrade silently there. That is
+the one real dependency edge left. Everything else
 is independent or done. There is no multi-wave DAG here, which is *why* this
 board is a plain status doc and not a self-perpetuating rolling-handoffs pipeline
 (status board + handoff protocol + auto-emitting handoff template): that

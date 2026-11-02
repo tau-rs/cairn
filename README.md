@@ -17,6 +17,13 @@ subprocess. The web UI, daemon-supervised tau sidecar, dataflow pipelines, and
 CRDT collaboration remain future sub-projects, each present today as a proven
 seam.
 
+The web and desktop UI lives in [`apps/web-ui/`](apps/web-ui/): a Vite/React
+app plus a Tauri shell that links the engine in-process (by path, from
+`crates/`) or talks to the daemon over the network. It reads the generated
+TypeScript contract straight from `crates/cairn-contract/bindings/`, so the UI
+and the engine are always the same commit. `just -f apps/web-ui/justfile` lists
+its verbs; see [ADR 0015](docs/decisions/0015-monorepo-web-ui.md).
+
 ## License
 
 Dual-licensed under **MIT OR Apache-2.0** — see
